@@ -68,6 +68,7 @@
 #include "ippair-timeout.h"
 
 #include "output-flow.h"
+#include "util-validate.h"
 
 /* Run mode selected at suricata.c */
 extern int run_mode;
@@ -331,7 +332,7 @@ static uint32_t ProcessAsideQueue(FlowManagerTimeoutThread *td, FlowTimeoutCount
                 f->flow_state != FLOW_STATE_LOCAL_BYPASSED &&
                 FlowForceReassemblyNeedReassembly(f) == 1)
         {
-            FlowForceReassemblyForFlow(f); // TODO error check?
+            FlowForceReassemblyForFlow(f);
             /* flow ownership is passed to the worker thread */
 
             /* flow remains locked */
@@ -425,7 +426,7 @@ static void FlowManagerHashRowClearEvictedList(FlowManagerTimeoutThread *td,
         f->next = NULL;
         f->fb = NULL;
 
-        BUG_ON(f->use_cnt > 0 || !FlowBypassedTimeout(f, ts, counters));
+        DEBUG_VALIDATE_BUG_ON(f->use_cnt > 0 || !FlowBypassedTimeout(f, ts, counters));
 
         FlowQueuePrivateAppendFlow(&td->aside_queue, f);
         /* flow is still locked in the queue */
@@ -533,6 +534,7 @@ static uint32_t FlowTimeoutHash(FlowManagerTimeoutThread *td,
         cnt += ProcessAsideQueue(td, counters);
     }
     counters->flows_removed += cnt;
+    /* coverity[missing_unlock : FALSE] */
     return cnt;
 }
 
@@ -724,7 +726,7 @@ static TmEcode FlowManagerThreadInit(ThreadVars *t, const void *initdata, void *
         ftd->max = flow_config.hash_size;
     } else {
         ftd->min = (range * ftd->instance) + 1;
-        ftd->max = (range * ftd->instance);
+        ftd->max = (range * (ftd->instance + 1));
     }
     BUG_ON(ftd->min > flow_config.hash_size || ftd->max > flow_config.hash_size);
 
@@ -802,8 +804,8 @@ static TmEcode FlowManager(ThreadVars *th_v, void *thread_data)
             return TM_ECODE_OK;
     }
 
-    SCLogNotice("FM %s/%d starting. min_timeout %us. Full hash pass in %us",
-            th_v->name, ftd->instance, min_timeout, pass_in_sec);
+    SCLogDebug("FM %s/%d starting. min_timeout %us. Full hash pass in %us", th_v->name,
+            ftd->instance, min_timeout, pass_in_sec);
 
 #ifdef FM_PROFILE
     struct timeval endts;
@@ -959,7 +961,7 @@ static TmEcode FlowManager(ThreadVars *th_v, void *thread_data)
                 FlowTimeoutsReset();
 
                 emerg = false;
-                prev_emerg = FALSE;
+                prev_emerg = false;
                 emerg_over_cnt = 0;
                 hash_pass_iter = 0;
                 SCLogNotice("Flow emergency mode over, back to normal... unsetting"
@@ -1009,7 +1011,7 @@ static TmEcode FlowManager(ThreadVars *th_v, void *thread_data)
         memset(&sleep_startts, 0, sizeof(sleep_startts));
         gettimeofday(&sleep_startts, NULL);
 #endif
-        usleep(100);
+        usleep(250);
 
 #ifdef FM_PROFILE
         struct timeval sleep_endts;
@@ -1205,7 +1207,7 @@ static TmEcode FlowRecycler(ThreadVars *th_v, void *thread_data)
         memset(&sleep_startts, 0, sizeof(sleep_startts));
         gettimeofday(&sleep_startts, NULL);
 #endif
-        usleep(100);
+        usleep(250);
 #ifdef FM_PROFILE
         struct timeval sleep_endts;
         memset(&sleep_endts, 0, sizeof(sleep_endts));
@@ -1295,8 +1297,12 @@ void FlowDisableFlowRecyclerThread(void)
     int cnt = 0;
 
     /* move all flows still in the hash to the recycler queue */
+#ifndef DEBUG
+    (void)FlowCleanupHash();
+#else
     uint32_t flows = FlowCleanupHash();
-    SCLogNotice("flows to progress: %u", flows);
+    SCLogDebug("flows to progress: %u", flows);
+#endif
 
     /* make sure all flows are processed */
     do {

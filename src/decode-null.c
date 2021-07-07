@@ -1,4 +1,4 @@
-/* Copyright (C) 2015 Open Information Security Foundation
+/* Copyright (C) 2015-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -36,6 +36,7 @@
 #include "decode-raw.h"
 #include "decode-events.h"
 
+#include "util-validate.h"
 #include "util-unittest.h"
 #include "util-debug.h"
 
@@ -48,6 +49,8 @@
 int DecodeNull(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint32_t len)
 {
+    DEBUG_VALIDATE_BUG_ON(pkt == NULL);
+
     StatsIncr(tv, dtv->counter_null);
 
     if (unlikely(len < HDR_SIZE)) {
@@ -58,8 +61,11 @@ int DecodeNull(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     if (unlikely(GET_PKT_LEN(p) > HDR_SIZE + USHRT_MAX)) {
         return TM_ECODE_FAILED;
     }
-
+#if __BYTE_ORDER__ == __BIG_ENDIAN
+    uint32_t type = pkt[0] | pkt[1] << 8 | pkt[2] << 16 | pkt[3] << 24;
+#else
     uint32_t type = *((uint32_t *)pkt);
+#endif
     switch(type) {
         case AF_INET:
             SCLogDebug("IPV4 Packet");

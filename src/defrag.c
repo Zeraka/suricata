@@ -1079,7 +1079,7 @@ DefragInit(void)
     }
 
     DefragSetDefaultTimeout(defrag_context->timeout);
-    DefragInitConfig(FALSE);
+    DefragInitConfig(false);
 }
 
 void DefragDestroy(void)
@@ -2121,6 +2121,7 @@ static int DefragTimeoutTest(void)
 
     FAIL_IF(tracker->id != 99);
 
+    SCMutexUnlock(&tracker->lock);
     SCFree(p);
 
     DefragDestroy();

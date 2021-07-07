@@ -105,7 +105,7 @@ void DecodeIPV6FragHeader(Packet *p, const uint8_t *pkt,
     int frag_morefrags   = (*(pkt + 2) << 8 | *(pkt + 3)) & 0x0001;
 
     p->ip6eh.fh_offset = frag_offset;
-    p->ip6eh.fh_more_frags_set = frag_morefrags ? TRUE : FALSE;
+    p->ip6eh.fh_more_frags_set = frag_morefrags ? true : false;
     p->ip6eh.fh_nh = *pkt;
 
     uint32_t fh_id;
@@ -151,7 +151,6 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     char exthdr_fh_done = 0;
     int hh = 0;
     int rh = 0;
-    int eh = 0;
     int ah = 0;
 
     while(1)
@@ -462,23 +461,8 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
             case IPPROTO_ESP:
             {
                 IPV6_SET_L4PROTO(p,nh);
-                hdrextlen = sizeof(IPV6EspHdr);
-                if (hdrextlen > plen) {
-                    ENGINE_SET_INVALID_EVENT(p, IPV6_TRUNC_EXTHDR);
-                    SCReturn;
-                }
-
-                if (eh) {
-                    ENGINE_SET_EVENT(p, IPV6_EXTHDR_DUPL_EH);
-                    SCReturn;
-                }
-
-                eh = 1;
-
-                nh = IPPROTO_NONE;
-                pkt += hdrextlen;
-                plen -= hdrextlen;
-                break;
+                DecodeESP(tv, dtv, p, pkt, plen);
+                SCReturn;
             }
             case IPPROTO_AH:
             {
@@ -581,6 +565,9 @@ int DecodeIPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *
 {
     StatsIncr(tv, dtv->counter_ipv6);
 
+    if (!PacketIncreaseCheckLayers(p)) {
+        return TM_ECODE_FAILED;
+    }
     /* do the actual decoding */
     int ret = DecodeIPV6Packet (tv, dtv, p, pkt, len);
     if (unlikely(ret < 0)) {

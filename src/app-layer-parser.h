@@ -145,8 +145,7 @@ void AppLayerParserRegisterParserAcceptableDataDirection(uint8_t ipproto,
 void AppLayerParserRegisterOptionFlags(uint8_t ipproto, AppProto alproto,
         uint32_t flags);
 void AppLayerParserRegisterStateFuncs(uint8_t ipproto, AppProto alproto,
-                           void *(*StateAlloc)(void),
-                           void (*StateFree)(void *));
+        void *(*StateAlloc)(void *, AppProto), void (*StateFree)(void *));
 void AppLayerParserRegisterLocalStorageFunc(uint8_t ipproto, AppProto proto,
                                  void *(*LocalStorageAlloc)(void),
                                  void (*LocalStorageFree)(void *));
@@ -171,8 +170,8 @@ void AppLayerParserRegisterGetTx(uint8_t ipproto, AppProto alproto,
                       void *(StateGetTx)(void *alstate, uint64_t tx_id));
 void AppLayerParserRegisterGetTxIterator(uint8_t ipproto, AppProto alproto,
                       AppLayerGetTxIteratorFunc Func);
-void AppLayerParserRegisterGetStateProgressCompletionStatus(AppProto alproto,
-    int (*StateGetStateProgressCompletionStatus)(uint8_t direction));
+void AppLayerParserRegisterStateProgressCompletionStatus(
+        AppProto alproto, const int ts, const int tc);
 void AppLayerParserRegisterGetEventInfo(uint8_t ipproto, AppProto alproto,
     int (*StateGetEventInfo)(const char *event_name, int *event_id,
                              AppLayerEventType *event_type));
@@ -230,12 +229,9 @@ uint64_t AppLayerParserGetTransactionActive(const Flow *f, AppLayerParserState *
 uint8_t AppLayerParserGetFirstDataDir(uint8_t ipproto, AppProto alproto);
 
 int AppLayerParserSupportsFiles(uint8_t ipproto, AppProto alproto);
-int AppLayerParserSupportsTxDetectState(uint8_t ipproto, AppProto alproto);
 int AppLayerParserHasTxDetectState(uint8_t ipproto, AppProto alproto, void *alstate);
 DetectEngineState *AppLayerParserGetTxDetectState(uint8_t ipproto, AppProto alproto, void *tx);
 int AppLayerParserSetTxDetectState(const Flow *f, void *tx, DetectEngineState *s);
-
-bool AppLayerParserSupportsTxDetectFlags(AppProto alproto);
 
 AppLayerTxData *AppLayerParserGetTxData(uint8_t ipproto, AppProto alproto, void *tx);
 void AppLayerParserApplyTxConfig(uint8_t ipproto, AppProto alproto,
@@ -258,6 +254,8 @@ int AppLayerParserIsEnabled(AppProto alproto);
 
 /***** Cleanup *****/
 
+void AppLayerParserStateProtoCleanup(
+        uint8_t protomap, AppProto alproto, void *alstate, AppLayerParserState *pstate);
 void AppLayerParserStateCleanup(const Flow *f, void *alstate, AppLayerParserState *pstate);
 
 void AppLayerParserRegisterProtocolParsers(void);

@@ -15,12 +15,12 @@
  * 02110-1301, USA.
  */
 
-use crate::log::*;
 use crate::smb::smb::*;
 use crate::smb::smb2::*;
 use crate::smb::smb2_records::*;
 use crate::smb::dcerpc::*;
 use crate::smb::events::*;
+#[cfg(feature = "debug")]
 use crate::smb::funcs::*;
 
 #[derive(Debug)]
@@ -29,8 +29,8 @@ pub struct SMBTransactionIoctl {
 }
 
 impl SMBTransactionIoctl {
-    pub fn new(func: u32) -> SMBTransactionIoctl {
-        return SMBTransactionIoctl {
+    pub fn new(func: u32) -> Self {
+        return Self {
             func: func,
         }
     }

@@ -22,15 +22,6 @@
  *
  */
 
-#ifndef HAVE_NSS
-
-static void DetectTlsJa3HashRegisterTests(void)
-{
-    /* Don't register any tests */
-}
-
-#else /* HAVE_NSS */
-
 /**
  * \test Test matching on a simple client hello packet
  */
@@ -82,7 +73,7 @@ static int DetectTlsJa3HashTest01(void)
     p->flowflags |= FLOW_PKT_TOSERVER|FLOW_PKT_ESTABLISHED;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -116,7 +107,7 @@ static int DetectTlsJa3HashTest01(void)
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p);
 
@@ -178,7 +169,7 @@ static int DetectTlsJa3HashTest02(void)
     p->flowflags |= FLOW_PKT_TOSERVER|FLOW_PKT_ESTABLISHED;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -212,7 +203,7 @@ static int DetectTlsJa3HashTest02(void)
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p);
 
@@ -224,5 +215,3 @@ static void DetectTlsJa3HashRegisterTests(void)
     UtRegisterTest("DetectTlsJa3HashTest01", DetectTlsJa3HashTest01);
     UtRegisterTest("DetectTlsJa3HashTest02", DetectTlsJa3HashTest02);
 }
-
-#endif /* HAVE_NSS */

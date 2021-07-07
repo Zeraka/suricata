@@ -47,6 +47,18 @@ static int DetectSslVersionTestParse02(void)
     ssl = DetectSslVersionParse(NULL, "2.5");
     FAIL_IF_NOT_NULL(ssl);
     DetectSslVersionFree(NULL, ssl);
+    ssl = DetectSslVersionParse(NULL, "tls1.0, !");
+    FAIL_IF_NOT_NULL(ssl);
+    DetectSslVersionFree(NULL, ssl);
+    ssl = DetectSslVersionParse(NULL, "tls1.0, !tls1.0");
+    FAIL_IF_NOT_NULL(ssl);
+    DetectSslVersionFree(NULL, ssl);
+    ssl = DetectSslVersionParse(NULL, "tls1.1, tls1.1");
+    FAIL_IF_NOT_NULL(ssl);
+    DetectSslVersionFree(NULL, ssl);
+    ssl = DetectSslVersionParse(NULL, "tls1.1, !tls1.2");
+    FAIL_IF_NOT_NULL(ssl);
+    DetectSslVersionFree(NULL, ssl);
     PASS;
 }
 
@@ -57,10 +69,13 @@ static int DetectSslVersionTestParse02(void)
 static int DetectSslVersionTestParse03(void)
 {
     DetectSslVersionData *ssl = NULL;
-    ssl = DetectSslVersionParse(NULL, "SSlv3,tls1.0, !tls1.2");
+    ssl = DetectSslVersionParse(NULL, "SSlv3 , tls1.0");
     FAIL_IF_NULL(ssl);
     FAIL_IF_NOT(ssl->data[SSLv3].ver == SSL_VERSION_3);
     FAIL_IF_NOT(ssl->data[TLS10].ver == TLS_VERSION_10);
+    DetectSslVersionFree(NULL, ssl);
+    ssl = DetectSslVersionParse(NULL, " !tls1.2");
+    FAIL_IF_NULL(ssl);
     FAIL_IF_NOT(ssl->data[TLS12].ver == TLS_VERSION_12);
     FAIL_IF_NOT(ssl->data[TLS12].flags & DETECT_SSL_VERSION_NEGATED);
     DetectSslVersionFree(NULL, ssl);
@@ -103,7 +118,7 @@ static int DetectSslVersionTestDetect01(void)
     p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -151,7 +166,7 @@ static int DetectSslVersionTestDetect01(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
@@ -192,7 +207,7 @@ static int DetectSslVersionTestDetect02(void)
     p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -236,7 +251,7 @@ static int DetectSslVersionTestDetect02(void)
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePackets(&p, 1);
 

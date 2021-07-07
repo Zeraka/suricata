@@ -20,10 +20,12 @@
 
 #include "detect-engine-state.h" //DetectEngineState
 #include "app-layer-krb5.h" //KRB5State, KRB5Transaction
-#include "app-layer-ikev2.h" //IKEV2State, IKEV2Transaction
+#include "app-layer-ike.h"  //IKEState, IKETransaction
 #include "app-layer-ntp.h" //NTPState, NTPTransaction
 #include "app-layer-snmp.h" //SNMPState, SNMPTransaction
 #include "app-layer-tftp.h" //TFTPState, TFTPTransaction
+
+struct AppLayerParser;
 
 typedef struct SuricataContext_ {
     SCError (*SCLogMessage)(const SCLogLevel, const char *, const unsigned int,
@@ -32,6 +34,7 @@ typedef struct SuricataContext_ {
     void (*AppLayerDecoderEventsSetEventRaw)(AppLayerDecoderEvents **,
             uint8_t);
     void (*AppLayerDecoderEventsFreeEvents)(AppLayerDecoderEvents **);
+    void (*AppLayerParserTriggerRawStreamReassembly)(Flow *, int direction);
 
     int (*FileOpenFileWithId)(FileContainer *, const StreamingBufferConfig *,
         uint32_t track_id, const uint8_t *name, uint16_t name_len,
@@ -46,7 +49,11 @@ typedef struct SuricataContext_ {
     void (*FilePrune)(FileContainer *ffc);
     void (*FileSetTx)(FileContainer *, uint64_t);
 
+    int (*AppLayerRegisterParser)(const struct AppLayerParser *p, AppProto alproto);
+
 } SuricataContext;
+
+extern SuricataContext suricata_context;
 
 typedef struct SuricataFileContext_ {
 
@@ -54,9 +61,6 @@ typedef struct SuricataFileContext_ {
 
 } SuricataFileContext;
 
-struct _Store;
-typedef struct _Store Store;
-
-/** Opaque Rust types. */
+SuricataContext *SCGetContext(void);
 
 #endif /* !__RUST_CONTEXT_H__ */

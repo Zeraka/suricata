@@ -59,6 +59,7 @@ enum PktSrcEnum {
     PKT_SRC_DECODER_VXLAN,
     PKT_SRC_DETECT_RELOAD_FLUSH,
     PKT_SRC_CAPTURE_TIMEOUT,
+    PKT_SRC_DECODER_GENEVE,
 };
 
 #include "source-nflog.h"
@@ -78,6 +79,7 @@ enum PktSrcEnum {
 #include "decode-ethernet.h"
 #include "decode-chdlc.h"
 #include "decode-gre.h"
+#include "decode-geneve.h"
 #include "decode-ppp.h"
 #include "decode-pppoe.h"
 #include "decode-sll.h"
@@ -88,11 +90,14 @@ enum PktSrcEnum {
 #include "decode-tcp.h"
 #include "decode-udp.h"
 #include "decode-sctp.h"
+#include "decode-esp.h"
 #include "decode-raw.h"
 #include "decode-null.h"
 #include "decode-vlan.h"
+#include "decode-vntag.h"
 #include "decode-vxlan.h"
 #include "decode-mpls.h"
+#include "decode-nsh.h"
 
 #include "detect-reference.h"
 
@@ -210,7 +215,6 @@ typedef struct Address_ {
 #define SET_SCTP_DST_PORT(pkt, prt) do {            \
         SET_PORT(SCTP_GET_DST_PORT((pkt)), *(prt)); \
     } while (0)
-
 
 
 #define GET_IPV4_SRC_ADDR_U32(p) ((p)->src.addr_data32[0])
@@ -532,6 +536,8 @@ typedef struct Packet_
 
     SCTPHdr *sctph;
 
+    ESPHdr *esph;
+
     ICMPV4Hdr *icmpv4h;
 
     ICMPV6Hdr *icmpv6h;
@@ -605,6 +611,11 @@ typedef struct Packet_
      */
     struct PktPool_ *pool;
 
+    /* count decoded layers of packet : too many layers
+     * cause issues with performance and stability (stack exhaustion)
+     */
+    uint8_t nb_decoded_layers;
+
 #ifdef PROFILING
     PktProfiling *profile;
 #endif
@@ -653,11 +664,14 @@ typedef struct DecodeThreadVars_
     uint16_t counter_raw;
     uint16_t counter_null;
     uint16_t counter_sctp;
+    uint16_t counter_esp;
     uint16_t counter_ppp;
+    uint16_t counter_geneve;
     uint16_t counter_gre;
     uint16_t counter_vlan;
     uint16_t counter_vlan_qinq;
     uint16_t counter_vxlan;
+    uint16_t counter_vntag;
     uint16_t counter_ieee8021ah;
     uint16_t counter_pppoe;
     uint16_t counter_teredo;
@@ -665,6 +679,7 @@ typedef struct DecodeThreadVars_
     uint16_t counter_ipv4inipv6;
     uint16_t counter_ipv6inipv6;
     uint16_t counter_erspan;
+    uint16_t counter_nsh;
 
     /** frag stats - defrag runs in the context of the decoder. */
     uint16_t counter_defrag_ipv4_fragments;
@@ -753,72 +768,77 @@ void CaptureStatsSetup(ThreadVars *tv, CaptureStats *s);
 /**
  *  \brief Recycle a packet structure for reuse.
  */
-#define PACKET_REINIT(p) do {             \
-        CLEAR_ADDR(&(p)->src);                  \
-        CLEAR_ADDR(&(p)->dst);                  \
-        (p)->sp = 0;                            \
-        (p)->dp = 0;                            \
-        (p)->proto = 0;                         \
-        (p)->recursion_level = 0;               \
-        PACKET_FREE_EXTDATA((p));               \
-        (p)->flags = (p)->flags & PKT_ALLOC;    \
-        (p)->flowflags = 0;                     \
-        (p)->pkt_src = 0;                       \
-        (p)->vlan_id[0] = 0;                    \
-        (p)->vlan_id[1] = 0;                    \
-        (p)->vlan_idx = 0;                      \
-        (p)->ts.tv_sec = 0;                     \
-        (p)->ts.tv_usec = 0;                    \
-        (p)->datalink = 0;                      \
-        (p)->action = 0;                        \
-        if ((p)->pktvar != NULL) {              \
-            PktVarFree((p)->pktvar);            \
-            (p)->pktvar = NULL;                 \
-        }                                       \
-        (p)->ethh = NULL;                       \
-        if ((p)->ip4h != NULL) {                \
-            CLEAR_IPV4_PACKET((p));             \
-        }                                       \
-        if ((p)->ip6h != NULL) {                \
-            CLEAR_IPV6_PACKET((p));             \
-        }                                       \
-        if ((p)->tcph != NULL) {                \
-            CLEAR_TCP_PACKET((p));              \
-        }                                       \
-        if ((p)->udph != NULL) {                \
-            CLEAR_UDP_PACKET((p));              \
-        }                                       \
-        if ((p)->sctph != NULL) {               \
-            CLEAR_SCTP_PACKET((p));             \
-        }                                       \
-        if ((p)->icmpv4h != NULL) {             \
-            CLEAR_ICMPV4_PACKET((p));           \
-        }                                       \
-        if ((p)->icmpv6h != NULL) {             \
-            CLEAR_ICMPV6_PACKET((p));           \
-        }                                       \
-        (p)->ppph = NULL;                       \
-        (p)->pppoesh = NULL;                    \
-        (p)->pppoedh = NULL;                    \
-        (p)->greh = NULL;                       \
-        (p)->payload = NULL;                    \
-        (p)->payload_len = 0;                   \
-        (p)->BypassPacketsFlow = NULL;          \
-        (p)->pktlen = 0;                        \
-        (p)->alerts.cnt = 0;                    \
-        (p)->alerts.drop.action = 0;            \
-        (p)->pcap_cnt = 0;                      \
-        (p)->tunnel_rtv_cnt = 0;                \
-        (p)->tunnel_tpr_cnt = 0;                \
-        (p)->events.cnt = 0;                    \
-        AppLayerDecoderEventsResetEvents((p)->app_layer_events); \
-        (p)->next = NULL;                       \
-        (p)->prev = NULL;                       \
-        (p)->root = NULL;                       \
-        (p)->livedev = NULL;                    \
-        PACKET_RESET_CHECKSUMS((p));            \
-        PACKET_PROFILING_RESET((p));            \
-        p->tenant_id = 0;                       \
+#define PACKET_REINIT(p)                                                                           \
+    do {                                                                                           \
+        CLEAR_ADDR(&(p)->src);                                                                     \
+        CLEAR_ADDR(&(p)->dst);                                                                     \
+        (p)->sp = 0;                                                                               \
+        (p)->dp = 0;                                                                               \
+        (p)->proto = 0;                                                                            \
+        (p)->recursion_level = 0;                                                                  \
+        PACKET_FREE_EXTDATA((p));                                                                  \
+        (p)->flags = (p)->flags & PKT_ALLOC;                                                       \
+        (p)->flowflags = 0;                                                                        \
+        (p)->pkt_src = 0;                                                                          \
+        (p)->vlan_id[0] = 0;                                                                       \
+        (p)->vlan_id[1] = 0;                                                                       \
+        (p)->vlan_idx = 0;                                                                         \
+        (p)->ts.tv_sec = 0;                                                                        \
+        (p)->ts.tv_usec = 0;                                                                       \
+        (p)->datalink = 0;                                                                         \
+        (p)->action = 0;                                                                           \
+        if ((p)->pktvar != NULL) {                                                                 \
+            PktVarFree((p)->pktvar);                                                               \
+            (p)->pktvar = NULL;                                                                    \
+        }                                                                                          \
+        (p)->ethh = NULL;                                                                          \
+        if ((p)->ip4h != NULL) {                                                                   \
+            CLEAR_IPV4_PACKET((p));                                                                \
+        }                                                                                          \
+        if ((p)->ip6h != NULL) {                                                                   \
+            CLEAR_IPV6_PACKET((p));                                                                \
+        }                                                                                          \
+        if ((p)->tcph != NULL) {                                                                   \
+            CLEAR_TCP_PACKET((p));                                                                 \
+        }                                                                                          \
+        if ((p)->udph != NULL) {                                                                   \
+            CLEAR_UDP_PACKET((p));                                                                 \
+        }                                                                                          \
+        if ((p)->sctph != NULL) {                                                                  \
+            CLEAR_SCTP_PACKET((p));                                                                \
+        }                                                                                          \
+        if ((p)->esph != NULL) {                                                                   \
+            CLEAR_ESP_PACKET((p));                                                                 \
+        }                                                                                          \
+        if ((p)->icmpv4h != NULL) {                                                                \
+            CLEAR_ICMPV4_PACKET((p));                                                              \
+        }                                                                                          \
+        if ((p)->icmpv6h != NULL) {                                                                \
+            CLEAR_ICMPV6_PACKET((p));                                                              \
+        }                                                                                          \
+        (p)->ppph = NULL;                                                                          \
+        (p)->pppoesh = NULL;                                                                       \
+        (p)->pppoedh = NULL;                                                                       \
+        (p)->greh = NULL;                                                                          \
+        (p)->payload = NULL;                                                                       \
+        (p)->payload_len = 0;                                                                      \
+        (p)->BypassPacketsFlow = NULL;                                                             \
+        (p)->pktlen = 0;                                                                           \
+        (p)->alerts.cnt = 0;                                                                       \
+        (p)->alerts.drop.action = 0;                                                               \
+        (p)->pcap_cnt = 0;                                                                         \
+        (p)->tunnel_rtv_cnt = 0;                                                                   \
+        (p)->tunnel_tpr_cnt = 0;                                                                   \
+        (p)->events.cnt = 0;                                                                       \
+        AppLayerDecoderEventsResetEvents((p)->app_layer_events);                                   \
+        (p)->next = NULL;                                                                          \
+        (p)->prev = NULL;                                                                          \
+        (p)->root = NULL;                                                                          \
+        (p)->livedev = NULL;                                                                       \
+        PACKET_RESET_CHECKSUMS((p));                                                               \
+        PACKET_PROFILING_RESET((p));                                                               \
+        p->tenant_id = 0;                                                                          \
+        p->nb_decoded_layers = 0;                                                                  \
     } while (0)
 
 #define PACKET_RECYCLE(p) do { \
@@ -903,8 +923,10 @@ enum DecodeTunnelProto {
     DECODE_TUNNEL_VLAN,
     DECODE_TUNNEL_IPV4,
     DECODE_TUNNEL_IPV6,
-    DECODE_TUNNEL_IPV6_TEREDO,  /**< separate protocol for stricter error handling */
+    DECODE_TUNNEL_IPV6_TEREDO, /**< separate protocol for stricter error handling */
     DECODE_TUNNEL_PPP,
+    DECODE_TUNNEL_NSH,
+    DECODE_TUNNEL_UNSET
 };
 
 Packet *PacketTunnelPktSetup(ThreadVars *tv, DecodeThreadVars *dtv, Packet *parent,
@@ -938,7 +960,6 @@ int DecodeSll(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint3
 int DecodePPP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodePPPOESession(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodePPPOEDiscovery(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
-int DecodeTunnel(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t, enum DecodeTunnelProto) WARN_UNUSED;
 int DecodeNull(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeRaw(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeIPV4(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
@@ -948,15 +969,19 @@ int DecodeICMPV6(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, ui
 int DecodeTCP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
 int DecodeUDP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
 int DecodeSCTP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
+int DecodeESP(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint16_t);
 int DecodeGRE(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeVLAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeVNTag(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeIEEE8021ah(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeGeneve(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeVXLAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeMPLS(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeERSPAN(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeERSPANTypeI(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeCHDLC(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 int DecodeTEMPLATE(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
+int DecodeNSH(ThreadVars *, DecodeThreadVars *, Packet *, const uint8_t *, uint32_t);
 
 #ifdef UNITTESTS
 void DecodeIPV6FragHeader(Packet *p, const uint8_t *pkt,
@@ -1144,6 +1169,19 @@ void DecodeUnregisterCounters(void);
 
 #define PKT_SET_SRC(p, src_val) ((p)->pkt_src = src_val)
 
+#define PKT_DEFAULT_MAX_DECODED_LAYERS 16
+extern uint8_t decoder_max_layers;
+
+static inline bool PacketIncreaseCheckLayers(Packet *p)
+{
+    p->nb_decoded_layers++;
+    if (p->nb_decoded_layers >= decoder_max_layers) {
+        ENGINE_SET_INVALID_EVENT(p, GENERIC_TOO_MANY_LAYERS);
+        return false;
+    }
+    return true;
+}
+
 /** \brief return true if *this* packet needs to trigger a verdict.
  *
  *  If we have the root packet, and we have none outstanding,
@@ -1253,6 +1291,12 @@ static inline bool DecodeNetworkLayer(ThreadVars *tv, DecodeThreadVars *dtv,
             } else {
                 DecodeEthernet(tv, dtv, p, data, len);
             }
+            break;
+        case ETHERNET_TYPE_VNTAG:
+            DecodeVNTag(tv, dtv, p, data, len);
+            break;
+        case ETHERNET_TYPE_NSH:
+            DecodeNSH(tv, dtv, p, data, len);
             break;
         default:
             SCLogDebug("unknown ether type: %" PRIx16 "", proto);

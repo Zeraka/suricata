@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2020 Open Information Security Foundation
+/* Copyright (C) 2017-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -34,7 +34,6 @@
 
 #include "app-layer.h"
 #include "app-layer-parser.h"
-#include "app-layer-dcerpc-udp.h"
 #include "app-layer-dcerpc-common.h"
 #include "output-json-dcerpc.h"
 
@@ -46,19 +45,25 @@ static int JsonDCERPCLogger(ThreadVars *tv, void *thread_data,
 {
     OutputJsonThreadCtx *thread = thread_data;
 
-    JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dcerpc", NULL);
+    JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dcerpc", NULL, thread->ctx);
     if (unlikely(jb == NULL)) {
         return TM_ECODE_FAILED;
     }
 
     jb_open_object(jb, "dcerpc");
-    if (!rs_dcerpc_log_json_record(state, tx, jb)) {
-        goto error;
+    if (p->proto == IPPROTO_TCP) {
+        if (!rs_dcerpc_log_json_record_tcp(state, tx, jb)) {
+            goto error;
+        }
+    } else {
+        if (!rs_dcerpc_log_json_record_udp(state, tx, jb)) {
+            goto error;
+        }
     }
     jb_close(jb);
 
     MemBufferReset(thread->buffer);
-    OutputJsonBuilderBuffer(jb, thread->file_ctx, &thread->buffer);
+    OutputJsonBuilderBuffer(jb, thread);
 
     jb_free(jb);
     return TM_ECODE_OK;

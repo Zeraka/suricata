@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -96,20 +96,6 @@ void OutputJsonRegister (void)
     traffic_label_prefix_len = strlen(TRAFFIC_LABEL_PREFIX);
 }
 
-json_t *SCJsonBool(int val)
-{
-    return (val ? json_true() : json_false());
-}
-
-/**
- * Wrap json_decref. This is mainly to expose this function to Rust as its
- * defined in the Jansson header file as an inline function.
- */
-void SCJsonDecref(json_t *json)
-{
-    json_decref(json);
-}
-
 json_t *SCJsonString(const char *val)
 {
     if (val == NULL){
@@ -156,7 +142,6 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const bool stored)
     switch (ff->state) {
         case FILE_STATE_CLOSED:
             JB_SET_STRING(jb, "state", "CLOSED");
-#ifdef HAVE_NSS
             if (ff->flags & FILE_MD5) {
                 size_t x;
                 int i;
@@ -175,7 +160,6 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const bool stored)
                 }
                 jb_set_string(jb, "sha1", str);
             }
-#endif
             break;
         case FILE_STATE_TRUNCATED:
             JB_SET_STRING(jb, "state", "TRUNCATED");
@@ -188,7 +172,6 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const bool stored)
             break;
     }
 
-#ifdef HAVE_NSS
     if (ff->flags & FILE_SHA256) {
         size_t x;
         int i;
@@ -198,7 +181,6 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const bool stored)
         }
         jb_set_string(jb, "sha256", str);
     }
-#endif
 
     if (stored) {
         JB_SET_TRUE(jb, "stored");
@@ -416,7 +398,7 @@ static void EveAddFlowVars(const Flow *f, JsonBuilder *js_root, JsonBuilder **js
     }
 }
 
-static void EveAddMetadata(const Packet *p, const Flow *f, JsonBuilder *js)
+void EveAddMetadata(const Packet *p, const Flow *f, JsonBuilder *js)
 {
     if ((p && p->pktvar) || (f && f->flowvar)) {
         JsonBuilder *js_vars = jb_new_object();
@@ -439,7 +421,7 @@ static void EveAddMetadata(const Packet *p, const Flow *f, JsonBuilder *js)
     }
 }
 
-int CreateJSONEther(JsonBuilder *parent, const Packet *p, const MacSet *ms);
+int CreateJSONEther(JsonBuilder *parent, const Packet *p, const Flow *f);
 
 void EveAddCommonOptions(const OutputJsonCommonSettings *cfg,
         const Packet *p, const Flow *f, JsonBuilder *js)
@@ -448,12 +430,13 @@ void EveAddCommonOptions(const OutputJsonCommonSettings *cfg,
         EveAddMetadata(p, f, js);
     }
     if (cfg->include_ethernet) {
-        MacSet *ms = FlowGetStorageById((Flow*) f, MacSetGetFlowStorageID());
-        if (ms != NULL)
-            CreateJSONEther(js, p, ms);
+        CreateJSONEther(js, p, f);
     }
     if (cfg->include_community_id && f != NULL) {
         CreateEveCommunityFlowId(js, f, cfg->community_id_seed);
+    }
+    if (f != NULL && f->tenant_id > 0) {
+        jb_set_uint(js, "tenant_id", f->tenant_id);
     }
 }
 
@@ -467,7 +450,7 @@ void EveAddCommonOptions(const OutputJsonCommonSettings *cfg,
 void EvePacket(const Packet *p, JsonBuilder *js, unsigned long max_length)
 {
     unsigned long max_len = max_length == 0 ? GET_PKT_LEN(p) : max_length;
-    unsigned long len = 2 * max_len;
+    unsigned long len = BASE64_BUFFER_SIZE(max_len);
     uint8_t encoded_packet[len];
     if (Base64Encode((unsigned char*) GET_PKT_DATA(p), max_len, encoded_packet, &len) == SC_BASE64_OK) {
         jb_set_string(js, "packet", (char *)encoded_packet);
@@ -671,7 +654,7 @@ static bool CalculateCommunityFlowIdv4(const Flow *f,
     ipv4.pad0 = 0;
 
     uint8_t hash[20];
-    if (ComputeSHA1((const uint8_t *)&ipv4, sizeof(ipv4), hash, sizeof(hash)) == 1) {
+    if (SCSha1HashBuffer((const uint8_t *)&ipv4, sizeof(ipv4), hash, sizeof(hash)) == 1) {
         strlcpy((char *)base64buf, "1:", COMMUNITY_ID_BUF_SIZE);
         unsigned long out_len = COMMUNITY_ID_BUF_SIZE - 2;
         if (Base64Encode(hash, sizeof(hash), base64buf+2, &out_len) == SC_BASE64_OK) {
@@ -733,7 +716,7 @@ static bool CalculateCommunityFlowIdv6(const Flow *f,
     ipv6.pad0 = 0;
 
     uint8_t hash[20];
-    if (ComputeSHA1((const uint8_t *)&ipv6, sizeof(ipv6), hash, sizeof(hash)) == 1) {
+    if (SCSha1HashBuffer((const uint8_t *)&ipv6, sizeof(ipv6), hash, sizeof(hash)) == 1) {
         strlcpy((char *)base64buf, "1:", COMMUNITY_ID_BUF_SIZE);
         unsigned long out_len = COMMUNITY_ID_BUF_SIZE - 2;
         if (Base64Encode(hash, sizeof(hash), base64buf+2, &out_len) == SC_BASE64_OK) {
@@ -798,15 +781,23 @@ static int MacSetIterateToJSON(uint8_t *val, MacSetSide side, void *data)
     return 0;
 }
 
-int CreateJSONEther(JsonBuilder *js, const Packet *p, const MacSet *ms)
+int CreateJSONEther(JsonBuilder *js, const Packet *p, const Flow *f)
 {
-    jb_open_object(js, "ether");
     if (unlikely(js == NULL))
         return 0;
+    /* start new EVE sub-object */
+    jb_open_object(js, "ether");
     if (p == NULL) {
+        MacSet *ms = NULL;
+        /* ensure we have a flow */
+        if (unlikely(f == NULL)) {
+            jb_close(js);
+            return 0;
+        }
         /* we are creating an ether object in a flow context, so we need to
            append to arrays */
-        if (MacSetSize(ms) > 0) {
+        ms = FlowGetStorageById((Flow *)f, MacSetGetFlowStorageID());
+        if (ms != NULL && MacSetSize(ms) > 0) {
             JSONMACAddrInfo info;
             info.dst = jb_new_array();
             info.src = jb_new_array();
@@ -815,6 +806,7 @@ int CreateJSONEther(JsonBuilder *js, const Packet *p, const MacSet *ms)
                 /* should not happen, JSONFlowAppendMACAddrs is sane */
                 jb_free(info.dst);
                 jb_free(info.src);
+                jb_close(js);
                 return ret;
             }
             jb_close(info.dst);
@@ -844,7 +836,7 @@ int CreateJSONEther(JsonBuilder *js, const Packet *p, const MacSet *ms)
 }
 
 JsonBuilder *CreateEveHeader(const Packet *p, enum OutputJsonLogDirection dir,
-        const char *event_type, JsonAddrInfo *addr)
+        const char *event_type, JsonAddrInfo *addr, OutputJsonCtx *eve_ctx)
 {
     char timebuf[64];
     const Flow *f = (const Flow *)p->flow;
@@ -917,13 +909,17 @@ JsonBuilder *CreateEveHeader(const Packet *p, enum OutputJsonLogDirection dir,
             break;
     }
 
+    if (eve_ctx != NULL) {
+        EveAddCommonOptions(&eve_ctx->cfg, p, f, js);
+    }
+
     return js;
 }
 
 JsonBuilder *CreateEveHeaderWithTxId(const Packet *p, enum OutputJsonLogDirection dir,
-                                 const char *event_type, JsonAddrInfo *addr, uint64_t tx_id)
+        const char *event_type, JsonAddrInfo *addr, uint64_t tx_id, OutputJsonCtx *eve_ctx)
 {
-    JsonBuilder *js = CreateEveHeader(p, dir, event_type, addr);
+    JsonBuilder *js = CreateEveHeader(p, dir, event_type, addr, eve_ctx);
     if (unlikely(js == NULL))
         return NULL;
 
@@ -975,8 +971,10 @@ int OutputJSONBuffer(json_t *js, LogFileCtx *file_ctx, MemBuffer **buffer)
     return 0;
 }
 
-int OutputJsonBuilderBuffer(JsonBuilder *js, LogFileCtx *file_ctx, MemBuffer **buffer)
+int OutputJsonBuilderBuffer(JsonBuilder *js, OutputJsonThreadCtx *ctx)
 {
+    LogFileCtx *file_ctx = ctx->file_ctx;
+    MemBuffer **buffer = &ctx->buffer;
     if (file_ctx->sensor_name) {
         jb_set_string(js, "host", file_ctx->sensor_name);
     }
@@ -986,6 +984,8 @@ int OutputJsonBuilderBuffer(JsonBuilder *js, LogFileCtx *file_ctx, MemBuffer **b
     }
 
     jb_close(js);
+
+    MemBufferReset(*buffer);
 
     if (file_ctx->prefix) {
         MemBufferWriteRaw((*buffer), file_ctx->prefix, file_ctx->prefix_len);
@@ -1113,20 +1113,19 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
             json_ctx->file_ctx->prefix_len = strlen(prefix);
         }
 
+        /* Threaded file output */
+        const ConfNode *threaded = ConfNodeLookupChild(conf, "threaded");
+        if (threaded && threaded->val && ConfValIsTrue(threaded->val)) {
+            SCLogConfig("Threaded EVE logging configured");
+            json_ctx->file_ctx->threaded = true;
+        } else {
+            json_ctx->file_ctx->threaded = false;
+        }
+
         if (json_ctx->json_out == LOGFILE_TYPE_FILE ||
             json_ctx->json_out == LOGFILE_TYPE_UNIX_DGRAM ||
             json_ctx->json_out == LOGFILE_TYPE_UNIX_STREAM)
         {
-            if (json_ctx->json_out == LOGFILE_TYPE_FILE) {
-                /* Threaded file output */
-                const ConfNode *threaded = ConfNodeLookupChild(conf, "threaded");
-                if (threaded && threaded->val && ConfValIsTrue(threaded->val)) {
-                    SCLogConfig("Enabling threaded eve logging.");
-                    json_ctx->file_ctx->threaded = true;
-                } else {
-                    json_ctx->file_ctx->threaded = false;
-                }
-            }
 
             if (SCConfLogOpenGeneric(conf, json_ctx->file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
                 LogFileFreeCtx(json_ctx->file_ctx);
@@ -1190,20 +1189,39 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
             }
         }
 #endif
+#ifdef HAVE_PLUGINS
         else if (json_ctx->json_out == LOGFILE_TYPE_PLUGIN) {
-            ConfNode *plugin_conf = ConfNodeLookupChild(conf,
-                json_ctx->plugin->name);
-            void *plugin_data = NULL;
-            if (json_ctx->plugin->Open(plugin_conf, &plugin_data) < 0) {
+            if (json_ctx->file_ctx->threaded) {
+                /* Prepare for storing per-thread data */
+                if (!SCLogOpenThreadedFile(NULL, NULL, json_ctx->file_ctx, 1)) {
+                    SCFree(json_ctx);
+                    SCFree(output_ctx);
+                    return result;
+                }
+            }
+
+            void *init_data = NULL;
+            if (json_ctx->plugin->Init(conf, json_ctx->file_ctx->threaded, &init_data) < 0) {
                 LogFileFreeCtx(json_ctx->file_ctx);
                 SCFree(json_ctx);
                 SCFree(output_ctx);
                 return result;
-            } else {
-                json_ctx->file_ctx->plugin = json_ctx->plugin;
-                json_ctx->file_ctx->plugin_data = plugin_data;
             }
+
+            /* Now that initialization completed successfully, if threaded, make sure
+             * that ThreadInit and ThreadDeInit exist
+             */
+            if (json_ctx->file_ctx->threaded) {
+                if (!json_ctx->plugin->ThreadInit || !json_ctx->plugin->ThreadDeinit) {
+                    FatalError(SC_ERR_LOG_OUTPUT, "Output logger must supply ThreadInit and "
+                                                  "ThreadDeinit functions for threaded mode");
+                }
+            }
+
+            json_ctx->file_ctx->plugin.plugin = json_ctx->plugin;
+            json_ctx->file_ctx->plugin.init_data = init_data;
         }
+#endif
 
         const char *sensor_id_s = ConfNodeLookupChildValue(conf, "sensor-id");
         if (sensor_id_s != NULL) {

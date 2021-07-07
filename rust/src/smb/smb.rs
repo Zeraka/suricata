@@ -35,9 +35,9 @@ use std::collections::HashMap;
 use nom;
 
 use crate::core::*;
-use crate::log::*;
 use crate::applayer;
 use crate::applayer::{AppLayerResult, AppLayerTxData};
+use crate::filecontainer::*;
 
 use crate::smb::nbss_records::*;
 use crate::smb::smb1_records::*;
@@ -192,7 +192,7 @@ pub fn ntlmssp_type_string(c: u32) -> String {
     }.to_string()
 }
 
-#[derive(Eq, PartialEq, Debug, Clone)]
+#[derive(Default, Eq, PartialEq, Debug, Clone)]
 pub struct SMBVerCmdStat {
     smb_ver: u8,
     smb1_cmd: u8,
@@ -205,60 +205,40 @@ pub struct SMBVerCmdStat {
 }
 
 impl SMBVerCmdStat {
-    pub fn new() -> SMBVerCmdStat {
-        return SMBVerCmdStat {
-            smb_ver: 0,
-            smb1_cmd: 0,
-            smb2_cmd: 0,
-            status_set: false,
-            status_is_dos_error: false,
-            status_error_class: 0,
-            status: 0,
-        }
+    pub fn new() -> Self {
+        Default::default()
     }
-    pub fn new1(cmd: u8) -> SMBVerCmdStat {
-        return SMBVerCmdStat {
+    pub fn new1(cmd: u8) -> Self {
+        return Self {
             smb_ver: 1,
             smb1_cmd: cmd,
-            smb2_cmd: 0,
-            status_set: false,
-            status_is_dos_error: false,
-            status_error_class: 0,
-            status: 0,
+            ..Default::default()
         }
     }
-    pub fn new1_with_ntstatus(cmd: u8, status: u32) -> SMBVerCmdStat {
-        return SMBVerCmdStat {
+    pub fn new1_with_ntstatus(cmd: u8, status: u32) -> Self {
+        return Self {
             smb_ver: 1,
             smb1_cmd: cmd,
-            smb2_cmd: 0,
             status_set: true,
-            status_is_dos_error: false,
-            status_error_class: 0,
             status: status,
+            ..Default::default()
         }
     }
-    pub fn new2(cmd: u16) -> SMBVerCmdStat {
-        return SMBVerCmdStat {
+    pub fn new2(cmd: u16) -> Self {
+        return Self {
             smb_ver: 2,
-            smb1_cmd: 0,
             smb2_cmd: cmd,
-            status_set: false,
-            status_is_dos_error: false,
-            status_error_class: 0,
-            status: 0,
+            ..Default::default()
         }
     }
 
-    pub fn new2_with_ntstatus(cmd: u16, status: u32) -> SMBVerCmdStat {
-        return SMBVerCmdStat {
+    pub fn new2_with_ntstatus(cmd: u16, status: u32) -> Self {
+        return Self {
             smb_ver: 2,
-            smb1_cmd: 0,
             smb2_cmd: cmd,
             status_set: true,
-            status_is_dos_error: false,
-            status_error_class: 0,
             status: status,
+            ..Default::default()
         }
     }
 
@@ -338,8 +318,8 @@ pub struct SMBFiletime {
 }
 
 impl SMBFiletime {
-    pub fn new(raw: u64) -> SMBFiletime {
-        SMBFiletime {
+    pub fn new(raw: u64) -> Self {
+        Self {
             ts: raw,
         }
     }
@@ -380,9 +360,9 @@ pub struct SMBTransactionSetFilePathInfo {
 
 impl SMBTransactionSetFilePathInfo {
     pub fn new(filename: Vec<u8>, fid: Vec<u8>, subcmd: u16, loi: u16, delete_on_close: bool)
-        -> SMBTransactionSetFilePathInfo
+        -> Self
     {
-        return SMBTransactionSetFilePathInfo {
+        return Self {
             filename: filename, fid: fid,
             subcmd: subcmd,
             loi: loi,
@@ -438,8 +418,8 @@ pub struct SMBTransactionRename {
 }
 
 impl SMBTransactionRename {
-    pub fn new(fuid: Vec<u8>, oldname: Vec<u8>, newname: Vec<u8>) -> SMBTransactionRename {
-        return SMBTransactionRename {
+    pub fn new(fuid: Vec<u8>, oldname: Vec<u8>, newname: Vec<u8>) -> Self {
+        return Self {
             fuid: fuid, oldname: oldname, newname: newname,
         }
     }
@@ -463,7 +443,7 @@ impl SMBState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionCreate {
     pub disposition: u32,
     pub delete_on_close: bool,
@@ -480,23 +460,18 @@ pub struct SMBTransactionCreate {
 }
 
 impl SMBTransactionCreate {
-    pub fn new(filename: Vec<u8>, disp: u32, del: bool, dir: bool) -> SMBTransactionCreate {
-        return SMBTransactionCreate {
+    pub fn new(filename: Vec<u8>, disp: u32, del: bool, dir: bool) -> Self {
+        return Self {
             disposition: disp,
             delete_on_close: del,
             directory: dir,
             filename: filename,
-            guid: Vec::new(),
-            create_ts: 0,
-            last_access_ts: 0,
-            last_write_ts: 0,
-            last_change_ts: 0,
-            size: 0,
+            ..Default::default()
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionNegotiate {
     pub smb_ver: u8,
     pub dialects: Vec<Vec<u8>>,
@@ -508,18 +483,16 @@ pub struct SMBTransactionNegotiate {
 }
 
 impl SMBTransactionNegotiate {
-    pub fn new(smb_ver: u8) -> SMBTransactionNegotiate {
-        return SMBTransactionNegotiate {
+    pub fn new(smb_ver: u8) -> Self {
+        return Self {
             smb_ver: smb_ver,
-            dialects: Vec::new(),
-            dialects2: Vec::new(),
-            client_guid: None,
             server_guid: Vec::with_capacity(16),
+            ..Default::default()
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionTreeConnect {
     pub is_pipe: bool,
     pub share_type: u8,
@@ -532,14 +505,10 @@ pub struct SMBTransactionTreeConnect {
 }
 
 impl SMBTransactionTreeConnect {
-    pub fn new(share_name: Vec<u8>) -> SMBTransactionTreeConnect {
-        return SMBTransactionTreeConnect {
-            is_pipe:false,
-            share_type: 0,
-            tree_id:0,
+    pub fn new(share_name: Vec<u8>) -> Self {
+        return Self {
             share_name:share_name,
-            req_service: None,
-            res_service: None,
+            ..Default::default()
         }
     }
 }
@@ -567,17 +536,17 @@ pub struct SMBTransaction {
 }
 
 impl SMBTransaction {
-    pub fn new() -> SMBTransaction {
-        return SMBTransaction{
-            id: 0,
-            vercmd: SMBVerCmdStat::new(),
-            hdr: SMBCommonHdr::init(),
-            request_done: false,
-            response_done: false,
-            type_data: None,
-            de_state: None,
-            events: std::ptr::null_mut(),
-            tx_data: AppLayerTxData::new(),
+    pub fn new() -> Self {
+        return Self {
+              id: 0,
+              vercmd: SMBVerCmdStat::new(),
+              hdr: SMBCommonHdr::init(),
+              request_done: false,
+              response_done: false,
+              type_data: None,
+              de_state: None,
+              events: std::ptr::null_mut(),
+              tx_data: AppLayerTxData::new(),
         }
     }
 
@@ -616,8 +585,8 @@ pub struct SMBFileGUIDOffset {
 }
 
 impl SMBFileGUIDOffset {
-    pub fn new(guid: Vec<u8>, offset: u64) -> SMBFileGUIDOffset {
-        SMBFileGUIDOffset {
+    pub fn new(guid: Vec<u8>, offset: u64) -> Self {
+        Self {
             guid:guid,
             offset:offset,
         }
@@ -637,7 +606,7 @@ pub const SMBHDR_TYPE_TRANS_FRAG:  u32 = 8;
 pub const SMBHDR_TYPE_TREE:        u32 = 9;
 pub const SMBHDR_TYPE_DCERPCTX:    u32 = 10;
 
-#[derive(Hash, Eq, PartialEq, Debug)]
+#[derive(Default, Hash, Eq, PartialEq, Debug)]
 pub struct SMBCommonHdr {
     pub ssn_id: u64,
     pub tree_id: u32,
@@ -646,16 +615,11 @@ pub struct SMBCommonHdr {
 }
 
 impl SMBCommonHdr {
-    pub fn init() -> SMBCommonHdr {
-        SMBCommonHdr {
-            rec_type : 0,
-            ssn_id : 0,
-            tree_id : 0,
-            msg_id : 0,
-        }
+    pub fn init() -> Self {
+        Default::default()
     }
-    pub fn new(rec_type: u32, ssn_id: u64, tree_id: u32, msg_id: u64) -> SMBCommonHdr {
-        SMBCommonHdr {
+    pub fn new(rec_type: u32, ssn_id: u64, tree_id: u32, msg_id: u64) -> Self {
+        Self {
             rec_type : rec_type,
             ssn_id : ssn_id,
             tree_id : tree_id,
@@ -712,8 +676,8 @@ pub struct SMBHashKeyHdrGuid {
 }
 
 impl SMBHashKeyHdrGuid {
-    pub fn new(hdr: SMBCommonHdr, guid: Vec<u8>) -> SMBHashKeyHdrGuid {
-        SMBHashKeyHdrGuid {
+    pub fn new(hdr: SMBCommonHdr, guid: Vec<u8>) -> Self {
+        Self {
             hdr: hdr, guid: guid,
         }
     }
@@ -726,8 +690,8 @@ pub struct SMBTree {
 }
 
 impl SMBTree {
-    pub fn new(name: Vec<u8>, is_pipe: bool) -> SMBTree {
-        SMBTree {
+    pub fn new(name: Vec<u8>, is_pipe: bool) -> Self {
+        Self {
             name:name,
             is_pipe:is_pipe,
         }
@@ -756,7 +720,7 @@ pub struct SMBState<> {
     // requests for DCERPC.
     pub ssnguid2vec_map: HashMap<SMBHashKeyHdrGuid, Vec<u8>>,
 
-    pub files: SMBFiles,
+    pub files: Files,
 
     skip_ts: u32,
     skip_tc: u32,
@@ -802,14 +766,14 @@ pub struct SMBState<> {
 
 impl SMBState {
     /// Allocation function for a new TLS parser instance
-    pub fn new() -> SMBState {
-        SMBState {
+    pub fn new() -> Self {
+        Self {
             ssn2vec_map:HashMap::new(),
             guid2name_map:HashMap::new(),
             ssn2vecoffset_map:HashMap::new(),
             ssn2tree_map:HashMap::new(),
             ssnguid2vec_map:HashMap::new(),
-            files: SMBFiles::new(),
+            files: Files::default(),
             skip_ts:0,
             skip_tc:0,
             file_ts_left:0,
@@ -836,7 +800,6 @@ impl SMBState {
     pub fn free(&mut self) {
         //self._debug_state_stats();
         self._debug_tx_stats();
-        self.files.free();
     }
 
     pub fn new_tx(&mut self) -> SMBTransaction {
@@ -1319,7 +1282,7 @@ impl SMBState {
                                             if is_pipe {
                                                 return 0;
                                             }
-                                            smb1_write_request_record(self, r);
+                                            smb1_write_request_record(self, r, SMB1_HEADER_SIZE, SMB1_COMMAND_WRITE_ANDX);
                                             let consumed = input.len() - output.len();
                                             return consumed;
                                         }
@@ -1561,7 +1524,7 @@ impl SMBState {
                                             if is_pipe {
                                                 return 0;
                                             }
-                                            smb1_read_response_record(self, r);
+                                            smb1_read_response_record(self, r, SMB1_HEADER_SIZE);
                                             let consumed = input.len() - output.len();
                                             return consumed;
                                         }
@@ -1825,7 +1788,7 @@ impl SMBState {
 
 /// Returns *mut SMBState
 #[no_mangle]
-pub extern "C" fn rs_smb_state_new() -> *mut std::os::raw::c_void {
+pub extern "C" fn rs_smb_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = SMBState::new();
     let boxed = Box::new(state);
     SCLogDebug!("allocating state");
@@ -1906,15 +1869,8 @@ pub extern "C" fn rs_smb_parse_response_tcp_gap(
     state.parse_tcp_data_tc_gap(input_len as u32)
 }
 
-// probing parser
-// return 1 if found, 0 is not found
-#[no_mangle]
-pub extern "C" fn rs_smb_probe_tcp(direction: u8,
-        input: *const u8, len: u32,
-        rdir: *mut u8)
-    -> i8
+fn rs_smb_probe_tcp_midstream(direction: u8, slice: &[u8], rdir: *mut u8) -> i8
 {
-    let slice = build_slice!(input, len as usize);
     match search_smb_record(slice) {
         Ok((_, ref data)) => {
             SCLogDebug!("smb found");
@@ -1973,14 +1929,50 @@ pub extern "C" fn rs_smb_probe_tcp(direction: u8,
             SCLogDebug!("no dice");
         },
     }
+    return 0;
+}
+
+// probing parser
+// return 1 if found, 0 is not found
+#[no_mangle]
+pub extern "C" fn rs_smb_probe_tcp(flags: u8,
+        input: *const u8, len: u32,
+        rdir: *mut u8)
+    -> i8
+{
+    let slice = build_slice!(input, len as usize);
+    if flags & STREAM_MIDSTREAM == STREAM_MIDSTREAM {
+        if rs_smb_probe_tcp_midstream(flags, slice, rdir) == 1 {
+            return 1;
+        }
+    }
     match parse_nbss_record_partial(slice) {
         Ok((_, ref hdr)) => {
             if hdr.is_smb() {
                 SCLogDebug!("smb found");
                 return 1;
-            } else if hdr.is_valid() {
-                SCLogDebug!("nbss found, assume smb");
-                return 1;
+            } else if hdr.needs_more(){
+                return 0;
+            } else if hdr.is_valid() &&
+                hdr.message_type != NBSS_MSGTYPE_SESSION_MESSAGE {
+                //we accept a first small netbios message before real SMB
+                let hl = hdr.length as usize;
+                if hdr.data.len() >= hl + 8 {
+                    // 8 is 4 bytes NBSS + 4 bytes SMB0xFX magic
+                    match parse_nbss_record_partial(&hdr.data[hl..]) {
+                        Ok((_, ref hdr2)) => {
+                            if hdr2.is_smb() {
+                                SCLogDebug!("smb found");
+                                return 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if hdr.length < 256 {
+                    // we want more data, 256 is some random value
+                    return 0;
+                }
+                // default is failure
             }
         },
         _ => { },
@@ -2038,14 +2030,6 @@ pub extern "C" fn rs_smb_state_tx_free(state: &mut SMBState,
 {
     SCLogDebug!("freeing tx {}", tx_id as u64);
     state.free_tx(tx_id);
-}
-
-#[no_mangle]
-pub extern "C" fn rs_smb_state_progress_completion_status(
-    _direction: u8)
-    -> std::os::raw::c_int
-{
-    return 1;
 }
 
 #[no_mangle]
@@ -2132,6 +2116,7 @@ pub extern "C" fn rs_smb_state_get_event_info_by_id(event_id: std::os::raw::c_in
             SMBEvent::MalformedNtlmsspResponse => { "malformed_ntlmssp_response\0" },
             SMBEvent::DuplicateNegotiate => { "duplicate_negotiate\0" },
             SMBEvent::NegotiateMalformedDialects => { "netogiate_malformed_dialects\0" },
+            SMBEvent::FileOverlap => { "file_overlap\0" },
         };
         unsafe{
             *event_name = estr.as_ptr() as *const std::os::raw::c_char;

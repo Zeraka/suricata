@@ -276,11 +276,6 @@ static uint64_t SSLGetTxCnt(void *state)
     return 1;
 }
 
-static int SSLGetAlstateProgressCompletionStatus(uint8_t direction)
-{
-    return TLS_STATE_FINISHED;
-}
-
 static int SSLGetAlstateProgress(void *tx, uint8_t direction)
 {
     SSLState *ssl_state = (SSLState *)tx;
@@ -457,10 +452,9 @@ static inline int TlsDecodeHSCertificateFingerprint(SSLState *ssl_state,
     if (ssl_state->server_connp.cert0_fingerprint == NULL)
         return -1;
 
-    uint8_t hash[SHA1_LENGTH];
-    if (ComputeSHA1(input, cert_len, hash, sizeof(hash)) == 1) {
-        for (int i = 0, x = 0; x < SHA1_LENGTH; x++)
-        {
+    uint8_t hash[SC_SHA1_LEN];
+    if (SCSha1HashBuffer(input, cert_len, hash, sizeof(hash)) == 1) {
+        for (int i = 0, x = 0; x < SC_SHA1_LEN; x++) {
             i += snprintf(ssl_state->server_connp.cert0_fingerprint + i,
                     SHA1_STRING_LENGTH - i, i == 0 ? "%02x" : ":%02x",
                     hash[x]);
@@ -1631,6 +1625,10 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
             ssl_state->curr_connp->bytes_processed + input_len) {
         SCLogDebug("msg done");
 
+        // Safety check against integer underflow
+        DEBUG_VALIDATE_BUG_ON(
+                ssl_state->curr_connp->message_start + ssl_state->curr_connp->message_length <
+                ssl_state->curr_connp->bytes_processed);
         write_len = (ssl_state->curr_connp->message_start + ssl_state->curr_connp->message_length) -
             ssl_state->curr_connp->bytes_processed;
         DEBUG_VALIDATE_BUG_ON(write_len > input_len);
@@ -2068,12 +2066,11 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
                 switch (ssl_state->curr_connp->bytes_processed) {
                     case 4:
                         if (input_len >= 6) {
-                            ssl_state->curr_connp->session_id_length = input[4] << 8;
-                            ssl_state->curr_connp->session_id_length |= input[5];
+                            uint16_t session_id_length = input[5] | (input[4] << 8);
                             input += 6;
                             input_len -= 6;
                             ssl_state->curr_connp->bytes_processed += 6;
-                            if (ssl_state->curr_connp->session_id_length == 0) {
+                            if (session_id_length == 0) {
                                 ssl_state->current_flags |= SSL_AL_FLAG_SSL_NO_SESSION_ID;
                             }
 
@@ -2108,14 +2105,12 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
 
                         /* fall through */
                     case 8:
-                        ssl_state->curr_connp->session_id_length = *(input++) << 8;
                         ssl_state->curr_connp->bytes_processed++;
                         if (--input_len == 0)
                             break;
 
                         /* fall through */
                     case 9:
-                        ssl_state->curr_connp->session_id_length |= *(input++);
                         ssl_state->curr_connp->bytes_processed++;
                         if (--input_len == 0)
                             break;
@@ -2127,12 +2122,11 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
                 switch (ssl_state->curr_connp->bytes_processed) {
                     case 3:
                         if (input_len >= 6) {
-                            ssl_state->curr_connp->session_id_length = input[4] << 8;
-                            ssl_state->curr_connp->session_id_length |= input[5];
+                            uint16_t session_id_length = input[5] | (input[4] << 8);
                             input += 6;
                             input_len -= 6;
                             ssl_state->curr_connp->bytes_processed += 6;
-                            if (ssl_state->curr_connp->session_id_length == 0) {
+                            if (session_id_length == 0) {
                                 ssl_state->current_flags |= SSL_AL_FLAG_SSL_NO_SESSION_ID;
                             }
 
@@ -2167,14 +2161,12 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
 
                         /* fall through */
                     case 7:
-                        ssl_state->curr_connp->session_id_length = *(input++) << 8;
                         ssl_state->curr_connp->bytes_processed++;
                         if (--input_len == 0)
                             break;
 
                         /* fall through */
                     case 8:
-                        ssl_state->curr_connp->session_id_length |= *(input++);
                         ssl_state->curr_connp->bytes_processed++;
                         if (--input_len == 0)
                             break;
@@ -2373,10 +2365,14 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
             if (ssl_state->flags & SSL_AL_FLAG_CHANGE_CIPHER_SPEC) {
                 /* In TLSv1.3, ChangeCipherSpec is only used for middlebox
                    compability (rfc8446, appendix D.4). */
-                if ((ssl_state->client_connp.version > TLS_VERSION_12) &&
-                       ((ssl_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0)) {
+                // Client hello flags is needed to have a valid version
+                if ((ssl_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
+                        (ssl_state->client_connp.version > TLS_VERSION_12) &&
+                        ((ssl_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0)) {
                     /* do nothing */
                 } else {
+                    // if we started parsing this, we must stop
+                    ssl_state->curr_connp->hs_bytes_processed = 0;
                     break;
                 }
             }
@@ -2634,7 +2630,7 @@ static AppLayerResult SSLParseServerRecord(Flow *f, void *alstate, AppLayerParse
  * \internal
  * \brief Function to allocate the SSL state memory.
  */
-static void *SSLStateAlloc(void)
+static void *SSLStateAlloc(void *orig_state, AppProto proto_orig)
 {
     SSLState *ssl_state = SCMalloc(sizeof(SSLState));
     if (unlikely(ssl_state == NULL))
@@ -2768,9 +2764,8 @@ static int SSLStateGetEventInfoById(int event_id, const char **event_name,
 
 static int SSLRegisterPatternsForProtocolDetection(void)
 {
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 00 02|", 5, 2, STREAM_TOSERVER) < 0)
-    {
+    if (AppLayerProtoDetectPMRegisterPatternCSwPP(IPPROTO_TCP, ALPROTO_TLS, "|01 00 02|", 5, 2,
+                STREAM_TOSERVER, SSLProbingParser, 0, 3) < 0) {
         return -1;
     }
 
@@ -2983,8 +2978,8 @@ void RegisterSSLParsers(void)
 
         AppLayerParserRegisterGetStateProgressFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetAlstateProgress);
 
-        AppLayerParserRegisterGetStateProgressCompletionStatus(ALPROTO_TLS,
-                                                               SSLGetAlstateProgressCompletionStatus);
+        AppLayerParserRegisterStateProgressCompletionStatus(
+                ALPROTO_TLS, TLS_STATE_FINISHED, TLS_STATE_FINISHED);
 
         ConfNode *enc_handle = ConfGetNode("app-layer.protocols.tls.encryption-handling");
         if (enc_handle != NULL && enc_handle->val != NULL) {
@@ -3027,18 +3022,17 @@ void RegisterSSLParsers(void)
         }
         SC_ATOMIC_SET(ssl_config.enable_ja3, enable_ja3);
 
-#ifndef HAVE_NSS
-        if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-            SCLogWarning(SC_WARN_NO_JA3_SUPPORT,
-                         "no MD5 calculation support built in (LibNSS), disabling JA3");
-            SC_ATOMIC_SET(ssl_config.enable_ja3, 0);
+        if (g_disable_hashing) {
+            if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+                SCLogWarning(
+                        SC_WARN_NO_JA3_SUPPORT, "MD5 calculation has been disabled, disabling JA3");
+                SC_ATOMIC_SET(ssl_config.enable_ja3, 0);
+            }
+        } else {
+            if (RunmodeIsUnittests()) {
+                SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
+            }
         }
-#else
-        if (RunmodeIsUnittests()) {
-            SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
-        }
-#endif
-
     } else {
         SCLogConfig("Parsed disabled for %s protocol. Protocol detection"
                   "still on.", proto_name);
@@ -3058,24 +3052,20 @@ void RegisterSSLParsers(void)
  */
 void SSLEnableJA3(void)
 {
-#ifdef HAVE_NSS
-    if (ssl_config.disable_ja3) {
+    if (g_disable_hashing || ssl_config.disable_ja3) {
         return;
     }
     if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
         return;
     }
     SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
-#endif
 }
 
 bool SSLJA3IsEnabled(void)
 {
-#ifdef HAVE_NSS
     if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
         return true;
     }
-#endif
     return false;
 }
 
@@ -3102,7 +3092,7 @@ static int SSLParserTest01(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3118,7 +3108,7 @@ static int SSLParserTest01(void)
     FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3142,7 +3132,7 @@ static int SSLParserTest02(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3164,7 +3154,7 @@ static int SSLParserTest02(void)
     FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3190,7 +3180,7 @@ static int SSLParserTest03(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3218,7 +3208,7 @@ static int SSLParserTest03(void)
     FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3246,7 +3236,7 @@ static int SSLParserTest04(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3280,7 +3270,7 @@ static int SSLParserTest04(void)
     FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3305,7 +3295,7 @@ static int SSLParserTest05(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
     if (r != 0) {
@@ -3391,7 +3381,7 @@ static int SSLParserTest05(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3417,7 +3407,7 @@ static int SSLParserTest06(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
     if (r != 0) {
@@ -3519,7 +3509,7 @@ static int SSLParserTest06(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3568,7 +3558,7 @@ static int SSLParserMultimsgTest01(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3584,7 +3574,7 @@ static int SSLParserMultimsgTest01(void)
     FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3633,7 +3623,7 @@ static int SSLParserMultimsgTest02(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3649,7 +3639,7 @@ static int SSLParserMultimsgTest02(void)
     FAIL_IF(ssl_state->server_connp.version != 0x0301);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3683,7 +3673,7 @@ static int SSLParserTest07(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3699,7 +3689,7 @@ static int SSLParserTest07(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3724,7 +3714,7 @@ static int SSLParserTest08(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
     if (r != 0) {
@@ -3809,7 +3799,7 @@ static int SSLParserTest08(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3851,7 +3841,7 @@ static int SSLParserTest09(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3873,7 +3863,7 @@ static int SSLParserTest09(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3914,7 +3904,7 @@ static int SSLParserTest10(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3936,7 +3926,7 @@ static int SSLParserTest10(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -3976,7 +3966,7 @@ static int SSLParserTest11(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -3998,7 +3988,7 @@ static int SSLParserTest11(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4043,7 +4033,7 @@ static int SSLParserTest12(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4071,7 +4061,7 @@ static int SSLParserTest12(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4121,7 +4111,7 @@ static int SSLParserTest13(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4155,7 +4145,7 @@ static int SSLParserTest13(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4188,7 +4178,7 @@ static int SSLParserTest14(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4206,7 +4196,7 @@ static int SSLParserTest14(void)
     FAIL_IF_NULL(ssl_state);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4234,7 +4224,7 @@ static int SSLParserTest15(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4243,7 +4233,7 @@ static int SSLParserTest15(void)
     FAIL_IF(r == 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4271,7 +4261,7 @@ static int SSLParserTest16(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4280,7 +4270,7 @@ static int SSLParserTest16(void)
     FAIL_IF(r == 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4308,7 +4298,7 @@ static int SSLParserTest17(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4317,7 +4307,7 @@ static int SSLParserTest17(void)
     FAIL_IF(r == 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4351,7 +4341,7 @@ static int SSLParserTest18(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4369,7 +4359,7 @@ static int SSLParserTest18(void)
     FAIL_IF_NULL(ssl_state);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4398,7 +4388,7 @@ static int SSLParserTest19(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4410,7 +4400,7 @@ static int SSLParserTest19(void)
     FAIL_IF_NULL(ssl_state);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4439,7 +4429,7 @@ static int SSLParserTest20(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4448,7 +4438,7 @@ static int SSLParserTest20(void)
     FAIL_IF(r == 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4477,7 +4467,7 @@ static int SSLParserTest21(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4493,7 +4483,7 @@ static int SSLParserTest21(void)
     FAIL_IF(app_state->client_connp.version != SSL_VERSION_2);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4527,7 +4517,7 @@ static int SSLParserTest22(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4543,7 +4533,7 @@ static int SSLParserTest22(void)
     FAIL_IF(app_state->server_connp.version != SSL_VERSION_2);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4813,7 +4803,7 @@ static int SSLParserTest23(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4910,7 +4900,7 @@ static int SSLParserTest23(void)
 
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -4955,7 +4945,7 @@ static int SSLParserTest24(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -4977,7 +4967,7 @@ static int SSLParserTest24(void)
     FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -5313,7 +5303,7 @@ static int SSLParserTest25(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -5346,7 +5336,7 @@ static int SSLParserTest25(void)
     FAIL_IF(r != 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;
@@ -5458,7 +5448,7 @@ static int SSLParserTest26(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_TLS;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     FLOWLOCK_WRLOCK(&f);
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
@@ -5484,7 +5474,7 @@ static int SSLParserTest26(void)
     FAIL_IF((ssl_state->flags & SSL_AL_FLAG_SESSION_RESUMED) == 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     PASS;

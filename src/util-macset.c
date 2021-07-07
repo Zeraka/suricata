@@ -56,7 +56,7 @@ struct MacSet_ {
         last[2];
 };
 
-int g_macset_storage_id = -1;
+FlowStorageId g_macset_storage_id = { .id = -1 };
 
 void MacSetRegisterFlowStorage(void)
 {
@@ -66,7 +66,7 @@ void MacSetRegisterFlowStorage(void)
        has the ethernet setting enabled */
     if (root != NULL) {
         TAILQ_FOREACH(node, &root->head, next) {
-            if (strcmp(node->val, "eve-log") == 0) {
+            if (node->val && strcmp(node->val, "eve-log") == 0) {
                 const char *enabled = ConfNodeLookupChildValue(node->head.tqh_first, "enabled");
                 if (enabled != NULL && ConfValIsTrue(enabled)) {
                     const char *ethernet = ConfNodeLookupChildValue(node->head.tqh_first, "ethernet");
@@ -83,7 +83,7 @@ void MacSetRegisterFlowStorage(void)
 
 bool MacSetFlowStorageEnabled(void)
 {
-    return (g_macset_storage_id != -1);
+    return (g_macset_storage_id.id != -1);
 }
 
 
@@ -110,7 +110,7 @@ MacSet *MacSetInit(int size)
     return ms;
 }
 
-int MacSetGetFlowStorageID(void)
+FlowStorageId MacSetGetFlowStorageID(void)
 {
     return g_macset_storage_id;
 }

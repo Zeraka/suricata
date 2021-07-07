@@ -30,7 +30,7 @@
 #include "stream.h"
 #include "stream-tcp-reassemble.h"
 
-#define STREAM_VERBOSE    FALSE
+#define STREAM_VERBOSE false
 /* Flag to indicate that the checksum validation for the stream engine
    has been enabled */
 #define STREAMTCP_INIT_FLAG_CHECKSUM_VALIDATION    BIT_U8(0)
@@ -55,7 +55,7 @@ typedef struct TcpStreamCnf_ {
 
     uint32_t prealloc_sessions; /**< ssns to prealloc per stream thread */
     uint32_t prealloc_segments; /**< segments to prealloc per stream thread */
-    int midstream;
+    bool midstream;
     int async_oneside;
     uint32_t reassembly_depth;  /**< Depth until when we reassemble the stream */
 
@@ -104,8 +104,8 @@ typedef struct StreamTcpThread_ {
 } StreamTcpThread;
 
 extern TcpStreamCnf stream_config;
-void StreamTcpInitConfig (char);
-void StreamTcpFreeConfig(char);
+void StreamTcpInitConfig(bool);
+void StreamTcpFreeConfig(bool);
 void StreamTcpRegisterTests (void);
 
 void StreamTcpSessionPktFree (Packet *);

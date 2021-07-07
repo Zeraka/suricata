@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -37,6 +37,7 @@
 
 #include "flow.h"
 
+#include "util-validate.h"
 #include "util-unittest.h"
 #include "util-debug.h"
 
@@ -59,6 +60,8 @@
 int DecodeVLAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint32_t len)
 {
+    DEBUG_VALIDATE_BUG_ON(pkt == NULL);
+
     uint32_t proto;
 
     if (p->vlan_idx == 0)
@@ -70,14 +73,15 @@ int DecodeVLAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         ENGINE_SET_INVALID_EVENT(p, VLAN_HEADER_TOO_SMALL);
         return TM_ECODE_FAILED;
     }
+    if (!PacketIncreaseCheckLayers(p)) {
+        return TM_ECODE_FAILED;
+    }
     if (p->vlan_idx >= 2) {
         ENGINE_SET_EVENT(p,VLAN_HEADER_TOO_MANY_LAYERS);
         return TM_ECODE_FAILED;
     }
 
     VLANHdr *vlan_hdr = (VLANHdr *)pkt;
-    if(vlan_hdr == NULL)
-        return TM_ECODE_FAILED;
 
     proto = GET_VLAN_PROTO(vlan_hdr);
 
@@ -117,6 +121,8 @@ typedef struct IEEE8021ahHdr_ {
 int DecodeIEEE8021ah(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint32_t len)
 {
+    DEBUG_VALIDATE_BUG_ON(pkt == NULL);
+
     StatsIncr(tv, dtv->counter_ieee8021ah);
 
     if (len < IEEE8021AH_HEADER_LEN) {

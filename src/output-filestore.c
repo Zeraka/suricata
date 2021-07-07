@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2020 Open Information Security Foundation
+/* Copyright (C) 2018-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,13 +32,11 @@
 #include "util-print.h"
 #include "util-misc.h"
 
-#ifdef HAVE_NSS
-
 #define MODULE_NAME "OutputFilestore"
 
 /* Create a filestore specific PATH_MAX that is less than the system
  * PATH_MAX to prevent newer gcc truncation warnings with snprint. */
-#define SHA256_STRING_LEN (SHA256_LENGTH * 2)
+#define SHA256_STRING_LEN    (SC_SHA256_LEN * 2)
 #define LEAF_DIR_MAX_LEN 4
 #define FILESTORE_PREFIX_MAX (PATH_MAX - SHA256_STRING_LEN - LEAF_DIR_MAX_LEN)
 
@@ -129,7 +127,7 @@ static void OutputFilestoreFinalizeFiles(ThreadVars *tv,
         const Packet *p, File *ff, uint8_t dir) {
     /* Stringify the SHA256 which will be used in the final
      * filename. */
-    char sha256string[(SHA256_LENGTH * 2) + 1];
+    char sha256string[(SC_SHA256_LEN * 2) + 1];
     PrintHexString(sha256string, sizeof(sha256string), ff->sha256,
             sizeof(ff->sha256));
 
@@ -170,8 +168,8 @@ static void OutputFilestoreFinalizeFiles(ThreadVars *tv,
             WARN_ONCE(SC_ERR_SPRINTF,
                 "Failed to write file info record. Output filename truncated.");
         } else {
-            JsonBuilder *js_fileinfo = JsonBuildFileInfoRecord(p, ff, true, dir,
-                    ctx->xff_cfg);
+            JsonBuilder *js_fileinfo =
+                    JsonBuildFileInfoRecord(p, ff, true, dir, ctx->xff_cfg, NULL);
             if (likely(js_fileinfo != NULL)) {
                 jb_close(js_fileinfo);
                 FILE *out = fopen(js_metadata_filename, "w");
@@ -527,19 +525,13 @@ static OutputInitResult OutputFilestoreLogInitCtx(ConfNode *conf)
         }
     }
 
-    StatsRegisterGlobalCounter("file_store.open_files",
-            OutputFilestoreOpenFilesCounter);
-
     result.ctx = output_ctx;
     result.ok = true;
     SCReturnCT(result, "OutputInitResult");
 }
 
-#endif /* HAVE_NSS */
-
 void OutputFilestoreRegister(void)
 {
-#ifdef HAVE_NSS
     OutputRegisterFiledataModule(LOGGER_FILE_STORE, MODULE_NAME, "file-store",
             OutputFilestoreLogInitCtx, OutputFilestoreLogger,
             OutputFilestoreLogThreadInit, OutputFilestoreLogThreadDeinit,
@@ -547,5 +539,9 @@ void OutputFilestoreRegister(void)
 
     SC_ATOMIC_INIT(filestore_open_file_cnt);
     SC_ATOMIC_SET(filestore_open_file_cnt, 0);
-#endif
+}
+
+void OutputFilestoreRegisterGlobalCounters(void)
+{
+    StatsRegisterGlobalCounter("file_store.open_files", OutputFilestoreOpenFilesCounter);
 }

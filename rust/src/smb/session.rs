@@ -15,13 +15,12 @@
  * 02110-1301, USA.
  */
 
-use crate::log::*;
 use crate::kerberos::*;
 use crate::smb::smb::*;
 use crate::smb::smb1_session::*;
 use crate::smb::auth::*;
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionSessionSetup {
     pub request_host: Option<SessionSetupRequest>,
     pub response_host: Option<SessionSetupResponse>,
@@ -30,13 +29,8 @@ pub struct SMBTransactionSessionSetup {
 }
 
 impl SMBTransactionSessionSetup {
-    pub fn new() -> SMBTransactionSessionSetup {
-        return SMBTransactionSessionSetup {
-            request_host: None,
-            response_host: None,
-            ntlmssp: None,
-            krb_ticket: None,
-        }
+    pub fn new() -> Self {
+        return Default::default()
     }
 }
 

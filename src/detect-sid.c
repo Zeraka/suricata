@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -60,7 +60,7 @@ static int DetectSidSetup (DetectEngineCtx *de_ctx, Signature *s, const char *si
         goto error;
     }
     if (id >= UINT_MAX) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "sid value to high, max %u", UINT_MAX);
+        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "sid value too high, max %u", UINT_MAX);
         goto error;
     }
     if (id == 0) {
@@ -83,63 +83,56 @@ static int DetectSidSetup (DetectEngineCtx *de_ctx, Signature *s, const char *si
 
 static int SidTestParse01(void)
 {
-    int result = 0;
-    Signature *s = NULL;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    s = DetectEngineAppendSig(de_ctx,
-        "alert tcp 1.2.3.4 any -> any any (sid:1; gid:1;)");
-    if (s == NULL || s->id != 1)
-        goto end;
+    Signature *s =
+            DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:1; gid:1;)");
+    FAIL_IF_NULL(s);
+    FAIL_IF(s->id != 1);
 
-    result = 1;
-
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 static int SidTestParse02(void)
 {
-    int result = 0;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    if (DetectEngineAppendSig(de_ctx,
-            "alert tcp 1.2.3.4 any -> any any (sid:a; gid:1;)") != NULL)
-        goto end;
+    FAIL_IF_NOT_NULL(
+            DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:a; gid:1;)"));
 
-    result = 1;
-
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 static int SidTestParse03(void)
 {
-    int result = 0;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    if (DetectEngineAppendSig(de_ctx,
-            "alert tcp any any -> any any (content:\"ABC\"; sid:\";)") != NULL)
-        goto end;
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (content:\"ABC\"; sid:\";)"));
 
-    result = 1;
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
+}
+
+static int SidTestParse04(void)
+{
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
+
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (content:\"ABC\"; sid: 0;)"));
+
+    /* Let's also make sure that Suricata fails a rule which doesn't have a sid at all */
+    FAIL_IF_NOT_NULL(
+            DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any (content:\"ABC\";)"));
+
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 /**
@@ -150,5 +143,6 @@ static void DetectSidRegisterTests(void)
     UtRegisterTest("SidTestParse01", SidTestParse01);
     UtRegisterTest("SidTestParse02", SidTestParse02);
     UtRegisterTest("SidTestParse03", SidTestParse03);
+    UtRegisterTest("SidTestParse04", SidTestParse04);
 }
 #endif /* UNITTESTS */

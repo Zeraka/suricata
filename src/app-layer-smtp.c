@@ -1108,7 +1108,15 @@ static int SMTPParseCommandBDAT(SMTPState *state)
         return -1;
     }
     char *endptr = NULL;
-    state->bdat_chunk_len = strtoul((const char *)state->current_line + i,
+    // copy in temporary null-terminated buffer to call strtoul
+    char strbuf[24];
+    int len = 23;
+    if (state->current_line_len - i < len) {
+        len = state->current_line_len - i;
+    }
+    memcpy(strbuf, (const char *)state->current_line + i, len);
+    strbuf[len] = '\0';
+    state->bdat_chunk_len = strtoul((const char *)strbuf,
                                     (char **)&endptr, 10);
     if ((uint8_t *)endptr == state->current_line + i) {
         /* decoder event */
@@ -1432,7 +1440,7 @@ static AppLayerResult SMTPParseServerRecord(Flow *f, void *alstate,
  * \internal
  * \brief Function to allocate SMTP state memory.
  */
-void *SMTPStateAlloc(void)
+void *SMTPStateAlloc(void *orig_state, AppProto proto_orig)
 {
     SMTPState *smtp_state = SCMalloc(sizeof(SMTPState));
     if (unlikely(smtp_state == NULL))
@@ -1715,10 +1723,6 @@ static void *SMTPStateGetTx(void *state, uint64_t id)
 
 }
 
-static int SMTPStateGetAlstateProgressCompletionStatus(uint8_t direction) {
-    return 1;
-}
-
 static int SMTPStateGetAlstateProgress(void *vtx, uint8_t direction)
 {
     SMTPTransaction *tx = vtx;
@@ -1816,8 +1820,7 @@ void RegisterSMTPParsers(void)
         AppLayerParserRegisterGetTxCnt(IPPROTO_TCP, ALPROTO_SMTP, SMTPStateGetTxCnt);
         AppLayerParserRegisterGetTx(IPPROTO_TCP, ALPROTO_SMTP, SMTPStateGetTx);
         AppLayerParserRegisterTxDataFunc(IPPROTO_TCP, ALPROTO_SMTP, SMTPGetTxData);
-        AppLayerParserRegisterGetStateProgressCompletionStatus(ALPROTO_SMTP,
-                                                               SMTPStateGetAlstateProgressCompletionStatus);
+        AppLayerParserRegisterStateProgressCompletionStatus(ALPROTO_SMTP, 1, 1);
         AppLayerParserRegisterTruncateFunc(IPPROTO_TCP, ALPROTO_SMTP, SMTPStateTruncate);
     } else {
         SCLogInfo("Parsed disabled for %s protocol. Protocol detection"
@@ -1936,7 +1939,7 @@ static int SMTPParserTest01(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -2040,7 +2043,7 @@ static int SMTPParserTest01(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -2291,7 +2294,7 @@ static int SMTPParserTest02(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -2824,7 +2827,7 @@ static int SMTPParserTest02(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -2930,7 +2933,7 @@ static int SMTPParserTest03(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3036,7 +3039,7 @@ static int SMTPParserTest03(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3083,7 +3086,7 @@ static int SMTPParserTest04(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3130,7 +3133,7 @@ static int SMTPParserTest04(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3232,7 +3235,7 @@ static int SMTPParserTest05(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3378,7 +3381,7 @@ static int SMTPParserTest05(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3533,7 +3536,7 @@ static int SMTPParserTest06(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3727,7 +3730,7 @@ static int SMTPParserTest06(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3773,7 +3776,7 @@ static int SMTPParserTest07(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3842,7 +3845,7 @@ static int SMTPParserTest07(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -3888,7 +3891,7 @@ static int SMTPParserTest08(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -3957,7 +3960,7 @@ static int SMTPParserTest08(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -4003,7 +4006,7 @@ static int SMTPParserTest09(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -4072,7 +4075,7 @@ static int SMTPParserTest09(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -4118,7 +4121,7 @@ static int SMTPParserTest10(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -4187,7 +4190,7 @@ static int SMTPParserTest10(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -4227,7 +4230,7 @@ static int SMTPParserTest11(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -4277,7 +4280,7 @@ static int SMTPParserTest11(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -4327,7 +4330,7 @@ static int SMTPParserTest12(void)
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     de_ctx = DetectEngineCtxInit();
@@ -4401,7 +4404,7 @@ end:
 
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePackets(&p, 1);
     return result;
@@ -4470,7 +4473,7 @@ static int SMTPParserTest13(void)
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     de_ctx = DetectEngineCtxInit();
@@ -4562,7 +4565,7 @@ end:
 
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePackets(&p, 1);
     return result;
@@ -4749,7 +4752,7 @@ static int SMTPParserTest14(void)
     f.proto = IPPROTO_TCP;
     f.alproto = ALPROTO_SMTP;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     SMTPTestInitConfig();
 
     FLOWLOCK_WRLOCK(&f);
@@ -5088,7 +5091,7 @@ static int SMTPParserTest14(void)
 end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -5154,7 +5157,7 @@ static int SMTPProcessDataChunkTest02(void){
     memset(&ssn, 0, sizeof(ssn));
     FLOW_INITIALIZE(&f);
     f.protoctx = &ssn;
-    f.alstate = SMTPStateAlloc();
+    f.alstate = SMTPStateAlloc(NULL, ALPROTO_UNKNOWN);
     MimeDecParseState *state = MimeDecInitParser(&f, NULL);
     ((MimeDecEntity *)state->stack->top->data)->ctnt_flags = CTNT_IS_ATTACHMENT;
     state->body_begin = 1;
@@ -5185,7 +5188,7 @@ static int SMTPProcessDataChunkTest03(void){
     Flow f;
     FLOW_INITIALIZE(&f);
     f.protoctx = &ssn;
-    f.alstate = SMTPStateAlloc();
+    f.alstate = SMTPStateAlloc(NULL, ALPROTO_UNKNOWN);
     MimeDecParseState *state = MimeDecInitParser(&f, NULL);
     ((MimeDecEntity *)state->stack->top->data)->ctnt_flags = CTNT_IS_ATTACHMENT;
     int ret;
@@ -5241,7 +5244,7 @@ static int SMTPProcessDataChunkTest04(void){
     Flow f;
     FLOW_INITIALIZE(&f);
     f.protoctx = &ssn;
-    f.alstate = SMTPStateAlloc();
+    f.alstate = SMTPStateAlloc(NULL, ALPROTO_UNKNOWN);
     MimeDecParseState *state = MimeDecInitParser(&f, NULL);
     ((MimeDecEntity *)state->stack->top->data)->ctnt_flags = CTNT_IS_ATTACHMENT;
     int ret = MIME_DEC_OK;
@@ -5281,7 +5284,7 @@ static int SMTPProcessDataChunkTest05(void){
     int ret;
     FLOW_INITIALIZE(&f);
     f.protoctx = &ssn;
-    f.alstate = SMTPStateAlloc();
+    f.alstate = SMTPStateAlloc(NULL, ALPROTO_UNKNOWN);
     FAIL_IF(f.alstate == NULL);
     MimeDecParseState *state = MimeDecInitParser(&f, NULL);
     ((MimeDecEntity *)state->stack->top->data)->ctnt_flags = CTNT_IS_ATTACHMENT;

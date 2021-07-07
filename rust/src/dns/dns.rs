@@ -23,7 +23,6 @@ use std::mem::transmute;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-use crate::log::*;
 use crate::applayer::*;
 use crate::core::{self, AppProto, ALPROTO_UNKNOWN, IPPROTO_UDP, IPPROTO_TCP};
 use crate::dns::parser;
@@ -114,19 +113,6 @@ pub const DNS_RCODE_BADNAME:  u16 = 20;
 pub const DNS_RCODE_BADALG:   u16 = 21;
 pub const DNS_RCODE_BADTRUNC: u16 = 22;
 
-
-/// The maximum number of transactions to keep in the queue pending
-/// processing before they are aggressively purged. Due to the
-/// stateless nature of this parser this is rarely needed, especially
-/// when one call to parse a request parses and a single request, and
-/// likewise for responses.
-///
-/// Where this matters is when one TCP buffer contains multiple
-/// requests are responses and one call into the parser creates
-/// multiple transactions. In this case we have to hold onto
-/// transactions longer than until handling the next transaction so it
-/// gets logged.
-const MAX_TRANSACTIONS: usize = 32;
 
 static mut ALPROTO_DNS: AppProto = ALPROTO_UNKNOWN;
 
@@ -233,12 +219,74 @@ pub struct DNSQueryEntry {
 }
 
 #[derive(Debug,PartialEq)]
+pub struct DNSRDataSOA {
+    /// Primary name server for this zone
+    pub mname: Vec<u8>,
+    /// Authority's mailbox
+    pub rname: Vec<u8>,
+    /// Serial version number
+    pub serial: u32,
+    /// Refresh interval (seconds)
+    pub refresh: u32,
+    /// Retry interval (seconds)
+    pub retry: u32,
+    /// Upper time limit until zone is no longer authoritative (seconds)
+    pub expire: u32,
+    /// Minimum ttl for records in this zone (seconds)
+    pub minimum: u32,
+}
+
+#[derive(Debug,PartialEq)]
+pub struct DNSRDataSSHFP {
+    /// Algorithm number
+    pub algo: u8,
+    /// Fingerprint type
+    pub fp_type: u8,
+    /// Fingerprint
+    pub fingerprint: Vec<u8>,
+}
+
+#[derive(Debug,PartialEq)]
+pub struct DNSRDataSRV {
+    /// Priority
+    pub priority: u16,
+    /// Weight
+    pub weight: u16,
+    /// Port
+    pub port: u16,
+    /// Target
+    pub target: Vec<u8>,
+}
+
+/// Represents RData of various formats
+#[derive(Debug,PartialEq)]
+pub enum DNSRData {
+    // RData is an address
+    A(Vec<u8>),
+    AAAA(Vec<u8>),
+    // RData is a domain name
+    CNAME(Vec<u8>),
+    PTR(Vec<u8>),
+    MX(Vec<u8>),
+    NS(Vec<u8>),
+    // RData is text
+    TXT(Vec<u8>),
+    NULL(Vec<u8>),
+    // RData has several fields
+    SOA(DNSRDataSOA),
+    SRV(DNSRDataSRV),
+    SSHFP(DNSRDataSSHFP),
+    // RData for remaining types is sometimes ignored
+    Unknown(Vec<u8>),
+}
+
+#[derive(Debug,PartialEq)]
 pub struct DNSAnswerEntry {
     pub name: Vec<u8>,
     pub rrtype: u16,
     pub rrclass: u16,
     pub ttl: u32,
-    pub data: Vec<u8>,
+    pub data: DNSRData,
 }
 
 #[derive(Debug)]
@@ -267,8 +315,8 @@ pub struct DNSTransaction {
 
 impl DNSTransaction {
 
-    pub fn new() -> DNSTransaction {
-        return DNSTransaction{
+    pub fn new() -> Self {
+        return Self {
             id: 0,
             request: None,
             response: None,
@@ -350,6 +398,7 @@ impl ConfigTracker {
     }
 }
 
+#[derive(Default)]
 pub struct DNSState {
     // Internal transaction ID.
     pub tx_id: u64,
@@ -366,24 +415,12 @@ pub struct DNSState {
 
 impl DNSState {
 
-    pub fn new() -> DNSState {
-        return DNSState{
-            tx_id: 0,
-            transactions: Vec::new(),
-            events: 0,
-            config: None,
-            gap: false,
-        };
+    pub fn new() -> Self {
+            Default::default()
     }
 
-    pub fn new_tcp() -> DNSState {
-        return DNSState{
-            tx_id: 0,
-            transactions: Vec::new(),
-            events: 0,
-            config: None,
-            gap: false,
-        };
+    pub fn new_tcp() -> Self {
+            Default::default()
     }
 
     pub fn new_tx(&mut self) -> DNSTransaction {
@@ -410,26 +447,8 @@ impl DNSState {
         }
     }
 
-    // Purges all transactions except one. This is a stateless parser
-    // so we don't need to hang onto old transactions.
-    //
-    // This is to actually handle an edge case where a DNS flood
-    // occurs in a single direction with no response packets. In such
-    // a case the functions to free a transaction are never called by
-    // the app-layer as they require bidirectional traffic.
-    pub fn purge(&mut self, tx_id: u64) {
-        while self.transactions.len() > MAX_TRANSACTIONS {
-            if self.transactions[0].id == tx_id + 1 {
-                return;
-            }
-            SCLogDebug!("Purging DNS TX with ID {}", self.transactions[0].id);
-            self.transactions.remove(0);
-        }
-    }
-
     pub fn get_tx(&mut self, tx_id: u64) -> Option<&DNSTransaction> {
         SCLogDebug!("get_tx: tx_id={}", tx_id);
-        self.purge(tx_id);
         for tx in &mut self.transactions {
             if tx.id == tx_id + 1 {
                 SCLogDebug!("Found DNS TX with ID {}", tx_id);
@@ -564,6 +583,9 @@ impl DNSState {
                 } else {
                     return AppLayerResult::err();
                 }
+            } else if size == 0 {
+                cur_i = &cur_i[2..];
+                consumed += 2;
             } else {
                 SCLogDebug!("[request]Not enough DNS traffic to parse. Returning {}/{}",
                             consumed as u32, (size + 2) as u32);
@@ -608,6 +630,9 @@ impl DNSState {
                 } else {
                     return AppLayerResult::err();
                 }
+            } else if size == 0 {
+                cur_i = &cur_i[2..];
+                consumed += 2;
             } else  {
                 SCLogDebug!("[response]Not enough DNS traffic to parse. Returning {}/{}",
                     consumed as u32, (cur_i.len() - consumed) as u32);
@@ -634,23 +659,53 @@ impl DNSState {
     }
 }
 
+const DNS_HEADER_SIZE: usize = 12;
+
+fn probe_header_validity(header: DNSHeader, rlen: usize) -> (bool, bool, bool) {
+    let opcode = ((header.flags >> 11) & 0xf) as u8;
+    if opcode >= 7 {
+        //unassigned opcode
+        return (false, false, false);
+    }
+    if 2 * (header.additional_rr as usize
+        + header.answer_rr as usize
+        + header.authority_rr as usize
+        + header.questions as usize)
+        + DNS_HEADER_SIZE
+        > rlen
+    {
+        //not enough data for such a DNS record
+        return (false, false, false);
+    }
+    let is_request = header.flags & 0x8000 == 0;
+    return (true, is_request, false);
+}
+
 /// Probe input to see if it looks like DNS.
-fn probe(input: &[u8]) -> (bool, bool) {
-    match parser::dns_parse_request(input) {
+fn probe(input: &[u8], dlen: usize) -> (bool, bool, bool) {
+    let i2 = if input.len() <= dlen { input } else { &input[..dlen] };
+    match parser::dns_parse_request(i2) {
         Ok((_, request)) => {
-            let is_request = request.header.flags & 0x8000 == 0;
-            return (true, is_request);
+            return probe_header_validity(request.header, dlen);
         },
-        Err(_) => (false, false),
+        Err(nom::Err::Incomplete(_)) => {
+            match parser::dns_parse_header(input) {
+                Ok((_, header)) => {
+                    return probe_header_validity(header, dlen);
+                }
+                Err(nom::Err::Incomplete(_)) => (false, false, true),
+                Err(_) => (false, false, false),
+            }
+        }
+        Err(_) => (false, false, false),
     }
 }
 
 /// Probe TCP input to see if it looks like DNS.
 pub fn probe_tcp(input: &[u8]) -> (bool, bool, bool) {
-    match be_u16(input) as IResult<&[u8],_> {
-        Ok((rem, _)) => {
-            let r = probe(rem);
-            return (r.0, r.1, false);
+    match be_u16(input) as IResult<&[u8],u16> {
+        Ok((rem, dlen)) => {
+            return probe(rem, dlen as usize);
         },
         Err(nom::Err::Incomplete(_)) => {
             return (false, false, true);
@@ -662,7 +717,7 @@ pub fn probe_tcp(input: &[u8]) -> (bool, bool, bool) {
 
 /// Returns *mut DNSState
 #[no_mangle]
-pub extern "C" fn rs_dns_state_new() -> *mut std::os::raw::c_void {
+pub extern "C" fn rs_dns_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = DNSState::new();
     let boxed = Box::new(state);
     return unsafe{transmute(boxed)};
@@ -773,15 +828,6 @@ pub extern "C" fn rs_dns_parse_response_tcp(_flow: *const core::Flow,
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_state_progress_completion_status(
-    _direction: u8)
-    -> std::os::raw::c_int
-{
-    SCLogDebug!("rs_dns_state_progress_completion_status");
-    return 1;
-}
-
-#[no_mangle]
 pub extern "C" fn rs_dns_tx_get_alstate_progress(_tx: *mut std::os::raw::c_void,
                                                  _direction: u8)
                                                  -> std::os::raw::c_int
@@ -815,6 +861,16 @@ pub extern "C" fn rs_dns_state_get_tx(state: *mut std::os::raw::c_void,
             return std::ptr::null_mut();
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_tx_is_request(tx: &mut DNSTransaction) -> bool {
+    tx.request.is_some()
+}
+
+#[no_mangle]
+pub extern "C" fn rs_dns_tx_is_response(tx: &mut DNSTransaction) -> bool {
+    tx.response.is_some()
 }
 
 #[no_mangle]
@@ -862,7 +918,7 @@ pub extern "C" fn rs_dns_state_get_tx_data(
 
 #[no_mangle]
 pub extern "C" fn rs_dns_tx_get_query_name(tx: &mut DNSTransaction,
-                                       i: u16,
+                                       i: u32,
                                        buf: *mut *const u8,
                                        len: *mut u32)
                                        -> u8
@@ -935,7 +991,7 @@ pub extern "C" fn rs_dns_probe(
     let slice: &[u8] = unsafe {
         std::slice::from_raw_parts(input as *mut u8, len as usize)
     };
-    let (is_dns, is_request) = probe(slice);
+    let (is_dns, is_request, _) = probe(slice, slice.len());
     if is_dns {
         let dir = if is_request {
             core::STREAM_TOSERVER
@@ -998,11 +1054,6 @@ pub extern "C" fn rs_dns_apply_tx_config(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_dns_init(proto: AppProto) {
-    ALPROTO_DNS = proto;
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn rs_dns_udp_register_parser() {
     let default_port = std::ffi::CString::new("[53]").unwrap();
     let parser = RustParser{
@@ -1020,7 +1071,8 @@ pub unsafe extern "C" fn rs_dns_udp_register_parser() {
         parse_tc: rs_dns_parse_response,
         get_tx_count: rs_dns_state_get_tx_count,
         get_tx: rs_dns_state_get_tx,
-        tx_get_comp_st: rs_dns_state_progress_completion_status,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
         tx_get_progress: rs_dns_tx_get_alstate_progress,
         get_events: Some(rs_dns_state_get_events),
         get_eventinfo: Some(rs_dns_state_get_event_info),
@@ -1034,6 +1086,7 @@ pub unsafe extern "C" fn rs_dns_udp_register_parser() {
         get_tx_data: rs_dns_state_get_tx_data,
         apply_tx_config: Some(rs_dns_apply_tx_config),
         flags: APP_LAYER_PARSER_OPT_UNIDIR_TXS,
+        truncate: None,
     };
 
     let ip_proto_str = CString::new("udp").unwrap();
@@ -1064,7 +1117,8 @@ pub unsafe extern "C" fn rs_dns_tcp_register_parser() {
         parse_tc: rs_dns_parse_response_tcp,
         get_tx_count: rs_dns_state_get_tx_count,
         get_tx: rs_dns_state_get_tx,
-        tx_get_comp_st: rs_dns_state_progress_completion_status,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
         tx_get_progress: rs_dns_tx_get_alstate_progress,
         get_events: Some(rs_dns_state_get_events),
         get_eventinfo: Some(rs_dns_state_get_event_info),
@@ -1078,6 +1132,7 @@ pub unsafe extern "C" fn rs_dns_tcp_register_parser() {
         get_tx_data: rs_dns_state_get_tx_data,
         apply_tx_config: Some(rs_dns_apply_tx_config),
         flags: APP_LAYER_PARSER_OPT_ACCEPT_GAPS | APP_LAYER_PARSER_OPT_UNIDIR_TXS,
+        truncate: None,
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();

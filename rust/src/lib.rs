@@ -66,8 +66,9 @@ pub mod ftp;
 pub mod smb;
 pub mod krb;
 pub mod dcerpc;
+pub mod modbus;
 
-pub mod ikev2;
+pub mod ike;
 pub mod snmp;
 
 pub mod ntp;
@@ -82,3 +83,6 @@ pub mod x509;
 pub mod asn1;
 pub mod ssh;
 pub mod http2;
+pub mod plugin;
+pub mod util;
+pub mod ffi;

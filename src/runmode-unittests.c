@@ -1,4 +1,4 @@
-/* Copyright (C) 2013 Open Information Security Foundation
+/* Copyright (C) 2013-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -37,7 +37,6 @@
 #include "detect-engine-dcepayload.h"
 #include "detect-engine-state.h"
 #include "detect-engine-tag.h"
-#include "detect-engine-modbus.h"
 #include "detect-fast-pattern.h"
 #include "flow.h"
 #include "flow-timeout.h"
@@ -57,8 +56,6 @@
 #include "app-layer-detect-proto.h"
 #include "app-layer-parser.h"
 #include "app-layer.h"
-#include "app-layer-dcerpc.h"
-#include "app-layer-dcerpc-udp.h"
 #include "app-layer-htp.h"
 #include "app-layer-ftp.h"
 #include "app-layer-ssl.h"
@@ -114,11 +111,6 @@
 #include "source-windivert.h"
 #endif
 
-#ifdef HAVE_NSS
-#include <prinit.h>
-#include <nss.h>
-#endif
-
 #endif /* UNITTESTS */
 
 void TmqhSetup (void);
@@ -147,6 +139,8 @@ static void RegisterUnittests(void)
     DecodeCHDLCRegisterTests();
     DecodePPPRegisterTests();
     DecodeVLANRegisterTests();
+    DecodeVNTagRegisterTests();
+    DecodeGeneveRegisterTests();
     DecodeVXLANRegisterTests();
     DecodeRawRegisterTests();
     DecodePPPOERegisterTests();
@@ -157,7 +151,9 @@ static void RegisterUnittests(void)
     DecodeTCPRegisterTests();
     DecodeUDPV4RegisterTests();
     DecodeGRERegisterTests();
+    DecodeESPRegisterTests();
     DecodeMPLSRegisterTests();
+    DecodeNSHRegisterTests();
     AppLayerProtoDetectUnittestsRegister();
     ConfRegisterTests();
     ConfYamlRegisterTests();
@@ -185,7 +181,6 @@ static void RegisterUnittests(void)
 #endif
     DeStateRegisterTests();
     MemcmpRegisterTests();
-    DetectEngineInspectModbusRegisterTests();
     DetectEngineRegisterTests();
     SCLogRegisterTests();
     MagicRegisterTests();
@@ -243,8 +238,6 @@ void RunUnittests(int list_unittests, const char *regex_arg)
 
     CIDRInit();
 
-    SCProtoNameInit();
-
     TagInitCtx();
     SCReferenceConfInit();
     SCClassConfInit();
@@ -261,13 +254,6 @@ void RunUnittests(int list_unittests, const char *regex_arg)
         regex_arg = ".*";
         UtRunSelftest(regex_arg); /* inits and cleans up again */
     }
-
-#ifdef HAVE_NSS
-    /* init NSS for hashing */
-    PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
-    NSS_NoDB_Init(NULL);
-#endif
-
 
     AppLayerHtpEnableRequestBodyCallback();
     AppLayerHtpNeedFileInspection();
@@ -302,4 +288,3 @@ void RunUnittests(int list_unittests, const char *regex_arg)
     FatalError(SC_ERR_FATAL, "Unittests are not build-in");
 #endif /* UNITTESTS */
 }
-

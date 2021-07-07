@@ -43,10 +43,9 @@
 
 static int DetectTemplateRustBufferSetup(DetectEngineCtx *, Signature *,
     const char *);
-static int DetectEngineInspectTemplateRustBuffer(ThreadVars *tv,
-    DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-    const Signature *s, const SigMatchData *smd,
-    Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
+static int DetectEngineInspectTemplateRustBuffer(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
 #ifdef UNITTESTS
 static void DetectTemplateRustBufferRegisterTests(void);
 #endif
@@ -62,7 +61,7 @@ void DetectTemplateRustBufferRegister(void)
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].name =
         "template_rust_buffer";
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].desc =
-        "Template content modififier to match on the template buffers";
+            "Template content modifier to match on the template buffers";
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].Setup =
         DetectTemplateRustBufferSetup;
 #ifdef UNITTESTS
@@ -72,12 +71,10 @@ void DetectTemplateRustBufferRegister(void)
     sigmatch_table[DETECT_AL_TEMPLATE_RUST_BUFFER].flags |= SIGMATCH_NOOPT;
 
     /* register inspect engines */
-    DetectAppLayerInspectEngineRegister("template_rust_buffer",
-            ALPROTO_TEMPLATE, SIG_FLAG_TOSERVER, 0,
-            DetectEngineInspectTemplateRustBuffer);
-    DetectAppLayerInspectEngineRegister("template_rust_buffer",
-            ALPROTO_TEMPLATE, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectTemplateRustBuffer);
+    DetectAppLayerInspectEngineRegister2("template_rust_buffer", ALPROTO_TEMPLATE,
+            SIG_FLAG_TOSERVER, 0, DetectEngineInspectTemplateRustBuffer, NULL);
+    DetectAppLayerInspectEngineRegister2("template_rust_buffer", ALPROTO_TEMPLATE,
+            SIG_FLAG_TOCLIENT, 0, DetectEngineInspectTemplateRustBuffer, NULL);
 
     g_template_rust_id = DetectBufferTypeGetByName("template_rust_buffer");
 
@@ -95,10 +92,9 @@ static int DetectTemplateRustBufferSetup(DetectEngineCtx *de_ctx, Signature *s,
     return 0;
 }
 
-static int DetectEngineInspectTemplateRustBuffer(ThreadVars *tv,
-    DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-    const Signature *s, const SigMatchData *smd,
-    Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
+static int DetectEngineInspectTemplateRustBuffer(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const struct DetectEngineAppInspectionEngine_ *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
 {
     int ret = 0;
     const uint8_t *data = NULL;
@@ -111,9 +107,9 @@ static int DetectEngineInspectTemplateRustBuffer(ThreadVars *tv,
     }
 
     if (data != NULL) {
-        ret = DetectEngineContentInspection(de_ctx, det_ctx, s, smd,
-            NULL, f, (uint8_t *)data, data_len, 0, DETECT_CI_FLAGS_SINGLE,
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+        ret = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
+                (uint8_t *)data, data_len, 0, DETECT_CI_FLAGS_SINGLE,
+                DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
     }
 
     SCLogNotice("Returning %d.", ret);
@@ -156,7 +152,7 @@ static int DetectTemplateRustBufferTest(void)
     p->flow = &f;
     p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     p->flowflags |= FLOW_PKT_TOSERVER | FLOW_PKT_ESTABLISHED;
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -201,7 +197,7 @@ static int DetectTemplateRustBufferTest(void)
         SigGroupCleanup(de_ctx);
     if (de_ctx != NULL)
         DetectEngineCtxFree(de_ctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p);
 

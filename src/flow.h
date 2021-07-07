@@ -24,6 +24,9 @@
 #ifndef __FLOW_H__
 #define __FLOW_H__
 
+/* forward declaration for macset include */
+typedef struct FlowStorageId FlowStorageId;
+
 #include "decode.h"
 #include "util-var.h"
 #include "util-atomic.h"
@@ -36,8 +39,8 @@
  * The actual declaration is in app-layer-parser.c */
 typedef struct AppLayerParserState_ AppLayerParserState;
 
-#define FLOW_QUIET      TRUE
-#define FLOW_VERBOSE    FALSE
+#define FLOW_QUIET   true
+#define FLOW_VERBOSE false
 
 #define TOSERVER 0
 #define TOCLIENT 1
@@ -354,6 +357,10 @@ typedef struct Flow_
             uint8_t type;   /**< icmp type */
             uint8_t code;   /**< icmp code */
         } icmp_s;
+
+        struct {
+            uint32_t spi; /**< esp spi */
+        } esp;
     };
     union {
         Port dp;        /**< tcp/udp destination port */
@@ -543,7 +550,7 @@ typedef struct FlowLookupStruct_ // TODO name
  *  balancing. */
 void FlowSetupPacket(Packet *p);
 void FlowHandlePacket (ThreadVars *, FlowLookupStruct *, Packet *);
-void FlowInitConfig (char);
+void FlowInitConfig(bool);
 void FlowPrintQueueInfo (void);
 void FlowShutdown(void);
 void FlowSetIPOnlyFlag(Flow *, int);
@@ -575,7 +582,7 @@ int FlowSetMemcap(uint64_t size);
 uint64_t FlowGetMemcap(void);
 uint64_t FlowGetMemuse(void);
 
-int GetFlowBypassInfoID(void);
+FlowStorageId GetFlowBypassInfoID(void);
 void RegisterFlowBypassInfo(void);
 
 void FlowGetLastTimeAsParts(Flow *flow, uint64_t *secs, uint64_t *usecs);

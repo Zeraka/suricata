@@ -18,7 +18,6 @@ use crate::dcerpc::dcerpc::{
     BindCtxItem, DCERPCBind, DCERPCBindAck, DCERPCBindAckResult, DCERPCHdr, DCERPCRequest, Uuid,
 };
 use crate::dcerpc::dcerpc_udp::DCERPCHdrUdp;
-use crate::log::*;
 use nom::number::complete::{le_u16, le_u32, le_u8};
 use nom::number::Endianness;
 
@@ -103,22 +102,22 @@ named!(pub parse_dcerpc_udp_header<DCERPCHdrUdp>,
                 serial_hi: serial_hi,
                 objectuuid: match parse_uuid(objectuuid) {
                     Ok((_, vect)) => assemble_uuid(vect),
-                    Err(e) => {
-                        SCLogDebug!("{}", e);
+                    Err(_e) => {
+                        SCLogDebug!("{}", _e);
                         vec![0]
                     },
                 },
                 interfaceuuid: match parse_uuid(interfaceuuid) {
                     Ok((_, vect)) => assemble_uuid(vect),
-                    Err(e) => {
-                        SCLogDebug!("{}", e);
+                    Err(_e) => {
+                        SCLogDebug!("{}", _e);
                         vec![0]
                     },
                 },
                 activityuuid: match parse_uuid(activityuuid){
                     Ok((_, vect)) => assemble_uuid(vect),
-                    Err(e) => {
-                        SCLogDebug!("{}", e);
+                    Err(_e) => {
+                        SCLogDebug!("{}", _e);
                         vec![0]
                     },
                 },

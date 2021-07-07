@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -210,7 +210,7 @@ static TmEcode AlertSyslogIPv4(ThreadVars *tv, const Packet *p, void *data)
         return TM_ECODE_OK;
 
     char proto[16] = "";
-    char *protoptr;
+    const char *protoptr;
     if (SCProtoNameValid(IPV4_GET_IPPROTO(p))) {
         protoptr = known_proto[IPV4_GET_IPPROTO(p)];
     } else {
@@ -268,7 +268,7 @@ static TmEcode AlertSyslogIPv6(ThreadVars *tv, const Packet *p, void *data)
         return TM_ECODE_OK;
 
     char proto[16] = "";
-    char *protoptr;
+    const char *protoptr;
     if (SCProtoNameValid(IPV6_GET_L4PROTO(p))) {
         protoptr = known_proto[IPV6_GET_L4PROTO(p)];
     } else {
@@ -330,7 +330,7 @@ static TmEcode AlertSyslogDecoderEvent(ThreadVars *tv, const Packet *p, void *da
 
     char temp_buf_hdr[512];
     char temp_buf_pkt[65] = "";
-    char temp_buf_tail[32];
+    char temp_buf_tail[64];
     char alert[2048] = "";
 
     for (i = 0; i < p->alerts.cnt; i++) {

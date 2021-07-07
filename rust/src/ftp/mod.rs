@@ -22,8 +22,6 @@ use std::str;
 use std;
 use std::str::FromStr;
 
-use crate::log::*;
-
 // We transform an integer string into a i64, ignoring surrounding whitespaces
 // We look for a digit suite, and try to convert it.
 // If either str::from_utf8 or FromStr::from_str fail,
@@ -68,7 +66,8 @@ named!(pub ftp_pasv_response<u16>,
             part1: verify!(getu16, |&v| v <= std::u8::MAX as u16) >>
             tag!(",") >>
             part2: verify!(getu16, |&v| v <= std::u8::MAX as u16) >>
-            alt! (tag!(").") | tag!(")")) >>
+            // may also be completed by a final point
+            tag!(")") >> opt!(complete!(tag!("."))) >>
             (
                 part1 * 256 + part2
             )
@@ -102,11 +101,9 @@ pub extern "C" fn rs_ftp_pasv_response(input: *const u8, len: u32) -> u16 {
             return dport;
         },
         Err(nom::Err::Incomplete(_)) => {
-            let buf = unsafe{std::slice::from_raw_parts(input, len as usize)};
             SCLogDebug!("pasv incomplete: '{:?}'", String::from_utf8_lossy(buf));
         },
         Err(_) => {
-            let buf = unsafe{std::slice::from_raw_parts(input, len as usize)};
             SCLogDebug!("pasv error on '{:?}'", String::from_utf8_lossy(buf));
         },
     }
@@ -120,7 +117,7 @@ named!(pub ftp_epsv_response<u16>,
             take_until!("|||") >>
             tag!("|||") >>
             port: getu16 >>
-            alt! (tag!("|).") | tag!("|)")) >>
+            tag!("|)") >> opt!(complete!(tag!("."))) >>
             (
                 port
             )
@@ -167,11 +164,9 @@ pub extern "C" fn rs_ftp_epsv_response(input: *const u8, len: u32) -> u16 {
             return dport;
         },
         Err(nom::Err::Incomplete(_)) => {
-            let buf = unsafe{std::slice::from_raw_parts(input, len as usize)};
             SCLogDebug!("epsv incomplete: '{:?}'", String::from_utf8_lossy(buf));
         },
         Err(_) => {
-            let buf = unsafe{std::slice::from_raw_parts(input, len as usize)};
             SCLogDebug!("epsv incomplete: '{:?}'", String::from_utf8_lossy(buf));
         },
 
@@ -187,6 +182,13 @@ mod test {
     fn test_pasv_response_valid() {
         let port = ftp_pasv_response("227 Entering Passive Mode (212,27,32,66,221,243).".as_bytes());
         assert_eq!(port, Ok((&b""[..], 56819)));
+        let port_notdot = ftp_pasv_response("227 Entering Passive Mode (212,27,32,66,221,243)".as_bytes());
+        assert_eq!(port_notdot, Ok((&b""[..], 56819)));
+
+        let port_epsv_dot = ftp_epsv_response("229 Entering Extended Passive Mode (|||48758|).".as_bytes());
+        assert_eq!(port_epsv_dot, Ok((&b""[..], 48758)));
+        let port_epsv_nodot = ftp_epsv_response("229 Entering Extended Passive Mode (|||48758|)".as_bytes());
+        assert_eq!(port_epsv_nodot, Ok((&b""[..], 48758)));
     }
 
     #[test]

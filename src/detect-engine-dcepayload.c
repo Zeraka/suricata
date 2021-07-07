@@ -41,7 +41,6 @@
 #include "stream-tcp.h"
 
 #include "app-layer.h"
-#include "app-layer-dcerpc.h"
 #include "flow-util.h"
 #include "util-debug.h"
 
@@ -115,7 +114,7 @@ static int DcePayloadTest15(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -168,7 +167,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;
@@ -232,7 +231,7 @@ static int DcePayloadTest16(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -285,7 +284,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;
@@ -349,7 +348,7 @@ static int DcePayloadTest17(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -402,7 +401,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;
@@ -466,7 +465,7 @@ static int DcePayloadTest18(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -519,7 +518,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;
@@ -583,7 +582,7 @@ static int DcePayloadTest19(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -636,7 +635,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;
@@ -700,7 +699,7 @@ static int DcePayloadTest20(void)
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_DCERPC;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL)
@@ -753,7 +752,7 @@ end:
         DetectEngineCtxFree(de_ctx);
     }
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
 
     UTHFreePackets(&p, 1);
     return result;

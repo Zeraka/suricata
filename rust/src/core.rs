@@ -40,13 +40,21 @@ pub const STREAM_DEPTH:    u8 = 0x20;
 pub const STREAM_MIDSTREAM:u8 = 0x40;
 
 // Application layer protocol identifiers (app-layer-protos.h)
-pub type AppProto = std::os::raw::c_int;
+pub type AppProto = u16;
 
 pub const ALPROTO_UNKNOWN : AppProto = 0;
 pub static mut ALPROTO_FAILED : AppProto = 0; // updated during init
 
 pub const IPPROTO_TCP : i32 = 6;
 pub const IPPROTO_UDP : i32 = 17;
+
+macro_rules!BIT_U8 {
+    ($x:expr) => (1 << $x);
+}
+
+macro_rules!BIT_U16 {
+    ($x:expr) => (1 << $x);
+}
 
 macro_rules!BIT_U32 {
     ($x:expr) => (1 << $x);
@@ -77,6 +85,8 @@ pub type SCLogMessageFunc =
 pub type DetectEngineStateFreeFunc =
     extern "C" fn(state: *mut DetectEngineState);
 
+pub type AppLayerParserTriggerRawStreamReassemblyFunc =
+    extern "C" fn (flow: *const Flow, direction: i32);
 pub type AppLayerDecoderEventsSetEventRawFunc =
     extern "C" fn (events: *mut *mut AppLayerDecoderEvents,
                    event: u8);
@@ -84,7 +94,7 @@ pub type AppLayerDecoderEventsSetEventRawFunc =
 pub type AppLayerDecoderEventsFreeEventsFunc =
     extern "C" fn (events: *mut *mut AppLayerDecoderEvents);
 
-pub struct SuricataStreamingBufferConfig;
+pub enum SuricataStreamingBufferConfig {}
 
 pub type SCFileOpenFileWithId = extern "C" fn (
         file_container: &FileContainer,
@@ -129,6 +139,7 @@ pub struct SuricataContext {
     DetectEngineStateFree: DetectEngineStateFreeFunc,
     AppLayerDecoderEventsSetEventRaw: AppLayerDecoderEventsSetEventRawFunc,
     AppLayerDecoderEventsFreeEvents: AppLayerDecoderEventsFreeEventsFunc,
+    pub AppLayerParserTriggerRawStreamReassembly: AppLayerParserTriggerRawStreamReassemblyFunc,
 
     pub FileOpenFile: SCFileOpenFileWithId,
     pub FileCloseFile: SCFileCloseFileById,
@@ -137,6 +148,8 @@ pub struct SuricataContext {
     pub FileContainerRecycle: SCFileContainerRecycle,
     pub FilePrune: SCFilePrune,
     pub FileSetTx: SCFileSetTx,
+
+    pub AppLayerRegisterParser: extern fn(parser: *const crate::applayer::RustParser, alproto: AppProto) -> std::os::raw::c_int,
 }
 
 #[allow(non_snake_case)]
@@ -145,15 +158,25 @@ pub struct SuricataFileContext {
     pub files_sbcfg: &'static SuricataStreamingBufferConfig,
 }
 
+extern {
+    pub fn SCGetContext() -> &'static mut SuricataContext;
+    pub fn SCLogGetLogLevel() -> i32;
+}
+
 pub static mut SC: Option<&'static SuricataContext> = None;
 
-#[no_mangle]
-pub extern "C" fn rs_init(context: &'static mut SuricataContext)
+pub fn init_ffi(context: &'static mut SuricataContext)
 {
     unsafe {
         SC = Some(context);
         ALPROTO_FAILED = StringToAppProto("failed\0".as_ptr());
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rs_init(context: &'static mut SuricataContext)
+{
+    init_ffi(context);
 }
 
 /// DetectEngineStateFree wrapper.
@@ -162,6 +185,15 @@ pub fn sc_detect_engine_state_free(state: *mut DetectEngineState)
     unsafe {
         if let Some(c) = SC {
             (c.DetectEngineStateFree)(state);
+        }
+    }
+}
+
+/// AppLayerParserTriggerRawStreamReassembly wrapper
+pub fn sc_app_layer_parser_trigger_raw_stream_reassembly(flow: *const Flow, direction: i32) {
+    unsafe {
+        if let Some(c) = SC {
+            (c.AppLayerParserTriggerRawStreamReassembly)(flow, direction);
         }
     }
 }

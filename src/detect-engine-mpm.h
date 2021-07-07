@@ -44,8 +44,6 @@ uint32_t PatternStrength(uint8_t *, uint16_t);
 uint16_t PatternMatchDefaultMatcher(void);
 uint32_t DnsQueryPatternSearch(DetectEngineThreadCtx *det_ctx, uint8_t *buffer, uint32_t buffer_len, uint8_t flags);
 
-void PacketPatternCleanup(DetectEngineThreadCtx *);
-
 void PatternMatchPrepare(MpmCtx *, uint16_t);
 void PatternMatchThreadPrepare(MpmThreadCtx *, uint16_t type);
 
@@ -127,7 +125,7 @@ typedef struct PrefilterMpmListId {
 } PrefilterMpmListId;
 
 struct MpmListIdDataArgs {
-    int local_id;  /**< used as index into thread inspect array */
+    uint32_t local_id; /**< used as index into thread inspect array */
     void *txv;
 };
 

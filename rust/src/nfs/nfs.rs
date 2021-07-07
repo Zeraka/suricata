@@ -25,7 +25,6 @@ use std::ffi::CStr;
 
 use nom;
 
-use crate::log::*;
 use crate::applayer;
 use crate::applayer::{AppLayerResult, AppLayerTxData};
 use crate::core::*;
@@ -108,7 +107,7 @@ pub enum NFSTransactionTypeData {
     FILE(NFSTransactionFile),
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct NFSTransactionFile {
     /// additional procedures part of a single file transfer. Currently
     /// only COMMIT on WRITEs.
@@ -129,13 +128,10 @@ pub struct NFSTransactionFile {
 }
 
 impl NFSTransactionFile {
-    pub fn new() -> NFSTransactionFile {
-        return NFSTransactionFile {
-            file_additional_procs: Vec::new(),
-            chunk_count:0,
-            file_last_xid: 0,
-            post_gap_ts: 0,
+    pub fn new() -> Self {
+        return Self {
             file_tracker: FileTransferTracker::new(),
+            ..Default::default()
         }
     }
 }
@@ -186,8 +182,8 @@ pub struct NFSTransaction {
 }
 
 impl NFSTransaction {
-    pub fn new() -> NFSTransaction {
-        return NFSTransaction{
+    pub fn new() -> Self {
+        return Self {
             id: 0,
             xid: 0,
             procedure: 0,
@@ -260,38 +256,6 @@ impl NFSRequestXidMap {
     }
 }
 
-#[derive(Debug)]
-pub struct NFSFiles {
-    pub files_ts: FileContainer,
-    pub files_tc: FileContainer,
-    pub flags_ts: u16,
-    pub flags_tc: u16,
-}
-
-impl NFSFiles {
-    pub fn new() -> NFSFiles {
-        NFSFiles {
-            files_ts:FileContainer::default(),
-            files_tc:FileContainer::default(),
-            flags_ts:0,
-            flags_tc:0,
-        }
-    }
-    pub fn free(&mut self) {
-        self.files_ts.free();
-        self.files_tc.free();
-    }
-
-    pub fn get(&mut self, direction: u8) -> (&mut FileContainer, u16)
-    {
-        if direction == STREAM_TOSERVER {
-            (&mut self.files_ts, self.flags_ts)
-        } else {
-            (&mut self.files_tc, self.flags_tc)
-        }
-    }
-}
-
 /// little wrapper around the FileTransferTracker::new_chunk method
 pub fn filetracker_newchunk(ft: &mut FileTransferTracker, files: &mut FileContainer,
         flags: u16, name: &Vec<u8>, data: &[u8],
@@ -301,7 +265,7 @@ pub fn filetracker_newchunk(ft: &mut FileTransferTracker, files: &mut FileContai
         Some(sfcm) => {
             ft.new_chunk(sfcm, files, flags, &name, data, chunk_offset,
                     chunk_size, fill_bytes, is_last, xid); }
-        None => panic!("BUG"),
+        None => panic!("no SURICATA_NFS_FILE_CONFIG"),
     }
 }
 
@@ -316,7 +280,7 @@ pub struct NFSState {
     /// transactions list
     pub transactions: Vec<NFSTransaction>,
 
-    pub files: NFSFiles,
+    pub files: Files,
 
     /// partial record tracking
     pub ts_chunk_xid: u32,
@@ -359,7 +323,7 @@ impl NFSState {
             requestmap:HashMap::new(),
             namemap:HashMap::new(),
             transactions: Vec::new(),
-            files:NFSFiles::new(),
+            files:Files::default(),
             ts_chunk_xid:0,
             tc_chunk_xid:0,
             ts_chunk_left:0,
@@ -384,10 +348,6 @@ impl NFSState {
             self.ts = ts;
             self.post_gap_files_checked = false;
         }
-    }
-
-    pub fn free(&mut self) {
-        self.files.free();
     }
 
     pub fn new_tx(&mut self) -> NFSTransaction {
@@ -1057,9 +1017,9 @@ impl NFSState {
         if self.ts_gap {
             SCLogDebug!("TS trying to catch up after GAP (input {})", cur_i.len());
 
-            let mut cnt = 0;
+            let mut _cnt = 0;
             while cur_i.len() > 0 {
-                cnt += 1;
+                _cnt += 1;
                 match nfs_probe(cur_i, STREAM_TOSERVER) {
                     1 => {
                         SCLogDebug!("expected data found");
@@ -1068,13 +1028,13 @@ impl NFSState {
                     },
                     0 => {
                         SCLogDebug!("incomplete, queue and retry with the next block (input {}). Looped {} times.",
-                                cur_i.len(), cnt);
+                                cur_i.len(), _cnt);
                         return AppLayerResult::incomplete((i.len() - cur_i.len()) as u32, (cur_i.len() + 1) as u32);
                     },
                     -1 => {
                         cur_i = &cur_i[1..];
                         if cur_i.len() == 0 {
-                            SCLogDebug!("all post-GAP data in this chunk was bad. Looped {} times.", cnt);
+                            SCLogDebug!("all post-GAP data in this chunk was bad. Looped {} times.", _cnt);
                         }
                     },
                     _ => {
@@ -1210,9 +1170,9 @@ impl NFSState {
         if self.tc_gap {
             SCLogDebug!("TC trying to catch up after GAP (input {})", cur_i.len());
 
-            let mut cnt = 0;
+            let mut _cnt = 0;
             while cur_i.len() > 0 {
-                cnt += 1;
+                _cnt += 1;
                 match nfs_probe(cur_i, STREAM_TOCLIENT) {
                     1 => {
                         SCLogDebug!("expected data found");
@@ -1221,13 +1181,13 @@ impl NFSState {
                     },
                     0 => {
                         SCLogDebug!("incomplete, queue and retry with the next block (input {}). Looped {} times.",
-                                cur_i.len(), cnt);
+                                cur_i.len(), _cnt);
                         return AppLayerResult::incomplete((i.len() - cur_i.len()) as u32, (cur_i.len() + 1) as u32);
                     },
                     -1 => {
                         cur_i = &cur_i[1..];
                         if cur_i.len() == 0 {
-                            SCLogDebug!("all post-GAP data in this chunk was bad. Looped {} times.", cnt);
+                            SCLogDebug!("all post-GAP data in this chunk was bad. Looped {} times.", _cnt);
                         }
                     },
                     _ => {
@@ -1409,7 +1369,7 @@ impl NFSState {
 
 /// Returns *mut NFSState
 #[no_mangle]
-pub extern "C" fn rs_nfs_state_new() -> *mut std::os::raw::c_void {
+pub extern "C" fn rs_nfs_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = NFSState::new();
     let boxed = Box::new(state);
     SCLogDebug!("allocating state");
@@ -1422,8 +1382,7 @@ pub extern "C" fn rs_nfs_state_new() -> *mut std::os::raw::c_void {
 pub extern "C" fn rs_nfs_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     SCLogDebug!("freeing state");
-    let mut nfs_state: Box<NFSState> = unsafe{transmute(state)};
-    nfs_state.free();
+    let mut _nfs_state: Box<NFSState> = unsafe{transmute(state)};
 }
 
 /// C binding parse a NFS TCP request. Returns 1 on success, -1 on failure.
@@ -1554,14 +1513,6 @@ pub extern "C" fn rs_nfs_state_tx_free(state: &mut NFSState,
                                        tx_id: u64)
 {
     state.free_tx(tx_id);
-}
-
-#[no_mangle]
-pub extern "C" fn rs_nfs_state_progress_completion_status(
-    _direction: u8)
-    -> std::os::raw::c_int
-{
-    return 1;
 }
 
 #[no_mangle]
@@ -1783,7 +1734,7 @@ pub fn nfs_probe(i: &[u8], direction: u8) -> i8 {
                    rpc.program == 100003 &&
                    rpc.procedure <= NFSPROC3_COMMIT
                 {
-                    return 1;
+                    return rpc_auth_type_known(rpc.creds_flavor);
                 } else {
                     return -1;
                 }

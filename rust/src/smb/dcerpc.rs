@@ -17,7 +17,6 @@
 
 // written by Victor Julien
 
-use crate::log::*;
 use uuid;
 use crate::smb::smb::*;
 use crate::smb::smb2::*;
@@ -62,7 +61,7 @@ impl SMBCommonHdr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct DCERPCIface {
     pub uuid: Vec<u8>,
     pub ver: u16,
@@ -73,19 +72,17 @@ pub struct DCERPCIface {
 }
 
 impl DCERPCIface {
-    pub fn new(uuid: Vec<u8>, ver: u16, ver_min: u16) -> DCERPCIface {
-        DCERPCIface {
+    pub fn new(uuid: Vec<u8>, ver: u16, ver_min: u16) -> Self {
+        Self {
             uuid: uuid,
             ver:ver,
             ver_min:ver_min,
-            ack_result:0,
-            ack_reason:0,
-            acked:false,
+            ..Default::default()
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionDCERPC {
     pub opnum: u16,
     pub req_cmd: u8,
@@ -100,32 +97,19 @@ pub struct SMBTransactionDCERPC {
 }
 
 impl SMBTransactionDCERPC {
-    fn new_request(req: u8, call_id: u32) -> SMBTransactionDCERPC {
-        return SMBTransactionDCERPC {
+    fn new_request(req: u8, call_id: u32) -> Self {
+        return Self {
             opnum: 0,
             req_cmd: req,
             req_set: true,
-            res_cmd: 0,
-            res_set: false,
             call_id: call_id,
-            frag_cnt_ts: 0,
-            frag_cnt_tc: 0,
-            stub_data_ts:Vec::new(),
-            stub_data_tc:Vec::new(),
+            ..Default::default()
         }
     }
-    fn new_response(call_id: u32) -> SMBTransactionDCERPC {
-        return SMBTransactionDCERPC {
-            opnum: 0,
-            req_cmd: 0,
-            req_set: false,
-            res_cmd: 0,
-            res_set: false,
+    fn new_response(call_id: u32) -> Self {
+        return Self {
             call_id: call_id,
-            frag_cnt_ts: 0,
-            frag_cnt_tc: 0,
-            stub_data_ts:Vec::new(),
-            stub_data_tc:Vec::new(),
+            ..Default::default()
         }
     }
     pub fn set_result(&mut self, res: u8) {
@@ -289,10 +273,10 @@ pub fn smb_write_dcerpc_record<'b>(state: &mut SMBState,
                                         i.iface.to_vec()
                                     };
                                     let uuid_str = uuid::Uuid::from_slice(&x.clone());
-                                    let uuid_str = uuid_str.map(|uuid_str| uuid_str.to_hyphenated().to_string()).unwrap();
+                                    let _uuid_str = uuid_str.map(|uuid_str| uuid_str.to_hyphenated().to_string()).unwrap();
                                     let d = DCERPCIface::new(x,i.ver,i.ver_min);
                                     SCLogDebug!("UUID {} version {}/{} bytes {:?}",
-                                            uuid_str,
+                                            _uuid_str,
                                             i.ver, i.ver_min,i.iface);
                                     ifaces.push(d);
                                 }

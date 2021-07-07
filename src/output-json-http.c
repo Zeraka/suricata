@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -56,21 +56,17 @@
 #include "util-byte.h"
 
 typedef struct LogHttpFileCtx_ {
-    LogFileCtx *file_ctx;
     uint32_t flags; /** Store mode */
     uint64_t fields;/** Store fields */
     HttpXFFCfg *xff_cfg;
     HttpXFFCfg *parent_xff_cfg;
-    OutputJsonCommonSettings cfg;
+    OutputJsonCtx *eve_ctx;
 } LogHttpFileCtx;
 
 typedef struct JsonHttpLogThread_ {
     LogHttpFileCtx *httplog_ctx;
-    LogFileCtx *file_ctx;
-    /** LogFileCtx has the pointer to the file and a mutex to allow multithreading */
     uint32_t uri_cnt;
-
-    MemBuffer *buffer;
+    OutputJsonThreadCtx *ctx;
 } JsonHttpLogThread;
 
 #define MAX_SIZE_HEADER_NAME 256
@@ -204,10 +200,8 @@ static void EveHttpLogJSONBasic(JsonBuilder *js, htp_tx_t *tx)
 {
     /* hostname */
     if (tx->request_hostname != NULL) {
-        const size_t size = bstr_len(tx->request_hostname) * 2 + 1;
-        char string[size];
-        BytesToStringBuffer(bstr_ptr(tx->request_hostname), bstr_len(tx->request_hostname), string, size);
-        jb_set_string(js, "hostname", string);
+        jb_set_string_from_bytes(
+                js, "hostname", bstr_ptr(tx->request_hostname), bstr_len(tx->request_hostname));
     }
 
     /* port */
@@ -222,29 +216,22 @@ static void EveHttpLogJSONBasic(JsonBuilder *js, htp_tx_t *tx)
 
     /* uri */
     if (tx->request_uri != NULL) {
-        const size_t size = bstr_len(tx->request_uri) * 2 + 1;
-        char string[size];
-        BytesToStringBuffer(bstr_ptr(tx->request_uri), bstr_len(tx->request_uri), string, size);
-        jb_set_string(js, "url", string);
+        jb_set_string_from_bytes(js, "url", bstr_ptr(tx->request_uri), bstr_len(tx->request_uri));
     }
 
     if (tx->request_headers != NULL) {
         /* user agent */
         htp_header_t *h_user_agent = htp_table_get_c(tx->request_headers, "user-agent");
         if (h_user_agent != NULL) {
-            const size_t size = bstr_len(h_user_agent->value) * 2 + 1;
-            char string[size];
-            BytesToStringBuffer(bstr_ptr(h_user_agent->value), bstr_len(h_user_agent->value), string, size);
-            jb_set_string(js, "http_user_agent", string);
+            jb_set_string_from_bytes(js, "http_user_agent", bstr_ptr(h_user_agent->value),
+                    bstr_len(h_user_agent->value));
         }
 
         /* x-forwarded-for */
         htp_header_t *h_x_forwarded_for = htp_table_get_c(tx->request_headers, "x-forwarded-for");
         if (h_x_forwarded_for != NULL) {
-            const size_t size = bstr_len(h_x_forwarded_for->value) * 2 + 1;
-            char string[size];
-            BytesToStringBuffer(bstr_ptr(h_x_forwarded_for->value), bstr_len(h_x_forwarded_for->value), string, size);
-            jb_set_string(js, "xff", string);
+            jb_set_string_from_bytes(js, "xff", bstr_ptr(h_x_forwarded_for->value),
+                    bstr_len(h_x_forwarded_for->value));
         }
     }
 
@@ -262,11 +249,9 @@ static void EveHttpLogJSONBasic(JsonBuilder *js, htp_tx_t *tx)
         }
         htp_header_t *h_content_range = htp_table_get_c(tx->response_headers, "content-range");
         if (h_content_range != NULL) {
-            const size_t size = bstr_len(h_content_range->value) * 2 + 1;
-            char string[size];
-            BytesToStringBuffer(bstr_ptr(h_content_range->value), bstr_len(h_content_range->value), string, size);
             jb_open_object(js, "content_range");
-            jb_set_string(js, "raw", string);
+            jb_set_string_from_bytes(
+                    js, "raw", bstr_ptr(h_content_range->value), bstr_len(h_content_range->value));
             HtpContentRange crparsed;
             if (HTPParseContentRange(h_content_range->value, &crparsed) == 0) {
                 if (crparsed.start >= 0)
@@ -329,27 +314,20 @@ static void EveHttpLogJSONExtended(JsonBuilder *js, htp_tx_t *tx)
         h_referer = htp_table_get_c(tx->request_headers, "referer");
     }
     if (h_referer != NULL) {
-        const size_t size = bstr_len(h_referer->value) * 2 + 1;
-        char string[size];
-        BytesToStringBuffer(bstr_ptr(h_referer->value), bstr_len(h_referer->value), string, size);
-
-        jb_set_string(js, "http_refer", string);
+        jb_set_string_from_bytes(
+                js, "http_refer", bstr_ptr(h_referer->value), bstr_len(h_referer->value));
     }
 
     /* method */
     if (tx->request_method != NULL) {
-        const size_t size = bstr_len(tx->request_method) * 2 + 1;
-        char string[size];
-        BytesToStringBuffer(bstr_ptr(tx->request_method), bstr_len(tx->request_method), string, size);
-        jb_set_string(js, "http_method", string);
+        jb_set_string_from_bytes(
+                js, "http_method", bstr_ptr(tx->request_method), bstr_len(tx->request_method));
     }
 
     /* protocol */
     if (tx->request_protocol != NULL) {
-        const size_t size = bstr_len(tx->request_protocol) * 2 + 1;
-        char string[size];
-        BytesToStringBuffer(bstr_ptr(tx->request_protocol), bstr_len(tx->request_protocol), string, size);
-        jb_set_string(js, "protocol", string);
+        jb_set_string_from_bytes(
+                js, "protocol", bstr_ptr(tx->request_protocol), bstr_len(tx->request_protocol));
     }
 
     /* response status */
@@ -363,10 +341,8 @@ static void EveHttpLogJSONExtended(JsonBuilder *js, htp_tx_t *tx)
 
         htp_header_t *h_location = htp_table_get_c(tx->response_headers, "location");
         if (h_location != NULL) {
-            const size_t size = bstr_len(h_location->value) * 2 + 1;
-            char string[size];
-            BytesToStringBuffer(bstr_ptr(h_location->value), bstr_len(h_location->value), string, size);
-            jb_set_string(js, "redirect", string);
+            jb_set_string_from_bytes(
+                    js, "redirect", bstr_ptr(h_location->value), bstr_len(h_location->value));
         }
     }
 
@@ -431,7 +407,7 @@ void EveHttpLogJSONBodyPrintable(JsonBuilder *js, Flow *f, uint64_t tx_id)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
-        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, htp_state, tx_id);
+        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, htp_state, tx_id);
         if (tx) {
             HtpTxUserData *htud = (HtpTxUserData *)htp_tx_get_user_data(tx);
             if (htud != NULL) {
@@ -454,7 +430,7 @@ static void BodyBase64Buffer(JsonBuilder *js, HtpBody *body, const char *key)
             return;
         }
 
-        unsigned long len = body_data_len * 2 + 1;
+        unsigned long len = BASE64_BUFFER_SIZE(body_data_len);
         uint8_t encoded[len];
         if (Base64Encode(body_data, body_data_len, encoded, &len) == SC_BASE64_OK) {
             jb_set_string(js, key, (char *)encoded);
@@ -466,7 +442,7 @@ void EveHttpLogJSONBodyBase64(JsonBuilder *js, Flow *f, uint64_t tx_id)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
-        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, htp_state, tx_id);
+        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, htp_state, tx_id);
         if (tx) {
             HtpTxUserData *htud = (HtpTxUserData *)htp_tx_get_user_data(tx);
             if (htud != NULL) {
@@ -504,15 +480,12 @@ static int JsonHttpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
     htp_tx_t *tx = txptr;
     JsonHttpLogThread *jhl = (JsonHttpLogThread *)thread_data;
 
-    JsonBuilder *js = CreateEveHeaderWithTxId(p, LOG_DIR_FLOW, "http", NULL, tx_id);
+    JsonBuilder *js = CreateEveHeaderWithTxId(
+            p, LOG_DIR_FLOW, "http", NULL, tx_id, jhl->httplog_ctx->eve_ctx);
     if (unlikely(js == NULL))
         return TM_ECODE_OK;
-    EveAddCommonOptions(&jhl->httplog_ctx->cfg, p, f, js);
 
     SCLogDebug("got a HTTP request and now logging !!");
-
-    /* reset */
-    MemBufferReset(jhl->buffer);
 
     EveHttpLogJSON(jhl, js, tx, tx_id);
     HttpXFFCfg *xff_cfg = jhl->httplog_ctx->xff_cfg != NULL ?
@@ -539,7 +512,7 @@ static int JsonHttpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
         }
     }
 
-    OutputJsonBuilderBuffer(js, jhl->file_ctx, &jhl->buffer);
+    OutputJsonBuilderBuffer(js, jhl->ctx);
     jb_free(js);
 
     SCReturnInt(TM_ECODE_OK);
@@ -549,7 +522,7 @@ bool EveHttpAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
 {
     HtpState *htp_state = (HtpState *)FlowGetAppState(f);
     if (htp_state) {
-        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, htp_state, tx_id);
+        htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, htp_state, tx_id);
 
         if (tx) {
             EveHttpLogJSONBasic(js, tx);
@@ -559,90 +532,6 @@ bool EveHttpAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
     }
 
     return false;
-}
-
-static void OutputHttpLogDeinit(OutputCtx *output_ctx)
-{
-    LogHttpFileCtx *http_ctx = output_ctx->data;
-    LogFileCtx *logfile_ctx = http_ctx->file_ctx;
-    LogFileFreeCtx(logfile_ctx);
-    if (http_ctx->xff_cfg) {
-        SCFree(http_ctx->xff_cfg);
-    }
-    SCFree(http_ctx);
-    SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "http.json"
-static OutputInitResult OutputHttpLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_HTTP_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    LogHttpFileCtx *http_ctx = SCMalloc(sizeof(LogHttpFileCtx));
-    if (unlikely(http_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(http_ctx);
-        return result;
-    }
-
-    http_ctx->file_ctx = file_ctx;
-    http_ctx->flags = LOG_HTTP_DEFAULT;
-
-    if (conf) {
-        const char *extended = ConfNodeLookupChildValue(conf, "extended");
-
-        if (extended != NULL) {
-            if (ConfValIsTrue(extended)) {
-                http_ctx->flags = LOG_HTTP_EXTENDED;
-            }
-        }
-        const char *all_headers = ConfNodeLookupChildValue(
-                conf, "dump-all-headers");
-        if (all_headers != NULL) {
-            if (strcmp(all_headers, "both") == 0) {
-                http_ctx->flags |= LOG_HTTP_REQ_HEADERS;
-                http_ctx->flags |= LOG_HTTP_RES_HEADERS;
-            } else if (strcmp(all_headers, "request") == 0) {
-                http_ctx->flags |= LOG_HTTP_REQ_HEADERS;
-            } else if (strcmp(all_headers, "response") == 0) {
-                http_ctx->flags |= LOG_HTTP_RES_HEADERS;
-            } else if (strcmp(all_headers, "none") != 0) {
-                SCLogWarning(SC_WARN_ANOMALY_CONFIG,
-                             "unhandled value for dump-all-headers configuration : %s",
-                             all_headers);
-            }
-        }
-    }
-    http_ctx->xff_cfg = SCCalloc(1, sizeof(HttpXFFCfg));
-    if (http_ctx->xff_cfg != NULL) {
-        HttpXFFGetCfg(conf, http_ctx->xff_cfg);
-    }
-
-    output_ctx->data = http_ctx;
-    output_ctx->DeInit = OutputHttpLogDeinit;
-
-    /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP);
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
 }
 
 static void OutputHttpLogDeinitSub(OutputCtx *output_ctx)
@@ -671,9 +560,8 @@ static OutputInitResult OutputHttpLogInitSub(ConfNode *conf, OutputCtx *parent_c
         return result;
     }
 
-    http_ctx->file_ctx = ojc->file_ctx;
     http_ctx->flags = LOG_HTTP_DEFAULT;
-    http_ctx->cfg = ojc->cfg;
+    http_ctx->eve_ctx = ojc;
 
     if (conf) {
         const char *extended = ConfNodeLookupChildValue(conf, "extended");
@@ -733,7 +621,7 @@ static OutputInitResult OutputHttpLogInitSub(ConfNode *conf, OutputCtx *parent_c
     output_ctx->DeInit = OutputHttpLogDeinitSub;
 
     /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP);
+    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP1);
 
     result.ctx = output_ctx;
     result.ok = true;
@@ -755,13 +643,8 @@ static TmEcode JsonHttpLogThreadInit(ThreadVars *t, const void *initdata, void *
     /* Use the Output Context (file pointer and mutex) */
     aft->httplog_ctx = ((OutputCtx *)initdata)->data; //TODO
 
-    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
-        goto error_exit;
-    }
-
-    aft->file_ctx = LogFileEnsureExists(aft->httplog_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
+    aft->ctx = CreateEveThreadCtx(t, aft->httplog_ctx->eve_ctx);
+    if (!aft->ctx) {
         goto error_exit;
     }
 
@@ -769,9 +652,6 @@ static TmEcode JsonHttpLogThreadInit(ThreadVars *t, const void *initdata, void *
     return TM_ECODE_OK;
 
 error_exit:
-    if (aft->buffer != NULL) {
-        MemBufferFree(aft->buffer);
-    }
     SCFree(aft);
     return TM_ECODE_FAILED;
 }
@@ -783,7 +663,8 @@ static TmEcode JsonHttpLogThreadDeinit(ThreadVars *t, void *data)
         return TM_ECODE_OK;
     }
 
-    MemBufferFree(aft->buffer);
+    FreeEveThreadCtx(aft->ctx);
+
     /* clear memory */
     memset(aft, 0, sizeof(JsonHttpLogThread));
 
@@ -793,13 +674,8 @@ static TmEcode JsonHttpLogThreadDeinit(ThreadVars *t, void *data)
 
 void JsonHttpLogRegister (void)
 {
-    /* register as separate module */
-    OutputRegisterTxModule(LOGGER_JSON_HTTP, "JsonHttpLog", "http-json-log",
-        OutputHttpLogInit, ALPROTO_HTTP, JsonHttpLogger, JsonHttpLogThreadInit,
-        JsonHttpLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
-    OutputRegisterTxSubModule(LOGGER_JSON_HTTP, "eve-log", "JsonHttpLog",
-        "eve-log.http", OutputHttpLogInitSub, ALPROTO_HTTP, JsonHttpLogger,
-        JsonHttpLogThreadInit, JsonHttpLogThreadDeinit, NULL);
+    /* register as child of eve-log */
+    OutputRegisterTxSubModule(LOGGER_JSON_HTTP, "eve-log", "JsonHttpLog", "eve-log.http",
+            OutputHttpLogInitSub, ALPROTO_HTTP1, JsonHttpLogger, JsonHttpLogThreadInit,
+            JsonHttpLogThreadDeinit, NULL);
 }

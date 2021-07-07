@@ -22,9 +22,10 @@ use crate::core::{DetectEngineState,Flow,AppLayerEventType,AppLayerDecoderEvents
 use crate::filecontainer::FileContainer;
 use crate::applayer;
 use std::os::raw::{c_void,c_char,c_int};
+use crate::core::SC;
 
 #[repr(C)]
-#[derive(Debug,PartialEq)]
+#[derive(Default, Debug,PartialEq)]
 pub struct AppLayerTxConfig {
     /// config: log flags
     log_flags: u8,
@@ -49,7 +50,7 @@ impl AppLayerTxConfig {
 }
 
 #[repr(C)]
-#[derive(Debug,PartialEq)]
+#[derive(Default, Debug,PartialEq)]
 pub struct AppLayerTxData {
     /// config: log flags
     pub config: AppLayerTxConfig,
@@ -87,7 +88,7 @@ macro_rules!export_tx_data_get {
 }
 
 #[repr(C)]
-#[derive(Debug,PartialEq,Copy,Clone)]
+#[derive(Default,Debug,PartialEq,Copy,Clone)]
 pub struct AppLayerResult {
     pub status: i32,
     pub consumed: u32,
@@ -96,20 +97,15 @@ pub struct AppLayerResult {
 
 impl AppLayerResult {
     /// parser has successfully processed in the input, and has consumed all of it
-    pub fn ok() -> AppLayerResult {
-        return AppLayerResult {
-            status: 0,
-            consumed: 0,
-            needed: 0,
-        };
+    pub fn ok() -> Self {
+        Default::default()
     }
     /// parser has hit an unrecoverable error. Returning this to the API
     /// leads to no further calls to the parser.
-    pub fn err() -> AppLayerResult {
-        return AppLayerResult {
+    pub fn err() -> Self {
+        return Self {
             status: -1,
-            consumed: 0,
-            needed: 0,
+            ..Default::default()
         };
     }
     /// parser needs more data. Through 'consumed' it will indicate how many
@@ -117,8 +113,8 @@ impl AppLayerResult {
     /// how many more bytes it needs before getting called again.
     /// Note: consumed should never be more than the input len
     ///       needed + consumed should be more than the input len
-    pub fn incomplete(consumed: u32, needed: u32) -> AppLayerResult {
-        return AppLayerResult {
+    pub fn incomplete(consumed: u32, needed: u32) -> Self {
+        return Self {
             status: 1,
             consumed: consumed,
             needed: needed,
@@ -193,8 +189,9 @@ pub struct RustParser {
     pub get_tx:             StateGetTxFn,
     /// Function called to free a transaction
     pub tx_free:            StateTxFreeFn,
-    /// Function returning the current transaction completion status
-    pub tx_get_comp_st:     StateGetTxCompletionStatusFn,
+    /// Progress values at which the tx is considered complete in a direction
+    pub tx_comp_st_ts:      c_int,
+    pub tx_comp_st_tc:      c_int,
     /// Function returning the current transaction progress
     pub tx_get_progress:    StateGetProgressFn,
 
@@ -230,6 +227,10 @@ pub struct RustParser {
     pub apply_tx_config: Option<ApplyTxConfigFn>,
 
     pub flags: u32,
+
+    /// Function to handle the end of data coming on one of the sides
+    /// due to the stream reaching its 'depth' limit.
+    pub truncate: Option<TruncateFn>,
 }
 
 /// Create a slice, given a buffer and a length
@@ -255,13 +256,12 @@ pub type ParseFn      = extern "C" fn (flow: *const Flow,
                                        input_len: u32,
                                        data: *const c_void,
                                        flags: u8) -> AppLayerResult;
-pub type ProbeFn      = extern "C" fn (flow: *const Flow,direction: u8,input:*const u8, input_len: u32, rdir: *mut u8) -> AppProto;
-pub type StateAllocFn = extern "C" fn () -> *mut c_void;
+pub type ProbeFn      = extern "C" fn (flow: *const Flow, flags: u8, input:*const u8, input_len: u32, rdir: *mut u8) -> AppProto;
+pub type StateAllocFn = extern "C" fn (*mut c_void, AppProto) -> *mut c_void;
 pub type StateFreeFn  = extern "C" fn (*mut c_void);
 pub type StateTxFreeFn  = extern "C" fn (*mut c_void, u64);
 pub type StateGetTxFn            = extern "C" fn (*mut c_void, u64) -> *mut c_void;
 pub type StateGetTxCntFn         = extern "C" fn (*mut c_void) -> u64;
-pub type StateGetTxCompletionStatusFn = extern "C" fn (u8) -> c_int;
 pub type StateGetProgressFn = extern "C" fn (*mut c_void, u8) -> c_int;
 pub type GetDetectStateFn   = extern "C" fn (*mut c_void) -> *mut DetectEngineState;
 pub type SetDetectStateFn   = extern "C" fn (*mut c_void, &mut DetectEngineState) -> c_int;
@@ -279,24 +279,36 @@ pub type GetTxIteratorFn    = extern "C" fn (ipproto: u8, alproto: AppProto,
                                              -> AppLayerGetTxIterTuple;
 pub type GetTxDataFn = unsafe extern "C" fn(*mut c_void) -> *mut AppLayerTxData;
 pub type ApplyTxConfigFn = unsafe extern "C" fn (*mut c_void, *mut c_void, c_int, AppLayerTxConfig);
+pub type TruncateFn = unsafe extern "C" fn (*mut c_void, u8);
+
 
 // Defined in app-layer-register.h
 extern {
     pub fn AppLayerRegisterProtocolDetection(parser: *const RustParser, enable_default: c_int) -> AppProto;
-    pub fn AppLayerRegisterParser(parser: *const RustParser, alproto: AppProto) -> c_int;
+    pub fn AppLayerRegisterParserAlias(parser_name: *const c_char, alias_name: *const c_char);
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn AppLayerRegisterParser(parser: *const RustParser, alproto: AppProto) -> c_int {
+    (SC.unwrap().AppLayerRegisterParser)(parser, alproto)
 }
 
 // Defined in app-layer-detect-proto.h
 extern {
+    pub fn AppLayerProtoDetectPMRegisterPatternCSwPP(iproto: u8, alproto: AppProto,
+                                                     pattern: *const c_char, depth: u16,
+                                                     offset: u16, direction: u8, ppfn: ProbeFn,
+                                                     pp_min_depth: u16, pp_max_depth: u16) -> c_int;
     pub fn AppLayerProtoDetectConfProtoDetectionEnabled(ipproto: *const c_char, proto: *const c_char) -> c_int;
 }
 
 // Defined in app-layer-parser.h
-pub const APP_LAYER_PARSER_EOF : u8 = 0b0;
-pub const APP_LAYER_PARSER_NO_INSPECTION : u8 = 0b1;
-pub const APP_LAYER_PARSER_NO_REASSEMBLY : u8 = 0b10;
-pub const APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD : u8 = 0b100;
-pub const APP_LAYER_PARSER_BYPASS_READY : u8 = 0b1000;
+pub const APP_LAYER_PARSER_EOF_TS : u8 = BIT_U8!(5);
+pub const APP_LAYER_PARSER_EOF_TC : u8 = BIT_U8!(6);
+pub const APP_LAYER_PARSER_NO_INSPECTION : u8 = BIT_U8!(1);
+pub const APP_LAYER_PARSER_NO_REASSEMBLY : u8 = BIT_U8!(2);
+pub const APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD : u8 = BIT_U8!(3);
+pub const APP_LAYER_PARSER_BYPASS_READY : u8 = BIT_U8!(4);
 
 pub const APP_LAYER_PARSER_OPT_ACCEPT_GAPS: u32 = BIT_U32!(0);
 pub const APP_LAYER_PARSER_OPT_UNIDIR_TXS: u32 = BIT_U32!(1);
@@ -338,17 +350,15 @@ impl AppLayerGetTxIterTuple {
 
 /// LoggerFlags tracks which loggers have already been executed.
 #[repr(C)]
-#[derive(Debug,PartialEq)]
+#[derive(Default, Debug,PartialEq)]
 pub struct LoggerFlags {
     flags: u32,
 }
 
 impl LoggerFlags {
 
-    pub fn new() -> LoggerFlags {
-        return LoggerFlags{
-            flags: 0,
-        }
+    pub fn new() -> Self {
+        Default::default()
     }
 
     pub fn get(&self) -> u32 {

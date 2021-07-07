@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -257,18 +257,17 @@ static struct {
 };
 
 typedef struct LogDnsFileCtx_ {
-    LogFileCtx *file_ctx;
     uint64_t flags; /** Store mode */
     DnsVersion version;
-    OutputJsonCommonSettings cfg;
+    OutputJsonCtx *eve_ctx;
 } LogDnsFileCtx;
 
 typedef struct LogDnsLogThread_ {
     LogDnsFileCtx *dnslog_ctx;
-    /** LogFileCtx has the pointer to the file and a mutex to allow multithreading */
-    LogFileCtx *file_ctx;
-    MemBuffer *buffer;
+    OutputJsonThreadCtx *ctx;
 } LogDnsLogThread;
+
+static bool v1_deprecation_warned = false;
 
 JsonBuilder *JsonDNSLogQuery(void *txptr, uint64_t tx_id)
 {
@@ -317,11 +316,10 @@ static int JsonDnsLoggerToServer(ThreadVars *tv, void *thread_data,
     }
 
     for (uint16_t i = 0; i < 0xffff; i++) {
-        JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL);
+        JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL, dnslog_ctx->eve_ctx);
         if (unlikely(jb == NULL)) {
             return TM_ECODE_OK;
         }
-        EveAddCommonOptions(&dnslog_ctx->cfg, p, f, jb);
 
         jb_open_object(jb, "dns");
         if (!rs_dns_log_json_query(txptr, i, td->dnslog_ctx->flags, jb)) {
@@ -330,8 +328,7 @@ static int JsonDnsLoggerToServer(ThreadVars *tv, void *thread_data,
         }
         jb_close(jb);
 
-        MemBufferReset(td->buffer);
-        OutputJsonBuilderBuffer(jb, td->file_ctx, &td->buffer);
+        OutputJsonBuilderBuffer(jb, td->ctx);
         jb_free(jb);
     }
 
@@ -352,27 +349,24 @@ static int JsonDnsLoggerToClient(ThreadVars *tv, void *thread_data,
 
     if (td->dnslog_ctx->version == DNS_VERSION_2) {
         if (rs_dns_do_log_answer(txptr, td->dnslog_ctx->flags)) {
-            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL);
+            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL, dnslog_ctx->eve_ctx);
             if (unlikely(jb == NULL)) {
                 return TM_ECODE_OK;
             }
-            EveAddCommonOptions(&dnslog_ctx->cfg, p, f, jb);
 
             jb_open_object(jb, "dns");
             rs_dns_log_json_answer(txptr, td->dnslog_ctx->flags, jb);
             jb_close(jb);
-            MemBufferReset(td->buffer);
-            OutputJsonBuilderBuffer(jb, td->file_ctx, &td->buffer);
+            OutputJsonBuilderBuffer(jb, td->ctx);
             jb_free(jb);
         }
     } else {
         /* Log answers. */
         for (uint16_t i = 0; i < UINT16_MAX; i++) {
-            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL);
+            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL, dnslog_ctx->eve_ctx);
             if (unlikely(jb == NULL)) {
                 return TM_ECODE_OK;
             }
-            EveAddCommonOptions(&dnslog_ctx->cfg, p, f, jb);
 
             JsonBuilder *answer = rs_dns_log_json_answer_v1(txptr, i,
                     td->dnslog_ctx->flags);
@@ -381,18 +375,17 @@ static int JsonDnsLoggerToClient(ThreadVars *tv, void *thread_data,
                 break;
             }
             jb_set_object(jb, "dns", answer);
+            jb_free(answer);
 
-            MemBufferReset(td->buffer);
-            OutputJsonBuilderBuffer(jb, td->file_ctx, &td->buffer);
+            OutputJsonBuilderBuffer(jb, td->ctx);
             jb_free(jb);
         }
         /* Log authorities. */
         for (uint16_t i = 0; i < UINT16_MAX; i++) {
-            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL);
+            JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_FLOW, "dns", NULL, dnslog_ctx->eve_ctx);
             if (unlikely(jb == NULL)) {
                 return TM_ECODE_OK;
             }
-            EveAddCommonOptions(&dnslog_ctx->cfg, p, f, jb);
 
             JsonBuilder *answer = rs_dns_log_json_authority_v1(txptr, i,
                     td->dnslog_ctx->flags);
@@ -401,14 +394,25 @@ static int JsonDnsLoggerToClient(ThreadVars *tv, void *thread_data,
                 break;
             }
             jb_set_object(jb, "dns", answer);
+            jb_free(answer);
 
-            MemBufferReset(td->buffer);
-            OutputJsonBuilderBuffer(jb, td->file_ctx, &td->buffer);
+            OutputJsonBuilderBuffer(jb, td->ctx);
             jb_free(jb);
         }
     }
 
     SCReturnInt(TM_ECODE_OK);
+}
+
+static int JsonDnsLogger(ThreadVars *tv, void *thread_data, const Packet *p, Flow *f, void *alstate,
+        void *txptr, uint64_t tx_id)
+{
+    if (rs_dns_tx_is_request(txptr)) {
+        return JsonDnsLoggerToServer(tv, thread_data, p, f, alstate, txptr, tx_id);
+    } else if (rs_dns_tx_is_response(txptr)) {
+        return JsonDnsLoggerToClient(tv, thread_data, p, f, alstate, txptr, tx_id);
+    }
+    return TM_ECODE_OK;
 }
 
 static TmEcode LogDnsLogThreadInit(ThreadVars *t, const void *initdata, void **data)
@@ -423,15 +427,10 @@ static TmEcode LogDnsLogThreadInit(ThreadVars *t, const void *initdata, void **d
         goto error_exit;
     }
 
-    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
-        goto error_exit;
-    }
-
     /* Use the Ouptut Context (file pointer and mutex) */
-    aft->dnslog_ctx= ((OutputCtx *)initdata)->data;
-    aft->file_ctx = LogFileEnsureExists(aft->dnslog_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
+    aft->dnslog_ctx = ((OutputCtx *)initdata)->data;
+    aft->ctx = CreateEveThreadCtx(t, aft->dnslog_ctx->eve_ctx);
+    if (!aft->ctx) {
         goto error_exit;
     }
 
@@ -439,9 +438,6 @@ static TmEcode LogDnsLogThreadInit(ThreadVars *t, const void *initdata, void **d
     return TM_ECODE_OK;
 
 error_exit:
-    if (aft->buffer != NULL) {
-        MemBufferFree(aft->buffer);
-    }
     SCFree(aft);
     return TM_ECODE_FAILED;
 }
@@ -452,21 +448,13 @@ static TmEcode LogDnsLogThreadDeinit(ThreadVars *t, void *data)
     if (aft == NULL) {
         return TM_ECODE_OK;
     }
+    FreeEveThreadCtx(aft->ctx);
 
-    MemBufferFree(aft->buffer);
     /* clear memory */
     memset(aft, 0, sizeof(LogDnsLogThread));
 
     SCFree(aft);
     return TM_ECODE_OK;
-}
-
-static void LogDnsLogDeInitCtx(OutputCtx *output_ctx)
-{
-    LogDnsFileCtx *dnslog_ctx = (LogDnsFileCtx *)output_ctx->data;
-    LogFileFreeCtx(dnslog_ctx->file_ctx);
-    SCFree(dnslog_ctx);
-    SCFree(output_ctx);
 }
 
 static void LogDnsLogDeInitCtxSub(OutputCtx *output_ctx)
@@ -572,12 +560,18 @@ static DnsVersion JsonDnsParseVersion(ConfNode *conf)
                 version);
     }
 
+    if (!v1_deprecation_warned && version == DNS_VERSION_1) {
+        SCLogWarning(SC_WARN_DEPRECATED, "DNS EVE v1 style logs have been "
+                                         "deprecated and will be removed by May 2022");
+        v1_deprecation_warned = true;
+    }
+
     return version;
 }
 
 static void JsonDnsLogInitFilters(LogDnsFileCtx *dnslog_ctx, ConfNode *conf)
 {
-    dnslog_ctx->flags = ~0UL;
+    dnslog_ctx->flags = ~0ULL;
 
     if (conf) {
         if (dnslog_ctx->version == DNS_VERSION_1) {
@@ -624,8 +618,7 @@ static OutputInitResult JsonDnsLogInitCtxSub(ConfNode *conf, OutputCtx *parent_c
     }
     memset(dnslog_ctx, 0x00, sizeof(LogDnsFileCtx));
 
-    dnslog_ctx->file_ctx = ojc->file_ctx;
-    dnslog_ctx->cfg = ojc->cfg;
+    dnslog_ctx->eve_ctx = ojc;
 
     OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
     if (unlikely(output_ctx == NULL)) {
@@ -649,88 +642,11 @@ static OutputInitResult JsonDnsLogInitCtxSub(ConfNode *conf, OutputCtx *parent_c
     return result;
 }
 
-#define DEFAULT_LOG_FILENAME "dns.json"
-/** \brief Create a new dns log LogFileCtx.
- *  \param conf Pointer to ConfNode containing this loggers configuration.
- *  \return NULL if failure, LogFileCtx* to the file_ctx if succesful
- * */
-static OutputInitResult JsonDnsLogInitCtx(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    const char *enabled = ConfNodeLookupChildValue(conf, "enabled");
-    if (enabled != NULL && !ConfValIsTrue(enabled)) {
-        return result;
-    }
-
-    DnsVersion version = JsonDnsParseVersion(conf);
-
-    LogFileCtx *file_ctx = LogFileNewCtx();
-
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_DNS_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    LogDnsFileCtx *dnslog_ctx = SCMalloc(sizeof(LogDnsFileCtx));
-    if (unlikely(dnslog_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-    memset(dnslog_ctx, 0x00, sizeof(LogDnsFileCtx));
-
-    dnslog_ctx->file_ctx = file_ctx;
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(dnslog_ctx);
-        return result;
-    }
-
-    output_ctx->data = dnslog_ctx;
-    output_ctx->DeInit = LogDnsLogDeInitCtx;
-
-    dnslog_ctx->version = version;
-    JsonDnsLogInitFilters(dnslog_ctx, conf);
-
-    SCLogDebug("DNS log output initialized");
-
-    AppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_DNS);
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_DNS);
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
 
 #define MODULE_NAME "JsonDnsLog"
 void JsonDnsLogRegister (void)
 {
-    /* Logger for requests. */
-    OutputRegisterTxModuleWithProgress(LOGGER_JSON_DNS_TS, MODULE_NAME,
-        "dns-json-log", JsonDnsLogInitCtx, ALPROTO_DNS, JsonDnsLoggerToServer,
-        0, 1, LogDnsLogThreadInit, LogDnsLogThreadDeinit, NULL);
-
-    /* Logger for replies. */
-    OutputRegisterTxModuleWithProgress(LOGGER_JSON_DNS_TC, MODULE_NAME,
-        "dns-json-log", JsonDnsLogInitCtx, ALPROTO_DNS, JsonDnsLoggerToClient,
-        1, 1, LogDnsLogThreadInit, LogDnsLogThreadDeinit, NULL);
-
-    /* Sub-logger for requests. */
-    OutputRegisterTxSubModuleWithProgress(LOGGER_JSON_DNS_TS, "eve-log",
-        MODULE_NAME, "eve-log.dns", JsonDnsLogInitCtxSub, ALPROTO_DNS,
-        JsonDnsLoggerToServer, 0, 1, LogDnsLogThreadInit,
-        LogDnsLogThreadDeinit, NULL);
-
-    /* Sub-logger for replies. */
-    OutputRegisterTxSubModuleWithProgress(LOGGER_JSON_DNS_TC, "eve-log",
-        MODULE_NAME, "eve-log.dns", JsonDnsLogInitCtxSub, ALPROTO_DNS,
-        JsonDnsLoggerToClient, 1, 1, LogDnsLogThreadInit, LogDnsLogThreadDeinit,
-        NULL);
+    OutputRegisterTxSubModule(LOGGER_JSON_DNS, "eve-log", MODULE_NAME, "eve-log.dns",
+            JsonDnsLogInitCtxSub, ALPROTO_DNS, JsonDnsLogger, LogDnsLogThreadInit,
+            LogDnsLogThreadDeinit, NULL);
 }

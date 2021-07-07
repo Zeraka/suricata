@@ -7,24 +7,32 @@ Example:
 
 ::
 
-
   {
-      "timestamp": "2009-11-24T21:27:09.534255",
-      "event_type": "alert",
-      "src_ip": "192.168.2.7",
-      "src_port": 1041,
-      "dest_ip": "x.x.250.50",
-      "dest_port": 80,
-      "proto": "TCP",
-      "alert": {
-          "action": "allowed",
-          "gid": 1,
-          "signature_id" :2001999,
-          "rev": 9,
-          "signature": "ET MALWARE BTGrab.com Spyware Downloading Ads",
-          "category": "A Network Trojan was detected",
-          "severity": 1
-      }
+    "timestamp": "2017-04-07T22:24:37.251547+0100",
+    "flow_id": 586497171462735,
+    "pcap_cnt": 53381,
+    "event_type": "alert",
+    "src_ip": "192.168.2.14",
+    "src_port": 50096,
+    "dest_ip": "209.53.113.5",
+    "dest_port": 80,
+    "proto": "TCP",
+    "metadata": {
+      "flowbits": [
+        "http.dottedquadhost"
+      ]
+    },
+    "tx_id": 4,
+    "alert": {
+      "action": "allowed",
+      "gid": 1,
+      "signature_id": 2018358,
+      "rev": 10,
+      "signature": "ET HUNTING GENERIC SUSPICIOUS POST to Dotted Quad with Fake Browser 1",
+      "category": "Potentially Bad Traffic",
+      "severity": 2
+    },
+    "app_proto": "http"
   }
 
 Common Section
@@ -46,6 +54,14 @@ The common part has a field "event_type" to indicate the log type.
 
 
   "event_type":"TYPE"
+
+When an application layer protocol event is detected, the common section will
+have an ``app_proto`` field.
+
+::
+
+    "app_proto": "http"
+
 
 PCAP fields
 ~~~~~~~~~~~
@@ -87,27 +103,49 @@ Example:
 
 Action is set to "allowed" unless a rule used the "drop" action and Suricata is in IPS mode, or when the rule used the "reject" action.
 
-It can also contain information about Source and Target of the attack in the alert.source and alert.target field it target keyword is used in
+It can also contain information about Source and Target of the attack in the alert.source and alert.target field if target keyword is used in
 the signature.
 
 ::
 
-   "alert": {
-     "action": "allowed",
-     "gid": 1,
-     "signature_id": 1,
-     "rev": 1,
-     "app_proto": "http",
-     "signature": "HTTP body talking about corruption",
-     "severity": 3,
-     "source": {
-       "ip": "192.168.43.32",
-       "port": 36292
-     },
-     "target": {
-       "ip": "179.60.192.3",
-       "port": 80
-     },
+  "alert": {
+    "action": "allowed",
+    "gid": 1,
+    "signature_id": 2024056,
+    "rev": 4,
+    "signature": "ET MALWARE Win32/CryptFile2 / Revenge Ransomware Checkin M3",
+    "category": "Malware Command and Control Activity Detected",
+    "severity": 1,
+    "metadata": {
+      "affected_product": [
+        "Windows_XP_Vista_7_8_10_Server_32_64_Bit"
+      ],
+      "attack_target": [
+        "Client_Endpoint"
+      ],
+      "created_at": [
+        "2017_03_15"
+      ],
+      "deployment": [
+        "Perimeter"
+      ],
+      "former_category": [
+        "MALWARE"
+      ],
+      "malware_family": [
+        "CryptFile2"
+      ],
+      "performance_impact": [
+        "Moderate"
+      ],
+      "signature_severity": [
+        "Major"
+      ],
+      "updated_at": [
+        "2020_08_04"
+      ]
+    }
+  },
 
 Event type: Anomaly
 -------------------
@@ -401,11 +439,37 @@ Outline of fields seen in the different kinds of DNS events:
 * "rcode": (ex: NOERROR)
 * "rrname": Resource Record Name (ex: a domain name)
 * "rrtype": Resource Record Type (ex: A, AAAA, NS, PTR)
-* "rdata": Resource Data (ex. IP that domain name resolves to)
+* "rdata": Resource Data (ex: IP that domain name resolves to)
 * "ttl": Time-To-Live for this resource record
 
+More complex DNS record types may log additional fields for resource data:
 
-One can also control which RR types are logged explicitly from additional custom field enabled in the suricata.yaml file. If custom field is not specified, all RR types are logged. More than 50 values can be specified with the custom field and can be used as following:
+* "soa": Section containing fields for the SOA (start of authority) record type
+
+  * "mname": Primary name server for this zone
+  * "rname": Authority's mailbox
+  * "serial": Serial version number
+  * "refresh": Refresh interval (seconds)
+  * "retry": Retry interval (seconds)
+  * "expire": Upper time limit until zone is no longer authoritative (seconds)
+  * "minimum": Minimum ttl for records in this zone (seconds)
+
+* "sshfp": section containing fields for the SSHFP (ssh fingerprint) record type
+
+  * "fingerprint": Hex format of the fingerprint (ex: ``12:34:56:78:9a:bc:de:...``)
+  * "algo": Algorithm number (ex: 1 for RSA, 2 for DSS)
+  * "type": Fingerprint type (ex: 1 for SHA-1)
+
+* "srv": section containing fields for the SRV (location of services) record type
+
+  * "target": Domain name of the target host (ex: ``foo.bar.baz``)
+  * "priority": Target priority (ex: 20)
+  * "weight": Weight for target selection (ex: 1)
+  * "port": Port on this target host of this service (ex: 5060)
+
+One can control which RR types are logged by using the "types" field in the
+suricata.yaml file. If this field is not specified, all RR types are logged.
+More than 50 values can be specified with this field as shown below:
 
 
 ::
@@ -423,14 +487,16 @@ One can also control which RR types are logged explicitly from additional custom
         types:
           - alert
           - dns:
-            # control logging of queries and answers
-            # default yes, no to disable
-            query: yes     # enable logging of DNS queries
-            answer: yes    # enable logging of DNS answers
-            # control which RR types are logged
-            # all enabled if custom not specified
-            #custom: [a, aaaa, cname, mx, ns, ptr, txt]
-            custom: [a, ns, md, mf, cname, soa, mb, mg, mr, null,
+            # Control logging of requests and responses:
+            # - requests: enable logging of DNS queries
+            # - responses: enable logging of DNS answers
+            # By default both requests and responses are logged.
+            requests: yes
+            responses: yes
+            # DNS record types to log, based on the query type.
+            # Default: all.
+            #types: [a, aaaa, cname, mx, ns, ptr, txt]
+            types: [a, ns, md, mf, cname, soa, mb, mg, mr, null,
             wks, ptr, hinfo, minfo, mx, txt, rp, afsdb, x25, isdn,
             rt, nsap, nsapptr, sig, key, px, gpos, aaaa, loc, nxt,
             srv, atma, naptr, kx, cert, a6, dname, opt, apl, ds,
@@ -1782,4 +1848,221 @@ Example of HTTP2 logging, of a request and response:
         }
       ]
     }
+  }
+
+Event type: IKE
+---------------
+
+The parser implementations for IKEv1 and IKEv2 have a slightly different feature
+set. They can be distinguished using the "version_major" field (which equals
+either 1 or 2).
+The unique properties are contained within a separate "ikev1" and "ikev2" sub-object.
+
+Fields
+~~~~~~
+
+* "init_spi", "resp_spi": The Security Parameter Index (SPI) of the initiator and responder.
+* "version_major": Major version of the ISAKMP header.
+* "version_minor": Minor version of the ISAKMP header.
+* "payload": List of payload types in the current packet.
+* "exchange_type": Type of the exchange, as numeric values.
+* "exchange_type_verbose": Type of the exchange, in human-readable form. Needs ``extended: yes`` set in the ``ike`` EVE output option.
+* "alg_enc", "alg_hash", "alg_auth", "alg_dh", "alg_esn": Properties of the chosen security association by the server.
+* "ikev1.encrypted_payloads": Set to ``true`` if the payloads in the packet are encrypted.
+* "ikev1.doi": Value of the domain of interpretation (DOI).
+* "ikev1.server.key_exchange_payload", "ikev1.client.key_exchange_payload": Public key exchange payloads of the server and client.
+* "ikev1.server.key_exchange_payload_length", "ikev1.client.key_exchange_payload_length": Length of the public key exchange payload.
+* "ikev1.server.nonce_payload", "ikev1.client.nonce_payload": Nonce payload of the server and client.
+* "ikev1.server.nonce_payload_length", "ikev1.client.nonce_payload_length": Length of the nonce payload.
+* "ikev1.client.client_proposals": List of the security associations proposed to the server.
+* "ikev1.vendor_ids": List of the vendor IDs observed in the communication.
+* "server_proposals": List of server proposals with parameters, if there are more than one. This is a non-standard case; this field is only present if such a situation was observed in the inspected traffic.
+
+
+
+Examples
+~~~~~~~~
+
+Example of IKE logging:
+
+::
+
+  "ike": {
+    "version_major": 1,
+    "version_minor": 0,
+    "init_spi": "8511617bfea2f172",
+    "resp_spi": "c0fc6bae013de0f5",
+    "message_id": 0,
+    "exchange_type": 2,
+    "exchange_type_verbose": "Identity Protection",
+    "sa_life_type": "LifeTypeSeconds",
+    "sa_life_type_raw": 1,
+    "sa_life_duration": "Unknown",
+    "sa_life_duration_raw": 900,
+    "alg_enc": "EncAesCbc",
+    "alg_enc_raw": 7,
+    "alg_hash": "HashSha2_256",
+    "alg_hash_raw": 4,
+    "alg_auth": "AuthPreSharedKey",
+    "alg_auth_raw": 1,
+    "alg_dh": "GroupModp2048Bit",
+    "alg_dh_raw": 14,
+    "sa_key_length": "Unknown",
+    "sa_key_length_raw": 256,
+    "alg_esn": "NoESN",
+    "payload": [
+      "VendorID",
+      "Transform",
+      "Proposal",
+      "SecurityAssociation"
+    ],
+    "ikev1": {
+      "doi": 1,
+      "encrypted_payloads": false,
+      "client": {
+        "key_exchange_payload": "0bf7907681a656aabed38fb1ba8918b10d707a8e635a...",
+        "key_exchange_payload_length": 256,
+        "nonce_payload": "1427d158fc1ed6bbbc1bd81e6b74960809c87d18af5f0abef14d5274ac232904",
+        "nonce_payload_length": 32,
+        "proposals": [
+          {
+            "sa_life_type": "LifeTypeSeconds",
+            "sa_life_type_raw": 1,
+            "sa_life_duration": "Unknown",
+            "sa_life_duration_raw": 900,
+            "alg_enc": "EncAesCbc",
+            "alg_enc_raw": 7,
+            "alg_hash": "HashSha2_256",
+            "alg_hash_raw": 4,
+            "alg_auth": "AuthPreSharedKey",
+            "alg_auth_raw": 1,
+            "alg_dh": "GroupModp2048Bit",
+            "alg_dh_raw": 14,
+            "sa_key_length": "Unknown",
+            "sa_key_length_raw": 256
+          }
+        ]
+      },
+      "server": {
+        "key_exchange_payload": "1e43be52b088ec840ff81865074b6d459b5ca7813b46...",
+        "key_exchange_payload_length": 256,
+        "nonce_payload": "04d78293ead007bc1a0f0c6c821a3515286a935af12ca50e08905b15d6c8fcd4",
+        "nonce_payload_length": 32
+      },
+      "vendor_ids": [
+        "4048b7d56ebce88525e7de7f00d6c2d3",
+        "4a131c81070358455c5728f20e95452f",
+        "afcad71368a1f1c96b8696fc77570100",
+        "7d9419a65310ca6f2c179d9215529d56",
+        "cd60464335df21f87cfdb2fc68b6a448",
+        "90cb80913ebb696e086381b5ec427b1f"
+      ]
+    },
+  }
+
+Event type: Modbus
+------------------
+
+Common fields
+~~~~~~~~~~~~~
+
+* "id": The unique transaction number given by Suricata
+
+Request/Response fields
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* "transaction_id": The transaction id found in the packet
+* "protocol_id": The modbus version
+* "unit_id": ID of the remote server to interact with
+* "function_raw": Raw value of the function code byte
+* "function_code": Associated name of the raw function value
+* "access_type": Type of access requested by the function
+* "category": The function code's category
+* "error_flags": Errors found in the data while parsing
+
+Exception fields
+~~~~~~~~~~~~~~~~
+
+* "raw": Raw value of the exception code byte
+* "code": Associated name of the raw exception value
+
+Diagnostic fields
+~~~~~~~~~~~~~~~~~
+
+* "raw": Raw value of the subfunction code bytes
+* "code": Associated name of the raw subfunction value
+* "data": Bytes following the subfunction code
+
+MEI fields
+~~~~~~~~~~
+
+* "raw": Raw value of the mei function code bytes
+* "code": Associated name of the raw mei function value
+* "data": Bytes following the mei function code
+
+Read Request fields
+~~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to read from
+* "quantity": Amount to read
+
+Read Response fields
+~~~~~~~~~~~~~~~~~~~~
+
+* "data": Data that was read
+
+Multiple Write Request fields
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to write to
+* "quantity": Amount to write
+* "data": Data to write
+
+Mask Write fields
+~~~~~~~~~~~~~~~~~
+
+* "address": Starting address of content modification
+* "and_mask": And mask to modify content with
+* "or_mask": Or mask to modify content with
+
+Other Write fields
+~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to write to
+* "data": Data to write
+
+Generic Data fields
+~~~~~~~~~~~~~~~~~~~
+
+* "data": Data following the function code
+
+Example
+~~~~~~~
+
+Example of Modbus logging of a request and response:
+
+::
+
+  "modbus": {
+    "id": 1,
+    "request": {
+      "transaction_id": 0,
+      "protocol_id": 0,
+      "unit_id": 0,
+      "function_raw": 1,
+      "function_code": "RdCoils",
+      "access_type": "READ | COILS",
+      "category": "PUBLIC_ASSIGNED",
+      "error_flags": "NONE",
+    },
+    "response": {
+      "transaction_id": 0,
+      "protocol_id": 0,
+      "unit_id": 0,
+      "function_raw": 1,
+      "function_code": "RdCoils",
+      "access_type": "READ | COILS",
+      "category": "PUBLIC_ASSIGNED",
+      "error_flags": "DATA_VALUE",
+    },
   }

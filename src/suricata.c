@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -29,11 +29,6 @@
 
 #if HAVE_SIGNAL_H
 #include <signal.h>
-#endif
-
-#ifdef HAVE_NSS
-#include <prinit.h>
-#include <nss.h>
 #endif
 
 #include "suricata.h"
@@ -118,16 +113,17 @@
 
 #include "app-layer.h"
 #include "app-layer-parser.h"
+#include "app-layer-register.h"
 #include "app-layer-htp.h"
 #include "app-layer-ssl.h"
 #include "app-layer-ssh.h"
 #include "app-layer-ftp.h"
 #include "app-layer-smtp.h"
-#include "app-layer-modbus.h"
 #include "app-layer-enip.h"
 #include "app-layer-dnp3.h"
 #include "app-layer-smb.h"
-#include "app-layer-dcerpc.h"
+
+#include "output-filestore.h"
 
 #include "util-ebpf.h"
 #include "util-radix-tree.h"
@@ -233,6 +229,10 @@ int g_disable_randomness = 1;
   * comparing flows */
 uint16_t g_vlan_mask = 0xffff;
 
+/* flag to disable hashing almost globally, to be similar to disabling nss
+ * support */
+bool g_disable_hashing = false;
+
 /** Suricata instance */
 SCInstance suricata;
 
@@ -261,6 +261,7 @@ void EngineModeSetIDS(void)
     g_engine_mode = ENGINE_MODE_IDS;
 }
 
+#ifdef UNITTESTS
 int RunmodeIsUnittests(void)
 {
     if (run_mode == RUNMODE_UNITTEST)
@@ -268,6 +269,7 @@ int RunmodeIsUnittests(void)
 
     return 0;
 }
+#endif
 
 int RunmodeGetCurrent(void)
 {
@@ -345,7 +347,6 @@ static void GlobalsDestroy(SCInstance *suri)
     OutputDeregisterAll();
     FeatureTrackingRelease();
     TimeDeinit();
-    SCProtoNameDeInit();
     if (!suri->disabled_detect) {
         SCReferenceConfDeinit();
         SCClassConfDeinit();
@@ -353,12 +354,6 @@ static void GlobalsDestroy(SCInstance *suri)
     TmqhCleanup();
     TmModuleRunDeInit();
     ParseSizeDeinit();
-#ifdef HAVE_NSS
-    if (NSS_IsInitialized()) {
-        NSS_Shutdown();
-        PR_Cleanup();
-    }
-#endif
 
 #ifdef HAVE_AF_PACKET
     AFPPeersListClean();
@@ -699,9 +694,10 @@ static void PrintBuildInfo(void)
 #ifdef PCRE_HAVE_JIT
     strlcat(features, "PCRE_JIT ", sizeof(features));
 #endif
-#ifdef HAVE_NSS
+    /* For compatibility, just say we have HAVE_NSS. */
     strlcat(features, "HAVE_NSS ", sizeof(features));
-#endif
+    /* HTTP2_DECOMPRESSION is not an optional feature in this major version */
+    strlcat(features, "HTTP2_DECOMPRESSION ", sizeof(features));
 #ifdef HAVE_LUA
     strlcat(features, "HAVE_LUA ", sizeof(features));
 #endif
@@ -1185,6 +1181,7 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
     g_ut_covered = 0;
 #endif
 
+    // clang-format off
     struct option long_opts[] = {
         {"dump-config", 0, &dump_config, 1},
         {"dump-features", 0, &dump_features, 1},
@@ -1224,6 +1221,7 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
         {"pidfile", required_argument, 0, 0},
         {"init-errors-fatal", 0, 0, 0},
         {"disable-detection", 0, 0, 0},
+        {"disable-hashing", 0, 0, 0},
         {"fatal-unittests", 0, 0, 0},
         {"unittests-coverage", 0, &coverage_unittests, 1},
         {"user", required_argument, 0, 0},
@@ -1246,6 +1244,7 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
 #endif
         {NULL, 0, NULL, 0}
     };
+    // clang-format on
 
     /* getopt_long stores the option index here. */
     int option_index = 0;
@@ -1425,16 +1424,16 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
             }
             else if(strcmp((long_opts[option_index]).name, "disable-detection") == 0) {
                 g_detect_disabled = suri->disabled_detect = 1;
-            }
-            else if(strcmp((long_opts[option_index]).name, "fatal-unittests") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "disable-hashing") == 0) {
+                g_disable_hashing = true;
+            } else if (strcmp((long_opts[option_index]).name, "fatal-unittests") == 0) {
 #ifdef UNITTESTS
                 unittests_fatal = 1;
 #else
                 fprintf(stderr, "ERROR: Unit tests not enabled. Make sure to pass --enable-unittests to configure when building.\n");
                 return TM_ECODE_FAILED;
 #endif /* UNITTESTS */
-            }
-            else if(strcmp((long_opts[option_index]).name, "user") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "user") == 0) {
 #ifndef HAVE_LIBCAP_NG
                 SCLogError(SC_ERR_LIBCAP_NG_REQUIRED, "libcap-ng is required to"
                         " drop privileges, but it was not compiled into Suricata.");
@@ -1443,8 +1442,7 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
                 suri->user_name = optarg;
                 suri->do_setuid = TRUE;
 #endif /* HAVE_LIBCAP_NG */
-            }
-            else if(strcmp((long_opts[option_index]).name, "group") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "group") == 0) {
 #ifndef HAVE_LIBCAP_NG
                 SCLogError(SC_ERR_LIBCAP_NG_REQUIRED, "libcap-ng is required to"
                         " drop privileges, but it was not compiled into Suricata.");
@@ -1453,15 +1451,13 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
                 suri->group_name = optarg;
                 suri->do_setgid = TRUE;
 #endif /* HAVE_LIBCAP_NG */
-            }
-            else if (strcmp((long_opts[option_index]).name, "erf-in") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "erf-in") == 0) {
                 suri->run_mode = RUNMODE_ERF_FILE;
                 if (ConfSetFinal("erf-file.file", optarg) != 1) {
                     fprintf(stderr, "ERROR: Failed to set erf-file.file\n");
                     return TM_ECODE_FAILED;
                 }
-            }
-            else if (strcmp((long_opts[option_index]).name, "dag") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "dag") == 0) {
 #ifdef HAVE_DAG
                 if (suri->run_mode == RUNMODE_UNKNOWN) {
                     suri->run_mode = RUNMODE_DAG;
@@ -1478,17 +1474,15 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
 						" to receive packets using --dag.");
                 return TM_ECODE_FAILED;
 #endif /* HAVE_DAG */
-		}
-        else if (strcmp((long_opts[option_index]).name, "napatech") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "napatech") == 0) {
 #ifdef HAVE_NAPATECH
-            suri->run_mode = RUNMODE_NAPATECH;
+                suri->run_mode = RUNMODE_NAPATECH;
 #else
-            SCLogError(SC_ERR_NAPATECH_REQUIRED, "libntapi and a Napatech adapter are required"
-                                                 " to capture packets using --napatech.");
-            return TM_ECODE_FAILED;
+                SCLogError(SC_ERR_NAPATECH_REQUIRED, "libntapi and a Napatech adapter are required"
+                                                     " to capture packets using --napatech.");
+                return TM_ECODE_FAILED;
 #endif /* HAVE_NAPATECH */
-			}
-            else if(strcmp((long_opts[option_index]).name, "pcap-buffer-size") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "pcap-buffer-size") == 0) {
 #ifdef HAVE_PCAP_SET_BUFF
                 if (ConfSetFinal("pcap.buffer-size", optarg) != 1) {
                     fprintf(stderr, "ERROR: Failed to set pcap-buffer-size.\n");
@@ -1498,12 +1492,10 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
                 SCLogError(SC_ERR_NO_PCAP_SET_BUFFER_SIZE, "The version of libpcap you have"
                         " doesn't support setting buffer size.");
 #endif /* HAVE_PCAP_SET_BUFF */
-            }
-            else if(strcmp((long_opts[option_index]).name, "build-info") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "build-info") == 0) {
                 suri->run_mode = RUNMODE_PRINT_BUILDINFO;
                 return TM_ECODE_OK;
-            }
-            else if(strcmp((long_opts[option_index]).name, "windivert-forward") == 0) {
+            } else if (strcmp((long_opts[option_index]).name, "windivert-forward") == 0) {
 #ifdef WINDIVERT
                 if (suri->run_mode == RUNMODE_UNKNOWN) {
                     suri->run_mode = RUNMODE_WINDIVERT;
@@ -1748,6 +1740,7 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
 #endif /* IPFW */
             break;
         case 'r':
+            BUG_ON(optarg == NULL); /* for static analysis */
             if (suri->run_mode == RUNMODE_UNKNOWN) {
                 suri->run_mode = RUNMODE_PCAP_FILE;
             } else {
@@ -1846,12 +1839,6 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
 
     if (suri->disabled_detect && suri->sig_file != NULL) {
         SCLogError(SC_ERR_INITIALIZATION, "can't use -s/-S when detection is disabled");
-        return TM_ECODE_FAILED;
-    }
-
-    if ((suri->run_mode == RUNMODE_UNIX_SOCKET) && suri->set_logdir) {
-        SCLogError(SC_ERR_INITIALIZATION,
-                "can't use -l and unix socket runmode at the same time");
         return TM_ECODE_FAILED;
     }
 
@@ -2029,17 +2016,25 @@ void PreRunInit(const int runmode)
     StreamTcpInitConfig(STREAM_VERBOSE);
     AppLayerParserPostStreamSetup();
     AppLayerRegisterGlobalCounters();
+    OutputFilestoreRegisterGlobalCounters();
 }
 
 /* tasks we need to run before packets start flowing,
  * but after we dropped privs */
 void PreRunPostPrivsDropInit(const int runmode)
 {
-    if (runmode == RUNMODE_UNIX_SOCKET)
-        return;
-
     StatsSetupPostConfigPreOutput();
     RunModeInitializeOutputs();
+
+    if (runmode == RUNMODE_UNIX_SOCKET) {
+        /* As the above did some necessary startup initialization, it
+         * also setup some outputs where only one is allowed, so
+         * deinitialize to the state that unix-mode does after every
+         * pcap. */
+        PostRunDeinit(RUNMODE_PCAP_FILE, NULL);
+        return;
+    }
+
     StatsSetupPostConfigPostOutput();
 }
 
@@ -2099,15 +2094,13 @@ static int StartInternalRunMode(SCInstance *suri, int argc, char **argv)
     /* Treat internal running mode */
     switch(suri->run_mode) {
         case RUNMODE_LIST_KEYWORDS:
-            ListKeywords(suri->keyword_info);
-            return TM_ECODE_DONE;
+            return ListKeywords(suri->keyword_info);
         case RUNMODE_LIST_APP_LAYERS:
             if (suri->conf_filename != NULL) {
-                ListAppLayerProtocols(suri->conf_filename);
+                return ListAppLayerProtocols(suri->conf_filename);
             } else {
-                ListAppLayerProtocols(DEFAULT_CONF_FILE);
+                return ListAppLayerProtocols(DEFAULT_CONF_FILE);
             }
-            return TM_ECODE_DONE;
         case RUNMODE_PRINT_VERSION:
             PrintVersion();
             return TM_ECODE_DONE;
@@ -2487,8 +2480,10 @@ int PostConfLoadedSetup(SCInstance *suri)
 
     StorageInit();
 #ifdef HAVE_PACKET_EBPF
-    EBPFRegisterExtension();
-    LiveDevRegisterExtension();
+    if (suri->run_mode == RUNMODE_AFP_DEV) {
+        EBPFRegisterExtension();
+        LiveDevRegisterExtension();
+    }
 #endif
     RegisterFlowBypassInfo();
 
@@ -2514,7 +2509,7 @@ int PostConfLoadedSetup(SCInstance *suri)
 
 #ifdef NFQ
     if (suri->run_mode == RUNMODE_NFQ)
-        NFQInitConfig(FALSE);
+        NFQInitConfig(false);
 #endif
 
     /* Load the Host-OS lookup. */
@@ -2537,7 +2532,6 @@ int PostConfLoadedSetup(SCInstance *suri)
     TmqhSetup();
 
     CIDRInit();
-    SCProtoNameInit();
 
     TagInitCtx();
     PacketAlertTagInit();
@@ -2591,15 +2585,6 @@ int PostConfLoadedSetup(SCInstance *suri)
                 "Shutting down the engine", suri->log_dir, suri->conf_filename);
         SCReturnInt(TM_ECODE_FAILED);
     }
-
-
-#ifdef HAVE_NSS
-    if (suri->run_mode != RUNMODE_CONF_TEST) {
-        /* init NSS for hashing */
-        PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
-        NSS_NoDB_Init(NULL);
-    }
-#endif
 
     if (suri->disabled_detect) {
         SCLogConfig("detection engine disabled");
@@ -2664,8 +2649,6 @@ static void SuricataMainLoop(SCInstance *suri)
     }
 }
 
-SuricataContext context;
-
 /**
  * \brief Global initialization common to all runmodes.
  *
@@ -2673,21 +2656,24 @@ SuricataContext context;
  */
 
 int InitGlobal(void) {
-    context.SCLogMessage = SCLogMessage;
-    context.DetectEngineStateFree = DetectEngineStateFree;
-    context.AppLayerDecoderEventsSetEventRaw =
-        AppLayerDecoderEventsSetEventRaw;
-    context.AppLayerDecoderEventsFreeEvents = AppLayerDecoderEventsFreeEvents;
+    suricata_context.SCLogMessage = SCLogMessage;
+    suricata_context.DetectEngineStateFree = DetectEngineStateFree;
+    suricata_context.AppLayerDecoderEventsSetEventRaw = AppLayerDecoderEventsSetEventRaw;
+    suricata_context.AppLayerDecoderEventsFreeEvents = AppLayerDecoderEventsFreeEvents;
+    suricata_context.AppLayerParserTriggerRawStreamReassembly =
+            AppLayerParserTriggerRawStreamReassembly;
 
-    context.FileOpenFileWithId = FileOpenFileWithId;
-    context.FileCloseFileById = FileCloseFileById;
-    context.FileAppendDataById = FileAppendDataById;
-    context.FileAppendGAPById = FileAppendGAPById;
-    context.FileContainerRecycle = FileContainerRecycle;
-    context.FilePrune = FilePrune;
-    context.FileSetTx = FileContainerSetTx;
+    suricata_context.FileOpenFileWithId = FileOpenFileWithId;
+    suricata_context.FileCloseFileById = FileCloseFileById;
+    suricata_context.FileAppendDataById = FileAppendDataById;
+    suricata_context.FileAppendGAPById = FileAppendGAPById;
+    suricata_context.FileContainerRecycle = FileContainerRecycle;
+    suricata_context.FilePrune = FilePrune;
+    suricata_context.FileSetTx = FileContainerSetTx;
 
-    rs_init(&context);
+    suricata_context.AppLayerRegisterParser = AppLayerRegisterParser;
+
+    rs_init(&suricata_context);
 
     SC_ATOMIC_INIT(engine_stage);
 

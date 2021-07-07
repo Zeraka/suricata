@@ -79,19 +79,19 @@ PrefilterPacketHeaderExtraMatch(const PrefilterPacketHeaderCtx *ctx,
         case PREFILTER_EXTRA_MATCH_UNUSED:
             break;
         case PREFILTER_EXTRA_MATCH_ALPROTO:
-            if (p->flow == NULL || p->flow->alproto != ctx->value)
-                return FALSE;
+            if (p->flow == NULL || !AppProtoEquals(ctx->value, p->flow->alproto))
+                return false;
             break;
         case PREFILTER_EXTRA_MATCH_SRCPORT:
             if (p->sp != ctx->value)
-                return FALSE;
+                return false;
             break;
         case PREFILTER_EXTRA_MATCH_DSTPORT:
             if (p->dp != ctx->value)
-                return FALSE;
+                return false;
             break;
     }
-    return TRUE;
+    return true;
 }
 
 static inline bool PrefilterIsPrefilterableById(const Signature *s, enum DetectKeywordId kid)

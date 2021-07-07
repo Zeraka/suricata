@@ -191,8 +191,25 @@ static DetectITypeData *DetectITypeParse(DetectEngineCtx *de_ctx, const char *it
                                                 "valid", args[1]);
             goto error;
         }
-        if ((strcmp(args[0], ">")) == 0) itd->mode = DETECT_ITYPE_GT;
-        else itd->mode = DETECT_ITYPE_LT;
+        if ((strcmp(args[0], ">")) == 0) {
+            if (itd->type1 == 255) {
+                SCLogError(SC_ERR_INVALID_ARGUMENT,
+                        "specified icmp type >%s is not "
+                        "valid",
+                        args[1]);
+                goto error;
+            }
+            itd->mode = DETECT_ITYPE_GT;
+        } else {
+            if (itd->type1 == 0) {
+                SCLogError(SC_ERR_INVALID_ARGUMENT,
+                        "specified icmp type <%s is not "
+                        "valid",
+                        args[1]);
+                goto error;
+            }
+            itd->mode = DETECT_ITYPE_LT;
+        }
     } else { /* no "<", ">" */
         /* we have a range ("<>") */
         if (args[2] != NULL) {
@@ -333,8 +350,8 @@ PrefilterPacketITypeCompare(PrefilterPacketHeaderValue v, void *smctx)
     if (v.u8[0] == a->mode &&
         v.u8[1] == a->type1 &&
         v.u8[2] == a->type2)
-        return TRUE;
-    return FALSE;
+        return true;
+    return false;
 }
 
 static int PrefilterSetupIType(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
@@ -351,10 +368,10 @@ static bool PrefilterITypeIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_ITYPE:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 #ifdef UNITTESTS

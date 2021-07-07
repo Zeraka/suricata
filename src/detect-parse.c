@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -163,7 +163,7 @@ int DetectEngineContentModifierBufferSetup(DetectEngineCtx *de_ctx,
                    sigmatch_table[sm_type].name);
         goto end;
     }
-    if (s->alproto != ALPROTO_UNKNOWN && s->alproto != alproto) {
+    if (s->alproto != ALPROTO_UNKNOWN && !AppProtoEquals(s->alproto, alproto)) {
         SCLogError(SC_ERR_CONFLICTING_RULE_KEYWORDS, "rule contains conflicting "
                    "alprotos set");
         goto end;
@@ -624,10 +624,11 @@ static void SigMatchTransferSigMatchAcrossLists(SigMatch *sm,
 
 int SigMatchListSMBelongsTo(const Signature *s, const SigMatch *key_sm)
 {
-    const int nlists = s->init_data->smlists_array_size;
-    int list = 0;
+    if (key_sm == NULL)
+        return -1;
 
-    for (list = 0; list < nlists; list++) {
+    const int nlists = s->init_data->smlists_array_size;
+    for (int list = 0; list < nlists; list++) {
         const SigMatch *sm = s->init_data->smlists[list];
         while (sm != NULL) {
             if (sm == key_sm)
@@ -704,8 +705,14 @@ static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, 
 
     if (!(st->flags & (SIGMATCH_NOOPT|SIGMATCH_OPTIONAL_OPT))) {
         if (optvalue == NULL || strlen(optvalue) == 0) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "invalid formatting or malformed option to %s keyword: \'%s\'",
-                    optname, optstr);
+            SCLogError(SC_ERR_INVALID_SIGNATURE,
+                    "invalid formatting or malformed option to %s keyword: '%s'", optname, optstr);
+            goto error;
+        }
+    } else if (st->flags & SIGMATCH_NOOPT) {
+        if (optvalue && strlen(optvalue)) {
+            SCLogError(SC_ERR_INVALID_SIGNATURE, "unexpected option to %s keyword: '%s'", optname,
+                    optstr);
             goto error;
         }
     }
@@ -1212,6 +1219,11 @@ static int SigParse(DetectEngineCtx *de_ctx, Signature *s,
 {
     SCEnter();
 
+    if (!rs_check_utf8(sigstr)) {
+        SCLogError(SC_ERR_RULE_INVALID_UTF8, "rule is not valid UTF-8");
+        SCReturnInt(-1);
+    }
+
     s->sig_str = SCStrdup(sigstr);
     if (unlikely(s->sig_str == NULL)) {
         SCReturnInt(-1);
@@ -1480,11 +1492,17 @@ int DetectSignatureSetAppProto(Signature *s, AppProto alproto)
         return -1;
     }
 
-    if (s->alproto != ALPROTO_UNKNOWN && s->alproto != alproto) {
-        SCLogError(SC_ERR_CONFLICTING_RULE_KEYWORDS,
-            "can't set rule app proto to %s: already set to %s",
-            AppProtoToString(alproto), AppProtoToString(s->alproto));
-        return -1;
+    if (s->alproto != ALPROTO_UNKNOWN && !AppProtoEquals(s->alproto, alproto)) {
+        if (AppProtoEquals(alproto, s->alproto)) {
+            // happens if alproto = HTTP_ANY and s->alproto = HTTP1
+            // in this case, we must keep the most restrictive HTTP1
+            alproto = s->alproto;
+        } else {
+            SCLogError(SC_ERR_CONFLICTING_RULE_KEYWORDS,
+                    "can't set rule app proto to %s: already set to %s", AppProtoToString(alproto),
+                    AppProtoToString(s->alproto));
+            return -1;
+        }
     }
 
     s->alproto = alproto;
@@ -1661,7 +1679,7 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
 
     /* run buffer type validation callbacks if any */
     if (s->init_data->smlists[DETECT_SM_LIST_PMATCH]) {
-        if (DetectContentPMATCHValidateCallback(s) == FALSE)
+        if (!DetectContentPMATCHValidateCallback(s))
             SCReturnInt(0);
     }
 
@@ -1676,7 +1694,8 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
         if (s->init_data->smlists[x]) {
             const DetectEngineAppInspectionEngine *app = de_ctx->app_inspect_engines;
             for ( ; app != NULL; app = app->next) {
-                if (app->sm_list == x && ((s->alproto == app->alproto) || s->alproto == 0)) {
+                if (app->sm_list == x &&
+                        (AppProtoEquals(s->alproto, app->alproto) || s->alproto == 0)) {
                     SCLogDebug("engine %s dir %d alproto %d",
                             DetectBufferTypeGetNameById(de_ctx, app->sm_list),
                             app->dir, app->alproto);
@@ -1686,7 +1705,7 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
                 }
             }
 
-            if (DetectBufferRunValidateCallback(de_ctx, x, s, &de_ctx->sigerror) == FALSE) {
+            if (!DetectBufferRunValidateCallback(de_ctx, x, s, &de_ctx->sigerror)) {
                 SCReturnInt(0);
             }
         }
@@ -1741,7 +1760,7 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
         s->flags |= SIG_FLAG_TOSERVER;
         s->flags &= ~SIG_FLAG_TOCLIENT;
     }
-    if ((s->init_data->smlists[DETECT_SM_LIST_FILEDATA] != NULL && s->alproto == ALPROTO_HTTP) ||
+    if ((s->init_data->smlists[DETECT_SM_LIST_FILEDATA] != NULL && s->alproto == ALPROTO_HTTP1) ||
         s->init_data->smlists[DETECT_SM_LIST_HSMDMATCH] != NULL ||
         s->init_data->smlists[DETECT_SM_LIST_HSCDMATCH] != NULL) {
         sig_flags |= SIG_FLAG_TOCLIENT;
@@ -1852,12 +1871,28 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
                     "support file matching", AppProtoToString(s->alproto));
             SCReturnInt(0);
         }
+        if (s->alproto == ALPROTO_HTTP2 && (s->file_flags & FILE_SIG_NEED_FILENAME)) {
+            SCLogError(SC_ERR_NO_FILES_FOR_PROTOCOL,
+                    "protocol HTTP2 doesn't support file name matching");
+            SCReturnInt(0);
+        }
 
-        if (s->alproto == ALPROTO_HTTP) {
+        if (s->alproto == ALPROTO_HTTP1 || s->alproto == ALPROTO_HTTP) {
             AppLayerHtpNeedFileInspection();
         }
     }
-
+    if (s->init_data->init_flags & SIG_FLAG_INIT_DCERPC) {
+        if (s->alproto != ALPROTO_UNKNOWN && s->alproto != ALPROTO_DCERPC &&
+                s->alproto != ALPROTO_SMB) {
+            SCLogError(SC_ERR_NO_FILES_FOR_PROTOCOL, "protocol %s doesn't support DCERPC keyword",
+                    AppProtoToString(s->alproto));
+            SCReturnInt(0);
+        }
+    }
+    if (s->id == 0) {
+        SCLogError(SC_ERR_INVALID_SIGNATURE, "Signature missing required value \"sid\".");
+        SCReturnInt(0);
+    }
     SCReturnInt(1);
 }
 
@@ -2451,7 +2486,7 @@ void DetectParseRegexAddToFreeList(DetectParseRegex *detect_parse)
 
 bool DetectSetupParseRegexesOpts(const char *parse_str, DetectParseRegex *detect_parse, int opts)
 {
-    const char *eb;
+    const char *eb = NULL;
     int eo;
 
     detect_parse->regex = pcre_compile(parse_str, opts, &eb, &eo, NULL);
@@ -2776,13 +2811,15 @@ static int SigParseTest11(void)
 
     Signature *s = NULL;
 
-    s = DetectEngineAppendSig(de_ctx, "drop tcp any any -> any 80 (msg:\"Snort_Inline is blocking the http link\";) ");
+    s = DetectEngineAppendSig(de_ctx,
+            "drop tcp any any -> any 80 (msg:\"Snort_Inline is blocking the http link\"; sid:1;) ");
     if (s == NULL) {
         printf("sig 1 didn't parse: ");
         goto end;
     }
 
-    s = DetectEngineAppendSig(de_ctx, "drop tcp any any -> any 80 (msg:\"Snort_Inline is blocking the http link\"; sid:1;)            ");
+    s = DetectEngineAppendSig(de_ctx, "drop tcp any any -> any 80 (msg:\"Snort_Inline is blocking "
+                                      "the http link\"; sid:2;)            ");
     if (s == NULL) {
         printf("sig 2 didn't parse: ");
         goto end;

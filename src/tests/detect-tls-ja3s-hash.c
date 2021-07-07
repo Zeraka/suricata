@@ -22,15 +22,6 @@
  *
  */
 
-#ifndef HAVE_NSS
-
-static void DetectTlsJa3SHashRegisterTests(void)
-{
-    /* Don't register any tests */
-}
-
-#else /* HAVE_NSS */
-
 /**
  * \test Test matching on a JA3S hash from a ServerHello record
  */
@@ -116,7 +107,7 @@ static int DetectTlsJa3SHashTest01(void)
     p2->flowflags |= FLOW_PKT_ESTABLISHED;
     p2->pcap_cnt = 2;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -161,7 +152,7 @@ static int DetectTlsJa3SHashTest01(void)
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p1);
     UTHFreePacket(p2);
@@ -173,5 +164,3 @@ void DetectTlsJa3SHashRegisterTests(void)
 {
     UtRegisterTest("DetectTlsJa3SHashTest01", DetectTlsJa3SHashTest01);
 }
-
-#endif /* HAVE_NSS */

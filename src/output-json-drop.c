@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -61,15 +61,13 @@
 #define LOG_DROP_ALERTS 1
 
 typedef struct JsonDropOutputCtx_ {
-    LogFileCtx *file_ctx;
     uint8_t flags;
-    OutputJsonCommonSettings cfg;
+    OutputJsonCtx *eve_ctx;
 } JsonDropOutputCtx;
 
 typedef struct JsonDropLogThread_ {
-    LogFileCtx *file_ctx;
     JsonDropOutputCtx *drop_ctx;
-    MemBuffer *buffer;
+    OutputJsonThreadCtx *ctx;
 } JsonDropLogThread;
 
 /* default to true as this has been the default behavior for a long time */
@@ -91,16 +89,11 @@ static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
     JsonAddrInfo addr = json_addr_info_zero;
     JsonAddrInfoInit(p, LOG_DIR_PACKET, &addr);
 
-    JsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "drop", &addr);
+    JsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "drop", &addr, drop_ctx->eve_ctx);
     if (unlikely(js == NULL))
         return TM_ECODE_OK;
 
-    EveAddCommonOptions(&drop_ctx->cfg, p, p->flow, js);
-
     jb_open_object(js, "drop");
-
-    /* reset */
-    MemBufferReset(aft->buffer);
 
     uint16_t proto = 0;
     if (PKT_IS_IPV4(p)) {
@@ -164,6 +157,7 @@ static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
             {
                 AlertJsonHeader(NULL, p, pa, js, 0, &addr);
                 logged = 1;
+                break;
             }
         }
         if (logged == 0) {
@@ -174,7 +168,7 @@ static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
         }
     }
 
-    OutputJsonBuilderBuffer(js, aft->file_ctx, &aft->buffer);
+    OutputJsonBuilderBuffer(js, aft->ctx);
     jb_free(js);
 
     return TM_ECODE_OK;
@@ -192,15 +186,10 @@ static TmEcode JsonDropLogThreadInit(ThreadVars *t, const void *initdata, void *
         goto error_exit;
     }
 
-    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
-        goto error_exit;
-    }
-
     /** Use the Ouptut Context (file pointer and mutex) */
     aft->drop_ctx = ((OutputCtx *)initdata)->data;
-    aft->file_ctx = LogFileEnsureExists(aft->drop_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
+    aft->ctx = CreateEveThreadCtx(t, aft->drop_ctx->eve_ctx);
+    if (!aft->ctx) {
         goto error_exit;
     }
 
@@ -208,9 +197,6 @@ static TmEcode JsonDropLogThreadInit(ThreadVars *t, const void *initdata, void *
     return TM_ECODE_OK;
 
 error_exit:
-    if (aft->buffer != NULL) {
-        MemBufferFree(aft->buffer);
-    }
     SCFree(aft);
     return TM_ECODE_FAILED;
 }
@@ -222,7 +208,7 @@ static TmEcode JsonDropLogThreadDeinit(ThreadVars *t, void *data)
         return TM_ECODE_OK;
     }
 
-    MemBufferFree(aft->buffer);
+    FreeEveThreadCtx(aft->ctx);
 
     /* clear memory */
     memset(aft, 0, sizeof(*aft));
@@ -234,19 +220,8 @@ static TmEcode JsonDropLogThreadDeinit(ThreadVars *t, void *data)
 static void JsonDropOutputCtxFree(JsonDropOutputCtx *drop_ctx)
 {
     if (drop_ctx != NULL) {
-        if (drop_ctx->file_ctx != NULL)
-            LogFileFreeCtx(drop_ctx->file_ctx);
         SCFree(drop_ctx);
     }
-}
-
-static void JsonDropLogDeInitCtx(OutputCtx *output_ctx)
-{
-    OutputDropLoggerDisable();
-
-    JsonDropOutputCtx *drop_ctx = output_ctx->data;
-    JsonDropOutputCtxFree(drop_ctx);
-    SCFree(output_ctx);
 }
 
 static void JsonDropLogDeInitCtxSub(OutputCtx *output_ctx)
@@ -257,65 +232,6 @@ static void JsonDropLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(drop_ctx);
     SCLogDebug("cleaning up sub output_ctx %p", output_ctx);
     SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "drop.json"
-static OutputInitResult JsonDropLogInitCtx(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    if (OutputDropLoggerEnable() != 0) {
-        SCLogError(SC_ERR_CONF_YAML_ERROR, "only one 'drop' logger "
-            "can be enabled");
-        return result;
-    }
-
-    JsonDropOutputCtx *drop_ctx = SCCalloc(1, sizeof(*drop_ctx));
-    if (drop_ctx == NULL)
-        return result;
-
-    drop_ctx->file_ctx = LogFileNewCtx();
-    if (drop_ctx->file_ctx == NULL) {
-        JsonDropOutputCtxFree(drop_ctx);
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, drop_ctx->file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        JsonDropOutputCtxFree(drop_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        JsonDropOutputCtxFree(drop_ctx);
-        return result;
-    }
-
-    if (conf) {
-        const char *extended = ConfNodeLookupChildValue(conf, "alerts");
-        if (extended != NULL) {
-            if (ConfValIsTrue(extended)) {
-                drop_ctx->flags = LOG_DROP_ALERTS;
-            }
-        }
-        extended = ConfNodeLookupChildValue(conf, "flows");
-        if (extended != NULL) {
-            if (strcasecmp(extended, "start") == 0) {
-                g_droplog_flows_start = 1;
-            } else if (strcasecmp(extended, "all") == 0) {
-                g_droplog_flows_start = 0;
-            } else {
-                SCLogWarning(SC_ERR_CONF_YAML_ERROR, "valid options for "
-                        "'flow' are 'start' and 'all'");
-            }
-        }
-    }
-
-    output_ctx->data = drop_ctx;
-    output_ctx->DeInit = JsonDropLogDeInitCtx;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
 }
 
 static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_ctx)
@@ -359,8 +275,7 @@ static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_
         }
     }
 
-    drop_ctx->file_ctx = ajt->file_ctx;
-    drop_ctx->cfg = ajt->cfg;
+    drop_ctx->eve_ctx = ajt;
 
     output_ctx->data = drop_ctx;
     output_ctx->DeInit = JsonDropLogDeInitCtxSub;
@@ -445,9 +360,6 @@ static int JsonDropLogCondition(ThreadVars *tv, const Packet *p)
 
 void JsonDropLogRegister (void)
 {
-    OutputRegisterPacketModule(LOGGER_JSON_DROP, MODULE_NAME, "drop-json-log",
-        JsonDropLogInitCtx, JsonDropLogger, JsonDropLogCondition,
-        JsonDropLogThreadInit, JsonDropLogThreadDeinit, NULL);
     OutputRegisterPacketSubModule(LOGGER_JSON_DROP, "eve-log", MODULE_NAME,
         "eve-log.drop", JsonDropLogInitCtxSub, JsonDropLogger,
         JsonDropLogCondition, JsonDropLogThreadInit, JsonDropLogThreadDeinit,

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -251,9 +251,6 @@ static int DetectThresholdSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     if (de == NULL)
         goto error;
 
-    if (de->track == TRACK_RULE)
-        ThresholdHashRealloc(de_ctx);
-
     sm = SigMatchAlloc();
     if (sm == NULL)
         goto error;
@@ -284,6 +281,53 @@ static void DetectThresholdFree(DetectEngineCtx *de_ctx, void *de_ptr)
         DetectAddressHeadCleanup(&de->addrs);
         SCFree(de);
     }
+}
+
+/**
+ * \brief Make a deep-copy of an extant DetectTHresholdData object.
+ *
+ * \param de pointer to DetectThresholdData
+ */
+DetectThresholdData *DetectThresholdDataCopy(DetectThresholdData *de)
+{
+    DetectThresholdData *new_de = SCCalloc(1, sizeof(DetectThresholdData));
+    if (unlikely(new_de == NULL))
+        return NULL;
+
+    *new_de = *de;
+    new_de->addrs.ipv4_head = NULL;
+    new_de->addrs.ipv6_head = NULL;
+
+    for (DetectAddress *last = NULL, *tmp_ad = de->addrs.ipv4_head; tmp_ad; tmp_ad = tmp_ad->next) {
+        DetectAddress *n_addr = DetectAddressCopy(tmp_ad);
+        if (n_addr == NULL)
+            goto error;
+        if (last == NULL) {
+            new_de->addrs.ipv4_head = n_addr;
+        } else {
+            last->next = n_addr;
+            n_addr->prev = last;
+        }
+        last = n_addr;
+    }
+    for (DetectAddress *last = NULL, *tmp_ad = de->addrs.ipv6_head; tmp_ad; tmp_ad = tmp_ad->next) {
+        DetectAddress *n_addr = DetectAddressCopy(tmp_ad);
+        if (n_addr == NULL)
+            goto error;
+        if (last == NULL) {
+            new_de->addrs.ipv6_head = n_addr;
+        } else {
+            last->next = n_addr;
+            n_addr->prev = last;
+        }
+        last = n_addr;
+    }
+
+    return new_de;
+
+error:
+    DetectThresholdFree(NULL, new_de);
+    return NULL;
 }
 
 /*
@@ -1557,7 +1601,6 @@ static int DetectThresholdTestSig13(void)
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-    ThresholdHashRealloc(de_ctx);
 
     /* should alert twice */
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);

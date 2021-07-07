@@ -54,6 +54,7 @@
 #include "log-httplog.h"
 #include "output-json-http.h"
 #include "output-json-dns.h"
+#include "output-json-modbus.h"
 #include "log-tlslog.h"
 #include "log-tlsstore.h"
 #include "output-json-tls.h"
@@ -69,7 +70,7 @@
 #include "output-json-ftp.h"
 #include "output-json-tftp.h"
 #include "output-json-smb.h"
-#include "output-json-ikev2.h"
+#include "output-json-ike.h"
 #include "output-json-krb5.h"
 #include "output-json-dhcp.h"
 #include "output-json-snmp.h"
@@ -575,44 +576,6 @@ error:
 }
 
 /**
- * \brief Register a flow output module.
- *
- * This function will register an output module so it can be
- * configured with the configuration file.
- *
- * \retval Returns 0 on success, -1 on failure.
- */
-void OutputRegisterFlowModule(LoggerId id, const char *name,
-    const char *conf_name, OutputInitFunc InitFunc, FlowLogger FlowLogFunc,
-    ThreadInitFunc ThreadInit, ThreadDeinitFunc ThreadDeinit,
-    ThreadExitPrintStatsFunc ThreadExitPrintStats)
-{
-    if (unlikely(FlowLogFunc == NULL)) {
-        goto error;
-    }
-
-    OutputModule *module = SCCalloc(1, sizeof(*module));
-    if (unlikely(module == NULL)) {
-        goto error;
-    }
-
-    module->logger_id = id;
-    module->name = name;
-    module->conf_name = conf_name;
-    module->InitFunc = InitFunc;
-    module->FlowLogFunc = FlowLogFunc;
-    module->ThreadInit = ThreadInit;
-    module->ThreadDeinit = ThreadDeinit;
-    module->ThreadExitPrintStats = ThreadExitPrintStats;
-    TAILQ_INSERT_TAIL(&output_modules, module, entries);
-
-    SCLogDebug("Flow logger \"%s\" registered.", name);
-    return;
-error:
-    FatalError(SC_ERR_FATAL, "Fatal error encountered. Exiting...");
-}
-
-/**
  * \brief Register a flow output sub-module.
  *
  * This function will register an output module so it can be
@@ -1109,6 +1072,8 @@ void OutputRegisterLoggers(void)
     OutputFilestoreRegister();
     /* dns */
     JsonDnsLogRegister();
+    /* modbus */
+    JsonModbusLogRegister();
     /* tcp streaming data */
     LogTcpDataLogRegister();
     /* log stats */
@@ -1134,8 +1099,8 @@ void OutputRegisterLoggers(void)
     JsonFTPLogRegister();
     /* SMB JSON logger. */
     JsonSMBLogRegister();
-    /* IKEv2 JSON logger. */
-    JsonIKEv2LogRegister();
+    /* IKE JSON logger. */
+    JsonIKELogRegister();
     /* KRB5 JSON logger. */
     JsonKRB5LogRegister();
     /* DHCP JSON logger. */

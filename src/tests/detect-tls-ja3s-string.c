@@ -15,15 +15,6 @@
  * 02110-1301, USA.
  */
 
-#ifndef HAVE_NSS
-
-static void DetectTlsJa3SStringRegisterTests(void)
-{
-    /* Don't register any tests */
-}
-
-#else /* HAVE_NSS */
-
 /**
  * \test Test matching on a simple client hello packet
  */
@@ -109,7 +100,7 @@ static int DetectTlsJa3SStringTest01(void)
     p2->flowflags |= FLOW_PKT_ESTABLISHED;
     p2->pcap_cnt = 2;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -154,7 +145,7 @@ static int DetectTlsJa3SStringTest01(void)
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p1);
     UTHFreePacket(p2);
@@ -166,5 +157,3 @@ static void DetectTlsJa3SStringRegisterTests(void)
 {
     UtRegisterTest("DetectTlsJa3SStringTest01", DetectTlsJa3SStringTest01);
 }
-
-#endif /* HAVE_NSS */

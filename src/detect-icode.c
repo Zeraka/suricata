@@ -191,8 +191,25 @@ static DetectICodeData *DetectICodeParse(DetectEngineCtx *de_ctx, const char *ic
                                         "valid", args[1]);
             goto error;
         }
-        if ((strcmp(args[0], ">")) == 0) icd->mode = DETECT_ICODE_GT;
-        else icd->mode = DETECT_ICODE_LT;
+        if ((strcmp(args[0], ">")) == 0) {
+            if (icd->code1 == 255) {
+                SCLogError(SC_ERR_INVALID_ARGUMENT,
+                        "specified icmp code >%s is not "
+                        "valid",
+                        args[1]);
+                goto error;
+            }
+            icd->mode = DETECT_ICODE_GT;
+        } else {
+            if (icd->code1 == 0) {
+                SCLogError(SC_ERR_INVALID_ARGUMENT,
+                        "specified icmp code <%s is not "
+                        "valid",
+                        args[1]);
+                goto error;
+            }
+            icd->mode = DETECT_ICODE_LT;
+        }
     } else { /* no "<", ">" */
         /* we have a range ("<>") */
         if (args[2] != NULL) {
@@ -329,8 +346,8 @@ PrefilterPacketICodeCompare(PrefilterPacketHeaderValue v, void *smctx)
     if (v.u8[0] == a->mode &&
         v.u8[1] == a->code1 &&
         v.u8[2] == a->code2)
-        return TRUE;
-    return FALSE;
+        return true;
+    return false;
 }
 
 static int PrefilterSetupICode(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
@@ -347,10 +364,10 @@ static bool PrefilterICodeIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_ICODE:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 #ifdef UNITTESTS

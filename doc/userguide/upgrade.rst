@@ -23,21 +23,56 @@ Configuration Updates
 
 New versions of Suricata will occasionally include updated config files:
 ``classification.config`` and ``reference.config``. Since the Suricata
-installation will not overwrite these if they exist, they should be manually
+installation will not overwrite these if they exist, they must be manually
 updated. If there are no local modifications they can simply be overwritten
 by the ones Suricata supplies.
 
 Major updates include new features, new default settings and often also
 remove features.
 
-Upgrading 5.0 to 6.0
+Upgrading 6.0 to 7.0
 --------------------
-- SIP now enabled by default
-- EDP now enabled by default
+
+Major changes
+~~~~~~~~~~~~~
 
 Removals
 ~~~~~~~~
-- File-store v1 has been removed. If using file extraction, the file-store configuration will need to be updated to version 2. See :ref:`filestore-update-v1-to-v2`.
+
+Logging changes
+~~~~~~~~~~~~~~~
+- Protocol values and their names are built-in to Suricata instead of using the system's ``/etc/protocols`` file. Some names and casing may have changed
+  in the values ``proto`` in ``eve.json`` log entries and other logs containing protocol names and values.
+  See https://redmine.openinfosecfoundation.org/issues/4267 for more information.
+
+Upgrading 5.0 to 6.0
+--------------------
+- SIP now enabled by default
+- RDP now enabled by default
+- ERSPAN Type I enabled by default.
+
+Major changes
+~~~~~~~~~~~~~
+- New protocols enabled by default: mqtt, rfb
+- SSH Client fingerprinting for SSH clients
+- Conditional logging
+- Initial HTTP/2 support
+- DCERPC logging
+- Improved EVE logging performance
+
+Removals
+~~~~~~~~
+- File-store v1 has been removed. If using file extraction, the file-store configuration
+  will need to be updated to version 2. See :ref:`filestore-update-v1-to-v2`.
+- Individual Eve (JSON) loggers have been removed. For example,
+  ``stats-json``, ``dns-json``, etc. Use multiple Eve logger instances
+  if this behavior is still required. See :ref:`multiple-eve-instances`.
+- Unified2 has been removed. See :ref:`unified2-removed`.
+
+Logging changes
+~~~~~~~~~~~~~~~
+- IKEv2 Eve logging changed, the event_type has become ``ike``. The fields ``errors`` and ``notify`` have moved to
+  ``ike.ikev2.errors`` and ``ike.ikev2.notify``.
 
 Upgrading 4.1 to 5.0
 --------------------
@@ -60,5 +95,6 @@ Removals
 ~~~~~~~~
 - ``dns-log``, the text dns log. Use EVE.dns instead.
 - ``file-log``, the non-EVE JSON file log. Use EVE.files instead.
+- ``drop-log``, the non-EVE JSON drop log.
 
 See https://suricata-ids.org/about/deprecation-policy/

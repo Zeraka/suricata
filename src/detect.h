@@ -263,6 +263,7 @@ typedef struct DetectPort_ {
 #define SIG_FLAG_INIT_NEED_FLUSH            BIT_U32(7)
 #define SIG_FLAG_INIT_PRIO_EXPLICT          BIT_U32(8)  /**< priority is explicitly set by the priority keyword */
 #define SIG_FLAG_INIT_FILEDATA              BIT_U32(9)  /**< signature has filedata keyword */
+#define SIG_FLAG_INIT_DCERPC                BIT_U32(10) /**< signature has DCERPC keyword */
 
 /* signature mask flags */
 /** \note: additions should be added to the rule analyzer as well */
@@ -345,7 +346,9 @@ typedef struct InspectionBuffer {
     uint64_t inspect_offset;
     uint32_t inspect_len;   /**< size of active data. See to ::len or ::orig_len */
     uint8_t flags;          /**< DETECT_CI_FLAGS_* for use with DetectEngineContentInspection */
-
+#ifdef DEBUG_VALIDATION
+    bool multi;
+#endif
     uint32_t len;           /**< how much is in use */
     uint8_t *buf;
     uint32_t size;          /**< size of the memory allocation */
@@ -383,13 +386,6 @@ typedef InspectionBuffer *(*InspectionBufferGetDataPtr)(
         const DetectEngineTransforms *transforms,
         Flow *f, const uint8_t flow_flags,
         void *txv, const int list_id);
-
-typedef int (*InspectEngineFuncPtr)(ThreadVars *tv,
-        struct DetectEngineCtx_ *de_ctx, struct DetectEngineThreadCtx_ *det_ctx,
-        const struct Signature_ *sig, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *tx, uint64_t tx_id);
-
 struct DetectEngineAppInspectionEngine_;
 
 typedef int (*InspectEngineFuncPtr2)(
@@ -402,18 +398,11 @@ typedef struct DetectEngineAppInspectionEngine_ {
     AppProto alproto;
     uint8_t dir;
     uint8_t id;     /**< per sig id used in state keeping */
-    uint16_t mpm:1;
-    uint16_t stream:1;
-    uint16_t sm_list:14;
+    bool mpm;
+    bool stream;
+    uint16_t sm_list;
+    uint16_t sm_list_base; /**< base buffer being transformed */
     int16_t progress;
-
-    /* \retval 0 No match.  Don't discontinue matching yet.  We need more data.
-     *         1 Match.
-     *         2 Sig can't match.
-     *         3 Special value used by filestore sigs to indicate disabling
-     *           filestore for the tx.
-     */
-    InspectEngineFuncPtr Callback;
 
     struct {
         InspectionBufferGetDataPtr GetData;
@@ -459,8 +448,9 @@ typedef InspectionBuffer *(*InspectionBufferGetPktDataPtr)(
 
 typedef struct DetectEnginePktInspectionEngine {
     SigMatchData *smd;
-    uint16_t mpm:1;
-    uint16_t sm_list:15;
+    bool mpm;
+    uint16_t sm_list;
+    uint16_t sm_list_base;
     struct {
         InspectionBufferGetPktDataPtr GetData;
         InspectionBufferPktInspectFunc Callback;
@@ -611,7 +601,8 @@ typedef struct DetectBufferMpmRegistery_ {
     const char *name;
     char pname[32];             /**< name used in profiling */
     int direction;              /**< SIG_FLAG_TOSERVER or SIG_FLAG_TOCLIENT */
-    int sm_list;
+    int16_t sm_list;
+    int16_t sm_list_base;
     int priority;
     int id;                     /**< index into this array and result arrays */
     enum DetectBufferMpmType type;
@@ -825,7 +816,7 @@ typedef struct DetectEngineCtx_ {
     uint16_t max_uniq_toserver_groups;
 
     /* specify the configuration for mpm context factory */
-    uint8_t sgh_mpm_context;
+    uint8_t sgh_mpm_ctx_cnf;
 
     /* max flowbit id that is used */
     uint32_t max_fb_id;
@@ -966,9 +957,10 @@ enum {
 
 /* Siggroup mpm context profile */
 enum {
-    ENGINE_SGH_MPM_FACTORY_CONTEXT_FULL,
+    ENGINE_SGH_MPM_FACTORY_CONTEXT_FULL = 0,
     ENGINE_SGH_MPM_FACTORY_CONTEXT_SINGLE,
-    ENGINE_SGH_MPM_FACTORY_CONTEXT_AUTO
+    ENGINE_SGH_MPM_FACTORY_CONTEXT_AUTO,
+#define ENGINE_SGH_MPM_FACTORY_CONTEXT_START_ID_RANGE (ENGINE_SGH_MPM_FACTORY_CONTEXT_AUTO + 1)
 };
 
 typedef struct HttpReassembledBody_ {
@@ -1233,6 +1225,8 @@ enum {
     FILE_DECODER_EVENT_LZMA_DATA_ERROR,
     FILE_DECODER_EVENT_LZMA_BUF_ERROR,
     FILE_DECODER_EVENT_LZMA_UNKNOWN_ERROR,
+
+    DETECT_EVENT_TOO_MANY_BUFFERS,
 };
 
 #define SIG_GROUP_HEAD_HAVERAWSTREAM    BIT_U32(0)

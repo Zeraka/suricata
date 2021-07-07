@@ -513,7 +513,7 @@ void FlowHandlePacket(ThreadVars *tv, FlowLookupStruct *fls, Packet *p)
 
 /** \brief initialize the configuration
  *  \warning Not thread safe */
-void FlowInitConfig(char quiet)
+void FlowInitConfig(bool quiet)
 {
     SCLogDebug("initializing flow engine...");
 
@@ -537,7 +537,8 @@ void FlowInitConfig(char quiet)
         if (val <= 100 && val >= 1) {
             flow_config.emergency_recovery = (uint8_t)val;
         } else {
-            SCLogError(SC_ERR_INVALID_VALUE, "flow.emergency-recovery must be in the range of 1 and 100 (as percentage)");
+            SCLogError(SC_ERR_INVALID_VALUE, "flow.emergency-recovery must be in the range of "
+                                             "1 and 100 (as percentage)");
             flow_config.emergency_recovery = FLOW_DEFAULT_EMERGENCY_RECOVERY;
         }
     } else {
@@ -550,7 +551,7 @@ void FlowInitConfig(char quiet)
     uint32_t configval = 0;
 
     /** set config values for memcap, prealloc and hash_size */
-    uint64_t flow_memcap_copy;
+    uint64_t flow_memcap_copy = 0;
     if ((ConfGet("flow.memcap", &conf_val)) == 1)
     {
         if (conf_val == NULL) {
@@ -617,14 +618,14 @@ void FlowInitConfig(char quiet)
     }
     (void) SC_ATOMIC_ADD(flow_memuse, (flow_config.hash_size * sizeof(FlowBucket)));
 
-    if (quiet == FALSE) {
+    if (!quiet) {
         SCLogConfig("allocated %"PRIu64" bytes of memory for the flow hash... "
                   "%" PRIu32 " buckets of size %" PRIuMAX "",
                   SC_ATOMIC_GET(flow_memuse), flow_config.hash_size,
                   (uintmax_t)sizeof(FlowBucket));
     }
     FlowSparePoolInit();
-    if (quiet == FALSE) {
+    if (!quiet) {
         SCLogConfig("flow memory usage: %"PRIu64" bytes, maximum: %"PRIu64,
                 SC_ATOMIC_GET(flow_memuse), SC_ATOMIC_GET(flow_config.memcap));
     }
@@ -632,7 +633,9 @@ void FlowInitConfig(char quiet)
     FlowInitFlowProto();
 
     uint32_t sz = sizeof(Flow) + FlowStorageSize();
-    SCLogNotice("flow size %u, memcap allows for %"PRIu64" flows. Per hash row in perfect conditions %"PRIu64, sz, flow_memcap_copy/sz, (flow_memcap_copy/sz)/flow_config.hash_size);
+    SCLogConfig("flow size %u, memcap allows for %" PRIu64 " flows. Per hash row in perfect "
+                "conditions %" PRIu64,
+            sz, flow_memcap_copy / sz, (flow_memcap_copy / sz) / flow_config.hash_size);
     return;
 }
 
@@ -975,7 +978,7 @@ void FlowInitFlowProto(void)
                                             strlen(emergency_bypassed),
                                             emergency_bypassed) > 0) {
 
-                flow_timeouts_emerg[FLOW_PROTO_UDP].bypassed_timeout = configval;
+                flow_timeouts_emerg[FLOW_PROTO_ICMP].bypassed_timeout = configval;
             }
         }
     }
@@ -1123,9 +1126,6 @@ uint8_t FlowGetDisruptionFlags(const Flow *f, uint8_t flags)
 
     if (stream->flags & STREAMTCP_STREAM_FLAG_DEPTH_REACHED) {
         newflags |= STREAM_DEPTH;
-    }
-    if (stream->flags & STREAMTCP_STREAM_FLAG_GAP) {
-        newflags |= STREAM_GAP;
     }
     /* todo: handle pass case (also for UDP!) */
 

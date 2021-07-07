@@ -691,7 +691,7 @@ On `x86_64` hs (Hyperscan) should be used for best performance.
 Threading
 ---------
 
-Suricata is multi-threaded. Suricata uses multiple CPU' s/CPU cores so
+Suricata is multi-threaded. Suricata uses multiple CPUs/CPU cores so
 it can process a lot of network packets simultaneously. (In a
 single-core engine, the packets will be processed one at a time.)
 
@@ -1358,20 +1358,34 @@ use of libhtp.
        # Default value of randomize-inspection-range is 10.
        #randomize-inspection-range: 10
 
-       # Can disable LZMA decompression
-       #lzma-enabled: yes
+       # Can enable LZMA decompression
+       #lzma-enabled: false
        # Memory limit usage for LZMA decompression dictionary
        # Data is decompressed until dictionary reaches this size
        #lzma-memlimit: 1 Mb
        # Maximum decompressed size with a compression ratio
        # above 2048 (only reachable by LZMA)
        #compression-bomb-limit: 1 Mb
+       # Maximum time spent decompressing a single transaction in usec
+       #decompression-time-limit: 100000
 
 Other parameters are customizable from Suricata.
 ::
 
-      #   double-decode-path:     Double decode path section of the URI
-      #   double-decode-query:    Double decode query section of the URI
+#   double-decode-path:     Double decode path section of the URI
+#   double-decode-query:    Double decode query section of the URI
+
+decompression-time-limit
+------------------------
+
+decompression-time-limit was implemented to avoid DOS by resource exhaustion
+on inputs such as decompression bombs (found by fuzzing).
+The lower the limit, the better the protection against DOS is, but this
+may also lead to false positives.
+In case the time limit is reached,
+the app-layer event ``http.compression_bomb`` is set
+(this event can also set from other conditions).
+This can happen on slow configurations (hardware, ASAN, etc...)
 
 Configure SMB (Rust)
 ~~~~~~~~~~~~~~~~~~~~

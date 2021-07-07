@@ -151,7 +151,7 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         const uint32_t data_len = strlen(ssl_state->server_connp.ja3_hash);
         const uint8_t *data = (uint8_t *)ssl_state->server_connp.ja3_hash;
 
-        InspectionBufferSetup(buffer, data, data_len);
+        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
         InspectionBufferApplyTransforms(buffer, transforms);
     }
 
@@ -177,16 +177,16 @@ static bool DetectTlsJa3SHashValidateCallback(const Signature *s,
         }
 
         if (cd->content_len == 32)
-            return TRUE;
+            return true;
 
         *sigerror = "Invalid length of the specified JA3S hash (should "
                     "be 32 characters long). This rule will therefore "
                     "never match.";
         SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,  "rule %u: %s", s->id, *sigerror);
-        return FALSE;
+        return false;
     }
 
-    return TRUE;
+    return true;
 }
 
 static void DetectTlsJa3SHashSetupCallback(const DetectEngineCtx *de_ctx,
@@ -200,13 +200,13 @@ static void DetectTlsJa3SHashSetupCallback(const DetectEngineCtx *de_ctx,
 
         DetectContentData *cd = (DetectContentData *)sm->ctx;
 
-        bool changed = FALSE;
+        bool changed = false;
         uint32_t u;
         for (u = 0; u < cd->content_len; u++)
         {
             if (isupper(cd->content[u])) {
                 cd->content[u] = tolower(cd->content[u]);
-                changed = TRUE;
+                changed = true;
             }
         }
 
