@@ -48,23 +48,20 @@ const char *RunModeErfDagGetDefaultMode(void)
 void RunModeErfDagRegister(void)
 {
     RunModeRegisterNewRunMode(RUNMODE_DAG, "autofp",
-        "Multi threaded DAG mode.  Packets from "
-        "each flow are assigned to a single detect "
-        "thread, unlike \"dag_auto\" where packets "
-        "from the same flow can be processed by any "
-        "detect thread",
-        RunModeIdsErfDagAutoFp);
+            "Multi threaded DAG mode.  Packets from "
+            "each flow are assigned to a single detect "
+            "thread, unlike \"dag_auto\" where packets "
+            "from the same flow can be processed by any "
+            "detect thread",
+            RunModeIdsErfDagAutoFp, NULL);
 
-    RunModeRegisterNewRunMode(RUNMODE_DAG, "single",
-        "Singled threaded DAG mode",
-        RunModeIdsErfDagSingle);
+    RunModeRegisterNewRunMode(
+            RUNMODE_DAG, "single", "Singled threaded DAG mode", RunModeIdsErfDagSingle, NULL);
 
     RunModeRegisterNewRunMode(RUNMODE_DAG, "workers",
-        "Workers DAG mode, each thread does all "
-        " tasks from acquisition to logging",
-        RunModeIdsErfDagWorkers);
-
-    return;
+            "Workers DAG mode, each thread does all "
+            " tasks from acquisition to logging",
+            RunModeIdsErfDagWorkers, NULL);
 }
 
 int RunModeIdsErfDagSingle(void)
@@ -72,8 +69,6 @@ int RunModeIdsErfDagSingle(void)
     int ret;
 
     SCEnter();
-
-    RunModeInitialize();
 
     TimeModeSetLive();
 
@@ -84,7 +79,7 @@ int RunModeIdsErfDagSingle(void)
         thread_name_single,
         NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "DAG single runmode failed to start");
+        FatalError("DAG single runmode failed to start");
     }
 
     SCLogInfo("RunModeIdsDagSingle initialised");
@@ -98,18 +93,12 @@ int RunModeIdsErfDagAutoFp(void)
 
     SCEnter();
 
-    RunModeInitialize();
-
     TimeModeSetLive();
 
-    ret = RunModeSetLiveCaptureAutoFp(ParseDagConfig,
-        DagConfigGetThreadCount,
-        "ReceiveErfDag",
-        "DecodeErfDag",
-        thread_name_autofp,
-        NULL);
+    ret = RunModeSetLiveCaptureAutoFp(ParseDagConfig, DagConfigGetThreadCount, "ReceiveErfDag",
+            "DecodeErfDag", thread_name_autofp, NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "DAG autofp runmode failed to start");
+        FatalError("DAG autofp runmode failed to start");
     }
 
     SCLogInfo("RunModeIdsDagAutoFp initialised");
@@ -123,18 +112,12 @@ int RunModeIdsErfDagWorkers(void)
 
     SCEnter();
 
-    RunModeInitialize();
-
     TimeModeSetLive();
 
-    ret = RunModeSetLiveCaptureWorkers(ParseDagConfig,
-        DagConfigGetThreadCount,
-        "ReceiveErfDag",
-        "DecodeErfDag",
-        thread_name_workers,
-        NULL);
+    ret = RunModeSetLiveCaptureWorkers(ParseDagConfig, DagConfigGetThreadCount, "ReceiveErfDag",
+            "DecodeErfDag", thread_name_workers, NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "DAG workers runmode failed to start");
+        FatalError("DAG workers runmode failed to start");
     }
 
     SCLogInfo("RunModeIdsErfDagWorkers initialised");

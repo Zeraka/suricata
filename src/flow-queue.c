@@ -25,7 +25,6 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "flow-private.h"
 #include "flow-queue.h"
 #include "flow-util.h"
@@ -33,11 +32,11 @@
 #include "util-debug.h"
 #include "util-print.h"
 
-FlowQueue *FlowQueueNew()
+FlowQueue *FlowQueueNew(void)
 {
     FlowQueue *q = (FlowQueue *)SCMalloc(sizeof(FlowQueue));
     if (q == NULL) {
-        SCLogError(SC_ERR_FATAL, "Fatal error encountered in FlowQueueNew. Exiting...");
+        SCLogError("Fatal error encountered in FlowQueueNew. Exiting...");
         exit(EXIT_SUCCESS);
     }
     q = FlowQueueInit(q);
@@ -106,13 +105,13 @@ void FlowQueuePrivateAppendPrivate(FlowQueuePrivate *dest, FlowQueuePrivate *src
 
 static inline void FlowQueueAtomicSetNonEmpty(FlowQueue *fq)
 {
-    if (SC_ATOMIC_GET(fq->non_empty) == false) {
+    if (!SC_ATOMIC_GET(fq->non_empty)) {
         SC_ATOMIC_SET(fq->non_empty, true);
     }
 }
 static inline void FlowQueueAtomicSetEmpty(FlowQueue *fq)
 {
-    if (SC_ATOMIC_GET(fq->non_empty) == true) {
+    if (SC_ATOMIC_GET(fq->non_empty)) {
         SC_ATOMIC_SET(fq->non_empty, false);
     }
 }

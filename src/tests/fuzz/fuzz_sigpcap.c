@@ -1,7 +1,7 @@
 /**
  * @file
  * @author Philippe Antoine <contact@catenacyber.fr>
- * fuzz target for AppLayerProtoDetectGetProto
+ * fuzz target for signature file and pcap file
  */
 
 #include "suricata-common.h"
@@ -12,6 +12,7 @@
 #include "app-layer.h"
 #include "tm-queuehandlers.h"
 #include "util-cidr.h"
+#include "util-profiling.h"
 #include "util-proto-name.h"
 #include "detect-engine-tag.h"
 #include "detect-engine-threshold.h"
@@ -22,6 +23,13 @@
 #include "util-unittest-helper.h"
 #include "conf-yaml-loader.h"
 #include "pkt-var.h"
+#include "flow-util.h"
+#include "flow-worker.h"
+#include "tm-modules.h"
+#include "tmqh-packetpool.h"
+#include "util-file.h"
+#include "util-conf.h"
+#include "packet.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -32,109 +40,9 @@ DecodeThreadVars *dtv;
 //FlowWorkerThreadData
 void *fwd;
 SCInstance surifuzz;
+SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
-const char configNoChecksum[] = "\
-%YAML 1.1\n\
----\n\
-pcap-file:\n\
-\n\
-  checksum-checks: no\n\
-\n\
-stream:\n\
-\n\
-  checksum-validation: no\n\
-outputs:\n\
-  - fast:\n\
-      enabled: yes\n\
-      filename: /dev/null\n\
-  - eve-log:\n\
-      enabled: yes\n\
-      filetype: regular\n\
-      filename: /dev/null\n\
-      xff:\n\
-        enabled: yes\n\
-        mode: extra-data\n\
-        deployment: reverse\n\
-        header: X-Forwarded-For\n\
-      types:\n\
-        - alert:\n\
-            payload: yes\n\
-            payload-printable: yes\n\
-            packet: yes\n\
-            metadata: yes\n\
-            http-body: yes\n\
-            http-body-printable: yes\n\
-            tagged-packets: yes\n\
-        - anomaly:\n\
-            enabled: yes\n\
-            types:\n\
-              decode: yes\n\
-              stream: yes\n\
-              applayer: yes\n\
-            packethdr: yes\n\
-        - http:\n\
-            extended: yes\n\
-            dump-all-headers: both\n\
-        - dns\n\
-        - tls:\n\
-            extended: yes\n\
-            session-resumption: yes\n\
-        - files\n\
-        - smtp:\n\
-            extended: yes\n\
-        - dnp3\n\
-        - ftp\n\
-        - rdp\n\
-        - nfs\n\
-        - smb\n\
-        - tftp\n\
-        - ikev2\n\
-        - krb5\n\
-        - snmp\n\
-        - rfb\n\
-        - sip\n\
-        - dhcp:\n\
-            enabled: yes\n\
-            extended: yes\n\
-        - ssh\n\
-        - flow\n\
-        - netflow\n\
-        - metadata\n\
-  - http-log:\n\
-      enabled: yes\n\
-      filename: /dev/null\n\
-      extended: yes\n\
-  - tls-log:\n\
-      enabled: yes\n\
-      filename: /dev/null\n\
-      extended: yes\n\
-app-layer:\n\
-  protocols:\n\
-    rdp:\n\
-      enabled: yes\n\
-    modbus:\n\
-      enabled: yes\n\
-      detection-ports:\n\
-        dp: 502\n\
-    dnp3:\n\
-      enabled: yes\n\
-      detection-ports:\n\
-        dp: 20000\n\
-    enip:\n\
-      enabled: yes\n\
-      detection-ports:\n\
-        dp: 44818\n\
-        sp: 44818\n\
-    sip:\n\
-      enabled: yes\n\
-    ssh:\n\
-      enabled: yes\n\
-      hassh: yes\n\
-    mqtt:\n\
-      enabled: yes\n\
-    http2:\n\
-      enabled: yes\n\
-";
+extern const char *configNoChecksum;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -145,6 +53,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     int r;
     Packet *p;
     size_t pos;
+    size_t pcap_cnt = 0;
 
     if (initialized == 0) {
         //Redirects logs to /dev/null
@@ -154,20 +63,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         InitGlobal();
 
         GlobalsInitPreConfig();
-        run_mode = RUNMODE_PCAP_FILE;
+        SCRunmodeSet(RUNMODE_PCAP_FILE);
         //redirect logs to /tmp
         ConfigSetLogDirectory("/tmp/");
         //disables checksums validation for fuzzing
-        if (ConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
             abort();
         }
+        // do not load rules before reproducible DetectEngineReload
+        remove("/tmp/fuzz.rules");
         surifuzz.sig_file = strdup("/tmp/fuzz.rules");
         surifuzz.sig_file_exclusive = 1;
         //loads rules after init
         surifuzz.delayed_detect = 1;
 
         PostConfLoadedSetup(&surifuzz);
-        PreRunPostPrivsDropInit(run_mode);
+        PreRunPostPrivsDropInit(SCRunmodeGet());
         PostConfLoadedDetectSetup(&surifuzz);
 
         memset(&tv, 0, sizeof(tv));
@@ -179,7 +90,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         tmm_modules[TMM_FLOWWORKER].ThreadInit(&tv, NULL, &fwd);
         StatsSetupPrivate(&tv);
 
-        PacketPoolInitEmpty();
+        extern uint32_t max_pending_packets;
+        max_pending_packets = 128;
+        PacketPoolInit();
+        SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
         initialized = 1;
     }
 
@@ -189,7 +103,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             break;
         }
     }
-    if (ConfYamlLoadString(data, pos) != 0) {
+    if (SCConfYamlLoadString(data, pos) != 0) {
         return 0;
     }
     if (pos < size) {
@@ -218,6 +132,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (DetectEngineReload(&surifuzz) < 0) {
         return 0;
     }
+    DetectEngineThreadCtx *old_det_ctx = FlowWorkerGetDetectCtxPtr(fwd);
+
+    DetectEngineCtx *de_ctx = DetectEngineGetCurrent();
+    de_ctx->ref_cnt--;
+    DetectEngineThreadCtx *new_det_ctx = DetectEngineThreadCtxInitForReload(&tv, de_ctx, 1);
+    FlowWorkerReplaceDetectCtx(fwd, new_det_ctx);
+
+    DetectEngineThreadCtxDeinit(NULL, old_det_ctx);
+
     if (pos < size) {
         //skip zero
         pos++;
@@ -239,31 +162,47 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     //loop over packets
     r = pcap_next_ex(pkts, &header, &pkt);
     p = PacketGetFromAlloc();
+    if (r <= 0 || header->ts.tv_sec >= INT_MAX - 3600 || header->ts.tv_usec < 0) {
+        goto bail;
+    }
+    p->ts = SCTIME_FROM_TIMEVAL(&header->ts);
     p->datalink = pcap_datalink(pkts);
+    p->pkt_src = PKT_SRC_WIRE;
     while (r > 0) {
-        PacketCopyData(p, pkt, header->caplen);
-        //DecodePcapFile
-        TmEcode ecode = tmm_modules[TMM_DECODEPCAPFILE].Func(&tv, p, dtv);
-        if (ecode == TM_ECODE_FAILED) {
-            break;
-        }
-        Packet *extra_p = PacketDequeueNoLock(&tv.decode_pq);
-        while (extra_p != NULL) {
-            PacketFree(extra_p);
+        if (PacketCopyData(p, pkt, header->caplen) == 0) {
+            // DecodePcapFile
+            TmEcode ecode = tmm_modules[TMM_DECODEPCAPFILE].Func(&tv, p, dtv);
+            if (ecode == TM_ECODE_FAILED) {
+                break;
+            }
+            Packet *extra_p = PacketDequeueNoLock(&tv.decode_pq);
+            while (extra_p != NULL) {
+                PacketFreeOrRelease(extra_p);
+                extra_p = PacketDequeueNoLock(&tv.decode_pq);
+            }
+            tmm_modules[TMM_FLOWWORKER].Func(&tv, p, fwd);
             extra_p = PacketDequeueNoLock(&tv.decode_pq);
-        }
-        tmm_modules[TMM_FLOWWORKER].Func(&tv, p, fwd);
-        extra_p = PacketDequeueNoLock(&tv.decode_pq);
-        while (extra_p != NULL) {
-            PacketFree(extra_p);
-            extra_p = PacketDequeueNoLock(&tv.decode_pq);
+            while (extra_p != NULL) {
+                PacketFreeOrRelease(extra_p);
+                extra_p = PacketDequeueNoLock(&tv.decode_pq);
+            }
         }
         r = pcap_next_ex(pkts, &header, &pkt);
-        PACKET_RECYCLE(p);
+        if (r <= 0 || header->ts.tv_sec >= INT_MAX - 3600 || header->ts.tv_usec < 0) {
+            goto bail;
+        }
+        PacketRecycle(p);
+        p->ts = SCTIME_FROM_TIMEVAL(&header->ts);
+        p->datalink = pcap_datalink(pkts);
+        p->pkt_src = PKT_SRC_WIRE;
+        pcap_cnt++;
+        p->pcap_cnt = pcap_cnt;
     }
+bail:
     //close structure
     pcap_close(pkts);
     PacketFree(p);
+    FlowReset();
 
     return 0;
 }

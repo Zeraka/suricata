@@ -15,10 +15,9 @@
  * 02110-1301, USA.
  */
 
+use crate::common::nom7::take_until_and_consume;
 use crate::smb::error::SmbError;
-use nom;
-use nom::IResult;
-use crate::log::*;
+use nom7::{Err, IResult};
 
 /// parse a UTF16 string that is null terminated. Normally by 2 null
 /// bytes, but at the end of the data it can also be a single null.
@@ -28,7 +27,7 @@ pub fn smb_get_unicode_string(blob: &[u8]) -> IResult<&[u8], Vec<u8>, SmbError>
     SCLogDebug!("get_unicode_string: blob {} {:?}", blob.len(), blob);
     let mut name : Vec<u8> = Vec::new();
     let mut c = blob;
-    while c.len() >= 1 {
+    while !c.is_empty() {
         if c.len() == 1 && c[0] == 0 {
             let rem = &c[1..];
             SCLogDebug!("get_unicode_string: name {:?}", name);
@@ -43,13 +42,12 @@ pub fn smb_get_unicode_string(blob: &[u8]) -> IResult<&[u8], Vec<u8>, SmbError>
         name.push(c[0]);
         c = &c[2..];
     }
-    Err(nom::Err::Error(SmbError::BadEncoding))
+    Err(Err::Error(SmbError::BadEncoding))
 }
 
 // parse an ASCII string that is null terminated
-named!(pub smb_get_ascii_string<&[u8], Vec<u8>, SmbError>,
-    do_parse!(
-            s: take_until_and_consume!("\x00")
-        >> ( s.to_vec() )
-));
+pub fn smb_get_ascii_string(i: &[u8]) -> IResult<&[u8], Vec<u8>, SmbError> {
+    let (i, s) = take_until_and_consume(b"\x00")(i)?;
+    Ok((i, s.to_vec()))
+}
 

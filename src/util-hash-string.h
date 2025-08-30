@@ -15,12 +15,15 @@
  * 02110-1301, USA.
  */
 
-#ifndef __UTIL_HASH_STRING_H__
-#define __UTIL_HASH_STRING_H__
+#ifndef SURICATA_UTIL_HASH_STRING_H
+#define SURICATA_UTIL_HASH_STRING_H
 
+#include "util-hash.h"
+
+uint32_t StringHashDjb2(const uint8_t *data, uint32_t datalen);
 uint32_t StringHashFunc(HashTable *ht, void *data, uint16_t datalen);
 char StringHashCompareFunc(void *data1, uint16_t datalen1,
                            void *data2, uint16_t datalen2);
 void StringHashFreeFunc(void *data);
 
-#endif /* __UTIL_HASH_STRING_H__ */
+#endif /* SURICATA_UTIL_HASH_STRING_H */

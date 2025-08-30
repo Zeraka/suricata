@@ -24,29 +24,36 @@
  * that can load multiple detection engines in parallel.
  */
 
-#ifndef __DETECT_ENGINE_LOADER_H__
-#define __DETECT_ENGINE_LOADER_H__
+#ifndef SURICATA_DETECT_ENGINE_LOADER_H
+#define SURICATA_DETECT_ENGINE_LOADER_H
 
 /**
  * \param ctx function specific data
  * \param loader_id id of the loader that executed the task
  */
 typedef int (*LoaderFunc)(void *ctx, int loader_id);
+typedef void (*LoaderFreeFunc)(void *ctx);
 
 typedef struct DetectLoaderTask_ {
     LoaderFunc Func;
     void *ctx;
+    LoaderFreeFunc FreeFunc;
     TAILQ_ENTRY(DetectLoaderTask_) next;
 } DetectLoaderTask;
 
 typedef struct DetectLoaderControl_ {
     int id;
-    int result;     /* 0 for ok, error otherwise */
-    SCMutex m;
-    TAILQ_HEAD(, DetectLoaderTask_) task_list;
+    ThreadVars *tv; /**< loader threads threadvars - for waking them up */
+
+    /** struct to group members and mutex */
+    struct {
+        SCMutex m;  /**< mutex protects result and task_list */
+        int result; /**< 0 for ok, error otherwise */
+        TAILQ_HEAD(, DetectLoaderTask_) task_list;
+    };
 } DetectLoaderControl;
 
-int DetectLoaderQueueTask(int loader_id, LoaderFunc Func, void *func_ctx);
+int DetectLoaderQueueTask(int loader_id, LoaderFunc Func, void *func_ctx, LoaderFreeFunc FreeFunc);
 int DetectLoadersSync(void);
 void DetectLoadersInit(void);
 
@@ -54,4 +61,4 @@ void TmThreadContinueDetectLoaderThreads(void);
 void DetectLoaderThreadSpawn(void);
 void TmModuleDetectLoaderRegister (void);
 
-#endif /* __DETECT_ENGINE_LOADER_H__ */
+#endif /* SURICATA_DETECT_ENGINE_LOADER_H */

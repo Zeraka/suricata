@@ -64,8 +64,6 @@ on 1 byte), but shoehorning those bytes into integers efficiently is messy.
 # define HASH_BIG_ENDIAN 0
 #endif
 
-#define hashsize(n) ((uint32_t)1<<(n))
-#define hashmask(n) (hashsize(n)-1)
 #define rot(x,k) (((x)<<(k)) | ((x)>>(32-(k))))
 
 /*
@@ -304,14 +302,14 @@ uint32_t hashlittle( const void *key, size_t length, uint32_t initval)
     }
 
     /*----------------------------- handle the last (probably partial) block */
-    /* 
+    /*
      * "k[2]&0xffffff" actually reads beyond the end of the string, but
      * then masks off the part it's not allowed to read.  Because the
      * string is aligned, the masked-off tail is in the same word as the
      * rest of the string.  Every machine with memory protection I've seen
      * does it on word boundaries, so is OK with this.  But VALGRIND will
      * still catch it and complain.  The masking trick does make the hash
-     * noticably faster for short strings (like English words).
+     * noticeably faster for short strings (like English words).
      */
 #ifndef VALGRIND
 
@@ -663,14 +661,14 @@ void hashlittle2(
     }
 
     /*----------------------------- handle the last (probably partial) block */
-    /* 
+    /*
      * "k[2]&0xffffff" actually reads beyond the end of the string, but
      * then masks off the part it's not allowed to read.  Because the
      * string is aligned, the masked-off tail is in the same word as the
      * rest of the string.  Every machine with memory protection I've seen
      * does it on word boundaries, so is OK with this.  But VALGRIND will
      * still catch it and complain.  The masking trick does make the hash
-     * noticably faster for short strings (like English words).
+     * noticeably faster for short strings (like English words).
      */
 #ifndef VALGRIND
 
@@ -807,7 +805,211 @@ void hashlittle2(
   *pc=c; *pb=b;
 }
 
+/*
+ * hashlittle2: return 2 32-bit hash values
+ *
+ * This is identical to hashlittle(), except it returns two 32-bit hash
+ * values instead of just one.  This is good enough for hash table
+ * lookup with 2^^64 buckets, or if you want a second hash if you're not
+ * happy with the first, or if you want a probably-unique 64-bit ID for
+ * the key.  *pc is better mixed than *pb, so use *pc first.  If you want
+ * a 64-bit value do something like "*pc + (((uint64_t)*pb)<<32)".
+ */
+void hashlittle2_safe(const void *key, /* the key to hash */
+        size_t length,                 /* length of the key */
+        uint32_t *pc,                  /* IN: primary initval, OUT: primary hash */
+        uint32_t *pb)                  /* IN: secondary initval, OUT: secondary hash */
+{
+    uint32_t a, b, c; /* internal state */
+    union {
+        const void *ptr;
+        size_t i;
+    } u; /* needed for Mac Powerbook G4 */
 
+    /* Set up the internal state */
+    a = b = c = 0xdeadbeef + ((uint32_t)length) + *pc;
+    c += *pb;
+
+    u.ptr = key;
+    if (HASH_LITTLE_ENDIAN && ((u.i & 0x3) == 0)) {
+        const uint32_t *k = (const uint32_t *)key; /* read 32-bit chunks */
+
+        /*------ all but last block: aligned reads and affect 32 bits of (a,b,c) */
+        while (length > 12) {
+            a += k[0];
+            b += k[1];
+            c += k[2];
+            mix(a, b, c);
+            length -= 12;
+            k += 3;
+        }
+
+        /*----------------------------- handle the last (probably partial) block */
+        /*
+         * Note that unlike hashlittle() above, we use the "safe" version of this
+         * block that is #ifdef VALGRIND above, in order to avoid warnings from
+         * Valgrind or Address Sanitizer.
+         */
+        const uint8_t *k8 = (const uint8_t *)k;
+        switch (length) {
+            case 12:
+                c += k[2];
+                b += k[1];
+                a += k[0];
+                break;
+            case 11:
+                c += ((uint32_t)k8[10]) << 16; /* fall through */
+            case 10:
+                c += ((uint32_t)k8[9]) << 8; /* fall through */
+            case 9:
+                c += k8[8]; /* fall through */
+            case 8:
+                b += k[1];
+                a += k[0];
+                break;
+            case 7:
+                b += ((uint32_t)k8[6]) << 16; /* fall through */
+            case 6:
+                b += ((uint32_t)k8[5]) << 8; /* fall through */
+            case 5:
+                b += k8[4]; /* fall through */
+            case 4:
+                a += k[0];
+                break;
+            case 3:
+                a += ((uint32_t)k8[2]) << 16; /* fall through */
+            case 2:
+                a += ((uint32_t)k8[1]) << 8; /* fall through */
+            case 1:
+                a += k8[0];
+                break;
+            case 0:
+                *pc = c;
+                *pb = b;
+                return; /* zero length strings require no mixing */
+        }
+
+    } else if (HASH_LITTLE_ENDIAN && ((u.i & 0x1) == 0)) {
+        const uint16_t *k = (const uint16_t *)key; /* read 16-bit chunks */
+        const uint8_t *k8;
+
+        /*--------------- all but last block: aligned reads and different mixing */
+        while (length > 12) {
+            a += k[0] + (((uint32_t)k[1]) << 16);
+            b += k[2] + (((uint32_t)k[3]) << 16);
+            c += k[4] + (((uint32_t)k[5]) << 16);
+            mix(a, b, c);
+            length -= 12;
+            k += 6;
+        }
+
+        /*----------------------------- handle the last (probably partial) block */
+        k8 = (const uint8_t *)k;
+        switch (length) {
+            case 12:
+                c += k[4] + (((uint32_t)k[5]) << 16);
+                b += k[2] + (((uint32_t)k[3]) << 16);
+                a += k[0] + (((uint32_t)k[1]) << 16);
+                break;
+            case 11:
+                c += ((uint32_t)k8[10]) << 16; /* fall through */
+            case 10:
+                c += k[4];
+                b += k[2] + (((uint32_t)k[3]) << 16);
+                a += k[0] + (((uint32_t)k[1]) << 16);
+                break;
+            case 9:
+                c += k8[8]; /* fall through */
+            case 8:
+                b += k[2] + (((uint32_t)k[3]) << 16);
+                a += k[0] + (((uint32_t)k[1]) << 16);
+                break;
+            case 7:
+                b += ((uint32_t)k8[6]) << 16; /* fall through */
+            case 6:
+                b += k[2];
+                a += k[0] + (((uint32_t)k[1]) << 16);
+                break;
+            case 5:
+                b += k8[4]; /* fall through */
+            case 4:
+                a += k[0] + (((uint32_t)k[1]) << 16);
+                break;
+            case 3:
+                a += ((uint32_t)k8[2]) << 16; /* fall through */
+            case 2:
+                a += k[0];
+                break;
+            case 1:
+                a += k8[0];
+                break;
+            case 0:
+                *pc = c;
+                *pb = b;
+                return; /* zero length strings require no mixing */
+        }
+
+    } else { /* need to read the key one byte at a time */
+        const uint8_t *k = (const uint8_t *)key;
+
+        /*--------------- all but the last block: affect some 32 bits of (a,b,c) */
+        while (length > 12) {
+            a += k[0];
+            a += ((uint32_t)k[1]) << 8;
+            a += ((uint32_t)k[2]) << 16;
+            a += ((uint32_t)k[3]) << 24;
+            b += k[4];
+            b += ((uint32_t)k[5]) << 8;
+            b += ((uint32_t)k[6]) << 16;
+            b += ((uint32_t)k[7]) << 24;
+            c += k[8];
+            c += ((uint32_t)k[9]) << 8;
+            c += ((uint32_t)k[10]) << 16;
+            c += ((uint32_t)k[11]) << 24;
+            mix(a, b, c);
+            length -= 12;
+            k += 12;
+        }
+
+        /*-------------------------------- last block: affect all 32 bits of (c) */
+        switch (length) /* all the case statements fall through */
+        {
+            case 12:
+                c += ((uint32_t)k[11]) << 24; /* fall through */
+            case 11:
+                c += ((uint32_t)k[10]) << 16; /* fall through */
+            case 10:
+                c += ((uint32_t)k[9]) << 8; /* fall through */
+            case 9:
+                c += k[8]; /* fall through */
+            case 8:
+                b += ((uint32_t)k[7]) << 24; /* fall through */
+            case 7:
+                b += ((uint32_t)k[6]) << 16; /* fall through */
+            case 6:
+                b += ((uint32_t)k[5]) << 8; /* fall through */
+            case 5:
+                b += k[4]; /* fall through */
+            case 4:
+                a += ((uint32_t)k[3]) << 24; /* fall through */
+            case 3:
+                a += ((uint32_t)k[2]) << 16; /* fall through */
+            case 2:
+                a += ((uint32_t)k[1]) << 8; /* fall through */
+            case 1:
+                a += k[0];
+                break;
+            case 0:
+                *pc = c;
+                *pb = b;
+                return; /* zero length strings require no mixing */
+        }
+    }
+
+    final(a, b, c);
+    *pc = c;
+    *pb = b;
+}
 
 /*
  * hashbig():
@@ -839,14 +1041,14 @@ uint32_t hashbig( const void *key, size_t length, uint32_t initval)
     }
 
     /*----------------------------- handle the last (probably partial) block */
-    /* 
+    /*
      * "k[2]<<8" actually reads beyond the end of the string, but
      * then shifts out the part it's not allowed to read.  Because the
      * string is aligned, the illegal read is in the same word as the
      * rest of the string.  Every machine with memory protection I've seen
      * does it on word boundaries, so is OK with this.  But VALGRIND will
      * still catch it and complain.  The masking trick does make the hash
-     * noticably faster for short strings (like English words).
+     * noticeably faster for short strings (like English words).
      */
 #ifndef VALGRIND
 
@@ -940,7 +1142,7 @@ uint32_t hashbig( const void *key, size_t length, uint32_t initval)
 #ifdef SELF_TEST
 
 /* used for timings */
-void driver1()
+void driver1(void)
 {
   uint8_t buf[256];
   uint32_t i;
@@ -962,7 +1164,7 @@ void driver1()
 #define HASHLEN   1
 #define MAXPAIR 60
 #define MAXLEN  70
-void driver2()
+void driver2(void)
 {
   uint8_t qa[MAXLEN+1], qb[MAXLEN+2], *a = &qa[0], *b = &qb[1];
   uint32_t c[HASHSTATE], d[HASHSTATE], i=0, j=0, k, l, m=0, z;
@@ -978,47 +1180,49 @@ void driver2()
     {
       for (j=0; j<8; ++j)   /*------------------------ for each input bit, */
       {
-	for (m=1; m<8; ++m) /*------------ for serveral possible initvals, */
-	{
-	  for (l=0; l<HASHSTATE; ++l)
-	    e[l]=f[l]=g[l]=h[l]=x[l]=y[l]=~((uint32_t)0);
+          for (m = 1; m < 8; ++m) /*------------ for several possible initvals, */
+          {
+              for (l = 0; l < HASHSTATE; ++l)
+                  e[l] = f[l] = g[l] = h[l] = x[l] = y[l] = ~((uint32_t)0);
 
-      	  /*---- check that every output bit is affected by that input bit */
-	  for (k=0; k<MAXPAIR; k+=2)
-	  { 
-	    uint32_t finished=1;
-	    /* keys have one bit different */
-	    for (l=0; l<hlen+1; ++l) {a[l] = b[l] = (uint8_t)0;}
-	    /* have a and b be two keys differing in only one bit */
-	    a[i] ^= (k<<j);
-	    a[i] ^= (k>>(8-j));
-	     c[0] = hashlittle(a, hlen, m);
-	    b[i] ^= ((k+1)<<j);
-	    b[i] ^= ((k+1)>>(8-j));
-	     d[0] = hashlittle(b, hlen, m);
-	    /* check every bit is 1, 0, set, and not set at least once */
-	    for (l=0; l<HASHSTATE; ++l)
-	    {
-	      e[l] &= (c[l]^d[l]);
-	      f[l] &= ~(c[l]^d[l]);
-	      g[l] &= c[l];
-	      h[l] &= ~c[l];
-	      x[l] &= d[l];
-	      y[l] &= ~d[l];
-	      if (e[l]|f[l]|g[l]|h[l]|x[l]|y[l]) finished=0;
-	    }
-	    if (finished) break;
-	  }
-	  if (k>z) z=k;
-	  if (k==MAXPAIR) 
-	  {
-	     printf("Some bit didn't change: ");
-	     printf("%.8x %.8x %.8x %.8x %.8x %.8x  ",
-	            e[0],f[0],g[0],h[0],x[0],y[0]);
-	     printf("i %d j %d m %d len %d\n", i, j, m, hlen);
-	  }
-	  if (z==MAXPAIR) goto done;
-	}
+              /*---- check that every output bit is affected by that input bit */
+              for (k = 0; k < MAXPAIR; k += 2) {
+                  uint32_t finished = 1;
+                  /* keys have one bit different */
+                  for (l = 0; l < hlen + 1; ++l) {
+                      a[l] = b[l] = (uint8_t)0;
+                  }
+                  /* have a and b be two keys differing in only one bit */
+                  a[i] ^= (k << j);
+                  a[i] ^= (k >> (8 - j));
+                  c[0] = hashlittle(a, hlen, m);
+                  b[i] ^= ((k + 1) << j);
+                  b[i] ^= ((k + 1) >> (8 - j));
+                  d[0] = hashlittle(b, hlen, m);
+                  /* check every bit is 1, 0, set, and not set at least once */
+                  for (l = 0; l < HASHSTATE; ++l) {
+                      e[l] &= (c[l] ^ d[l]);
+                      f[l] &= ~(c[l] ^ d[l]);
+                      g[l] &= c[l];
+                      h[l] &= ~c[l];
+                      x[l] &= d[l];
+                      y[l] &= ~d[l];
+                      if (e[l] | f[l] | g[l] | h[l] | x[l] | y[l])
+                          finished = 0;
+                  }
+                  if (finished)
+                      break;
+              }
+              if (k > z)
+                  z = k;
+              if (k == MAXPAIR) {
+                  printf("Some bit didn't change: ");
+                  printf("%.8x %.8x %.8x %.8x %.8x %.8x  ", e[0], f[0], g[0], h[0], x[0], y[0]);
+                  printf("i %d j %d m %d len %d\n", i, j, m, hlen);
+              }
+              if (z == MAXPAIR)
+                  goto done;
+          }
       }
     }
    done:
@@ -1032,7 +1236,7 @@ void driver2()
 }
 
 /* Check for reading beyond the end of the buffer and alignment problems */
-void driver3()
+void driver3(void)
 {
   uint8_t buf[MAXLEN+20], *b;
   uint32_t len;
@@ -1123,7 +1327,7 @@ void driver3()
 }
 
 /* check for problems with nulls */
- void driver4()
+void driver4(void)
 {
   uint8_t buf[1];
   uint32_t h,i,state[HASHSTATE];
@@ -1139,7 +1343,7 @@ void driver3()
   }
 }
 
-void driver5()
+void driver5(void)
 {
   uint32_t b,c;
   b=0, c=0, hashlittle2("", 0, &c, &b);
@@ -1160,8 +1364,7 @@ void driver5()
   printf("hash is %.8lx\n", c);   /* cd628161 */
 }
 
-
-int main()
+int main(void)
 {
   driver1();   /* test that the key is hashed: used for timings */
   driver2();   /* test that whole key is hashed thoroughly */

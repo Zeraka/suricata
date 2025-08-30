@@ -15,8 +15,10 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DETECT_ENGINE_PREFILTER_COMMON_H__
-#define __DETECT_ENGINE_PREFILTER_COMMON_H__
+#ifndef SURICATA_DETECT_ENGINE_PREFILTER_COMMON_H
+#define SURICATA_DETECT_ENGINE_PREFILTER_COMMON_H
+
+#include "rust.h"
 
 typedef union {
     uint8_t u8[16];
@@ -51,24 +53,20 @@ typedef struct PrefilterPacketU8HashCtx_ {
     SigsArray *array[256];
 } PrefilterPacketU8HashCtx;
 
-#define PREFILTER_U8HASH_MODE_EQ    0
-#define PREFILTER_U8HASH_MODE_LT    1
-#define PREFILTER_U8HASH_MODE_GT    2
-#define PREFILTER_U8HASH_MODE_RA    3
+#define PREFILTER_U8HASH_MODE_EQ DetectUintModeEqual
+#define PREFILTER_U8HASH_MODE_LT DetectUintModeLt
+#define PREFILTER_U8HASH_MODE_GT DetectUintModeGt
+#define PREFILTER_U8HASH_MODE_RA DetectUintModeRange
 
-int PrefilterSetupPacketHeader(DetectEngineCtx *de_ctx,
-        SigGroupHead *sgh, int sm_type,
-        void (*Set)(PrefilterPacketHeaderValue *v, void *),
+int PrefilterSetupPacketHeader(DetectEngineCtx *de_ctx, SigGroupHead *sgh, int sm_type,
+        SignatureMask mask, void (*Set)(PrefilterPacketHeaderValue *v, void *),
         bool (*Compare)(PrefilterPacketHeaderValue v, void *),
-        void (*Match)(DetectEngineThreadCtx *det_ctx,
-            Packet *p, const void *pectx));
+        void (*Match)(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx));
 
-int PrefilterSetupPacketHeaderU8Hash(DetectEngineCtx *de_ctx,
-        SigGroupHead *sgh, int sm_type,
-        void (*Set)(PrefilterPacketHeaderValue *v, void *),
+int PrefilterSetupPacketHeaderU8Hash(DetectEngineCtx *de_ctx, SigGroupHead *sgh, int sm_type,
+        SignatureMask mask, void (*Set)(PrefilterPacketHeaderValue *v, void *),
         bool (*Compare)(PrefilterPacketHeaderValue v, void *),
-        void (*Match)(DetectEngineThreadCtx *det_ctx,
-            Packet *p, const void *pectx));
+        void (*Match)(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx));
 
 static inline bool
 PrefilterPacketHeaderExtraMatch(const PrefilterPacketHeaderCtx *ctx,
@@ -79,19 +77,19 @@ PrefilterPacketHeaderExtraMatch(const PrefilterPacketHeaderCtx *ctx,
         case PREFILTER_EXTRA_MATCH_UNUSED:
             break;
         case PREFILTER_EXTRA_MATCH_ALPROTO:
-            if (p->flow == NULL || p->flow->alproto != ctx->value)
-                return FALSE;
+            if (p->flow == NULL || !AppProtoEquals(ctx->value, p->flow->alproto))
+                return false;
             break;
         case PREFILTER_EXTRA_MATCH_SRCPORT:
             if (p->sp != ctx->value)
-                return FALSE;
+                return false;
             break;
         case PREFILTER_EXTRA_MATCH_DSTPORT:
             if (p->dp != ctx->value)
-                return FALSE;
+                return false;
             break;
     }
-    return TRUE;
+    return true;
 }
 
 static inline bool PrefilterIsPrefilterableById(const Signature *s, enum DetectKeywordId kid)
@@ -105,4 +103,4 @@ static inline bool PrefilterIsPrefilterableById(const Signature *s, enum DetectK
     return false;
 }
 
-#endif /* __DETECT_ENGINE_PREFILTER_COMMON_H__ */
+#endif /* SURICATA_DETECT_ENGINE_PREFILTER_COMMON_H */

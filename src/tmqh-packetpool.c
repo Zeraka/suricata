@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,32 +23,19 @@
  * Packetpool queue handlers. Packet pool is implemented as a stack.
  */
 
-#include "suricata.h"
-#include "packet-queue.h"
-#include "decode.h"
-#include "detect.h"
-#include "detect-uricontent.h"
-#include "threads.h"
-#include "threadvars.h"
-#include "flow.h"
-#include "flow-util.h"
-#include "host.h"
-
-#include "stream.h"
-#include "stream-tcp-reassemble.h"
-
+#include "suricata-common.h"
+#include "tmqh-packetpool.h"
 #include "tm-queuehandlers.h"
 #include "tm-threads.h"
+#include "threads.h"
+#include "decode.h"
 #include "tm-modules.h"
-
-#include "pkt-var.h"
-
-#include "tmqh-packetpool.h"
-
-#include "util-debug.h"
-#include "util-error.h"
+#include "packet.h"
 #include "util-profiling.h"
-#include "util-device.h"
+#include "util-validate.h"
+#include "action-globals.h"
+
+extern uint32_t max_pending_packets;
 
 /* Number of freed packet to save for one pool before freeing them. */
 #define MAX_PENDING_RETURN_PACKETS 32
@@ -72,83 +59,30 @@ void TmqhPacketpoolRegister (void)
     tmqh_table[TMQH_PACKETPOOL].OutHandler = TmqhOutputPacketpool;
 }
 
-static int PacketPoolIsEmpty(PktPool *pool)
+static void UpdateReturnThreshold(PktPool *pool)
 {
-    /* Check local stack first. */
-    if (pool->head || pool->return_stack.head)
-        return 0;
-
-    return 1;
+    const float perc = (float)pool->cnt / (float)max_pending_packets;
+    uint32_t threshold = (uint32_t)(perc * (float)max_pending_return_packets);
+    if (threshold != SC_ATOMIC_GET(pool->return_stack.return_threshold)) {
+        SC_ATOMIC_SET(pool->return_stack.return_threshold, threshold);
+    }
 }
 
 void PacketPoolWait(void)
 {
     PktPool *my_pool = GetThreadPacketPool();
 
-    if (PacketPoolIsEmpty(my_pool)) {
+    if (my_pool->head == NULL) {
+        SC_ATOMIC_SET(my_pool->return_stack.return_threshold, 1);
+
         SCMutexLock(&my_pool->return_stack.mutex);
-        SC_ATOMIC_ADD(my_pool->return_stack.sync_now, 1);
-        SCCondWait(&my_pool->return_stack.cond, &my_pool->return_stack.mutex);
+        int rc = 0;
+        while (my_pool->return_stack.cnt == 0 && rc == 0) {
+            rc = SCCondWait(&my_pool->return_stack.cond, &my_pool->return_stack.mutex);
+        }
         SCMutexUnlock(&my_pool->return_stack.mutex);
-    }
 
-    while(PacketPoolIsEmpty(my_pool))
-        cc_barrier();
-}
-
-/** \brief Wait until we have the requested amount of packets in the pool
- *
- *  In some cases waiting for packets is undesirable. Especially when
- *  a wait would happen under a lock of some kind, other parts of the
- *  engine could have to wait.
- *
- *  This function only returns when at least N packets are in our pool.
- *
- *  If counting in our pool's main stack didn't give us the number we
- *  are seeking, we check if the return stack is filled and add those
- *  to our main stack. Then we retry.
- *
- *  \param n number of packets needed
- */
-void PacketPoolWaitForN(int n)
-{
-    PktPool *my_pool = GetThreadPacketPool();
-    Packet *p, *pp;
-
-    while (1) {
-        PacketPoolWait();
-
-        /* count packets in our stack */
-        int i = 0;
-        pp = p = my_pool->head;
-        while (p != NULL) {
-            if (++i == n)
-                return;
-
-            pp = p;
-            p = p->next;
-        }
-
-        /* check return stack, return to our pool and retry counting */
-        if (my_pool->return_stack.head != NULL) {
-            SCMutexLock(&my_pool->return_stack.mutex);
-            /* Move all the packets from the locked return stack to the local stack. */
-            if (pp) {
-                pp->next = my_pool->return_stack.head;
-            } else {
-                my_pool->head = my_pool->return_stack.head;
-            }
-            my_pool->return_stack.head = NULL;
-            SC_ATOMIC_RESET(my_pool->return_stack.sync_now);
-            SCMutexUnlock(&my_pool->return_stack.mutex);
-
-        /* or signal that we need packets and wait */
-        } else {
-            SCMutexLock(&my_pool->return_stack.mutex);
-            SC_ATOMIC_ADD(my_pool->return_stack.sync_now, 1);
-            SCCondWait(&my_pool->return_stack.cond, &my_pool->return_stack.mutex);
-            SCMutexUnlock(&my_pool->return_stack.mutex);
-        }
+        UpdateReturnThreshold(my_pool);
     }
 }
 
@@ -158,9 +92,6 @@ void PacketPoolWaitForN(int n)
  */
 static void PacketPoolStorePacket(Packet *p)
 {
-    /* Clear the PKT_ALLOC flag, since that indicates to push back
-     * onto the ring buffer. */
-    p->flags &= ~PKT_ALLOC;
     p->pool = GetThreadPacketPool();
     p->ReleasePacket = PacketPoolReturnPacket;
     PacketPoolReturnPacket(p);
@@ -172,6 +103,8 @@ static void PacketPoolGetReturnedPackets(PktPool *pool)
     /* Move all the packets from the locked return stack to the local stack. */
     pool->head = pool->return_stack.head;
     pool->return_stack.head = NULL;
+    pool->cnt += pool->return_stack.cnt;
+    pool->return_stack.cnt = 0;
     SCMutexUnlock(&pool->return_stack.mutex);
 }
 
@@ -185,16 +118,20 @@ static void PacketPoolGetReturnedPackets(PktPool *pool)
 Packet *PacketPoolGetPacket(void)
 {
     PktPool *pool = GetThreadPacketPool();
-#ifdef DEBUG_VALIDATION
-    BUG_ON(pool->initialized == 0);
-    BUG_ON(pool->destroyed == 1);
-#endif /* DEBUG_VALIDATION */
+    DEBUG_VALIDATE_BUG_ON(pool->initialized == 0);
+    DEBUG_VALIDATE_BUG_ON(pool->destroyed == 1);
     if (pool->head) {
         /* Stack is not empty. */
         Packet *p = pool->head;
         pool->head = p->next;
+        pool->cnt--;
         p->pool = pool;
-        PACKET_REINIT(p);
+        PacketReinit(p);
+
+        UpdateReturnThreshold(pool);
+        SCLogDebug("pp: %0.2f cnt:%u max:%d threshold:%u",
+                ((float)pool->cnt / (float)max_pending_packets) * (float)100, pool->cnt,
+                max_pending_packets, SC_ATOMIC_GET(pool->return_stack.return_threshold));
         return p;
     }
 
@@ -209,8 +146,14 @@ Packet *PacketPoolGetPacket(void)
         /* Stack is not empty. */
         Packet *p = pool->head;
         pool->head = p->next;
+        pool->cnt--;
         p->pool = pool;
-        PACKET_REINIT(p);
+        PacketReinit(p);
+
+        UpdateReturnThreshold(pool);
+        SCLogDebug("pp: %0.2f cnt:%u max:%d threshold:%u",
+                ((float)pool->cnt / (float)max_pending_packets) * (float)100, pool->cnt,
+                max_pending_packets, SC_ATOMIC_GET(pool->return_stack.return_threshold));
         return p;
     }
 
@@ -225,14 +168,14 @@ Packet *PacketPoolGetPacket(void)
 void PacketPoolReturnPacket(Packet *p)
 {
     PktPool *my_pool = GetThreadPacketPool();
-
-    PACKET_RELEASE_REFS(p);
-
     PktPool *pool = p->pool;
     if (pool == NULL) {
         PacketFree(p);
         return;
     }
+
+    PacketReleaseRefs(p);
+
 #ifdef DEBUG_VALIDATION
     BUG_ON(pool->initialized == 0);
     BUG_ON(pool->destroyed == 1);
@@ -244,28 +187,33 @@ void PacketPoolReturnPacket(Packet *p)
         /* Push back onto this thread's own stack, so no locking. */
         p->next = my_pool->head;
         my_pool->head = p;
+        my_pool->cnt++;
     } else {
         PktPool *pending_pool = my_pool->pending_pool;
-        if (pending_pool == NULL) {
-            /* No pending packet, so store the current packet. */
-            p->next = NULL;
-            my_pool->pending_pool = pool;
-            my_pool->pending_head = p;
-            my_pool->pending_tail = p;
-            my_pool->pending_count = 1;
-        } else if (pending_pool == pool) {
-            /* Another packet for the pending pool list. */
-            p->next = my_pool->pending_head;
-            my_pool->pending_head = p;
-            my_pool->pending_count++;
-            if (SC_ATOMIC_GET(pool->return_stack.sync_now) || my_pool->pending_count > max_pending_return_packets) {
+        if (pending_pool == NULL || pending_pool == pool) {
+            if (pending_pool == NULL) {
+                /* No pending packet, so store the current packet. */
+                p->next = NULL;
+                my_pool->pending_pool = pool;
+                my_pool->pending_head = p;
+                my_pool->pending_tail = p;
+                my_pool->pending_count = 1;
+            } else if (pending_pool == pool) {
+                /* Another packet for the pending pool list. */
+                p->next = my_pool->pending_head;
+                my_pool->pending_head = p;
+                my_pool->pending_count++;
+            }
+
+            const uint32_t threshold = SC_ATOMIC_GET(pool->return_stack.return_threshold);
+            if (my_pool->pending_count >= threshold) {
                 /* Return the entire list of pending packets. */
                 SCMutexLock(&pool->return_stack.mutex);
                 my_pool->pending_tail->next = pool->return_stack.head;
                 pool->return_stack.head = my_pool->pending_head;
-                SC_ATOMIC_RESET(pool->return_stack.sync_now);
-                SCMutexUnlock(&pool->return_stack.mutex);
+                pool->return_stack.cnt += my_pool->pending_count;
                 SCCondSignal(&pool->return_stack.cond);
+                SCMutexUnlock(&pool->return_stack.mutex);
                 /* Clear the list of pending packets to return. */
                 my_pool->pending_pool = NULL;
                 my_pool->pending_head = NULL;
@@ -277,32 +225,15 @@ void PacketPoolReturnPacket(Packet *p)
             SCMutexLock(&pool->return_stack.mutex);
             p->next = pool->return_stack.head;
             pool->return_stack.head = p;
-            SC_ATOMIC_RESET(pool->return_stack.sync_now);
-            SCMutexUnlock(&pool->return_stack.mutex);
+            pool->return_stack.cnt++;
             SCCondSignal(&pool->return_stack.cond);
+            SCMutexUnlock(&pool->return_stack.mutex);
         }
     }
 }
 
-void PacketPoolInitEmpty(void)
-{
-    PktPool *my_pool = GetThreadPacketPool();
-
-#ifdef DEBUG_VALIDATION
-    BUG_ON(my_pool->initialized);
-    my_pool->initialized = 1;
-    my_pool->destroyed = 0;
-#endif /* DEBUG_VALIDATION */
-
-    SCMutexInit(&my_pool->return_stack.mutex, NULL);
-    SCCondInit(&my_pool->return_stack.cond, NULL);
-    SC_ATOMIC_INIT(my_pool->return_stack.sync_now);
-}
-
 void PacketPoolInit(void)
 {
-    extern intmax_t max_pending_packets;
-
     PktPool *my_pool = GetThreadPacketPool();
 
 #ifdef DEBUG_VALIDATION
@@ -313,17 +244,16 @@ void PacketPoolInit(void)
 
     SCMutexInit(&my_pool->return_stack.mutex, NULL);
     SCCondInit(&my_pool->return_stack.cond, NULL);
-    SC_ATOMIC_INIT(my_pool->return_stack.sync_now);
+    SC_ATOMIC_INIT(my_pool->return_stack.return_threshold);
+    SC_ATOMIC_SET(my_pool->return_stack.return_threshold, 32);
 
     /* pre allocate packets */
     SCLogDebug("preallocating packets... packet size %" PRIuMAX "",
                (uintmax_t)SIZE_OF_PACKET);
-    int i = 0;
-    for (i = 0; i < max_pending_packets; i++) {
+    for (uint32_t i = 0; i < max_pending_packets; i++) {
         Packet *p = PacketGetFromAlloc();
         if (unlikely(p == NULL)) {
-            FatalError(SC_ERR_FATAL,
-                       "Fatal error encountered while allocating a packet. Exiting...");
+            FatalError("Fatal error encountered while allocating a packet. Exiting...");
         }
         PacketPoolStorePacket(p);
     }
@@ -338,7 +268,7 @@ void PacketPoolDestroy(void)
     PktPool *my_pool = GetThreadPacketPool();
 
 #ifdef DEBUG_VALIDATION
-    BUG_ON(my_pool->destroyed);
+    BUG_ON(my_pool && my_pool->destroyed);
 #endif /* DEBUG_VALIDATION */
 
     if (my_pool && my_pool->pending_pool != NULL) {
@@ -377,18 +307,20 @@ void TmqhOutputPacketpool(ThreadVars *t, Packet *p)
     bool proot = false;
 
     SCEnter();
-    SCLogDebug("Packet %p, p->root %p, alloced %s", p, p->root, p->flags & PKT_ALLOC ? "true" : "false");
+    SCLogDebug("Packet %p, p->root %p, alloced %s", p, p->root, BOOL2STR(p->pool == NULL));
 
-    if (IS_TUNNEL_PKT(p)) {
+    if (PacketIsTunnel(p)) {
         SCLogDebug("Packet %p is a tunnel packet: %s",
             p,p->root ? "upper layer" : "tunnel root");
 
         /* get a lock to access root packet fields */
-        SCMutex *m = p->root ? &p->root->tunnel_mutex : &p->tunnel_mutex;
-        SCMutexLock(m);
+        SCSpinlock *lock = p->root ? &p->root->persistent.tunnel_lock : &p->persistent.tunnel_lock;
+        SCSpinLock(lock);
 
-        if (IS_TUNNEL_ROOT_PKT(p)) {
+        if (PacketIsTunnelRoot(p)) {
             SCLogDebug("IS_TUNNEL_ROOT_PKT == TRUE");
+            CaptureStatsUpdate(t, p); // TODO move out of lock
+
             const uint16_t outstanding = TUNNEL_PKT_TPR(p) - TUNNEL_PKT_RTV(p);
             SCLogDebug("root pkt: outstanding %u", outstanding);
             if (outstanding == 0) {
@@ -406,10 +338,10 @@ void TmqhOutputPacketpool(ThreadVars *t, Packet *p)
                  * packets, return this to the pool. It's still referenced
                  * by the tunnel packets, and we will return it
                  * when we handle them */
-                SET_TUNNEL_PKT_VERDICTED(p);
+                PacketTunnelSetVerdicted(p);
 
                 PACKET_PROFILING_END(p);
-                SCMutexUnlock(m);
+                SCSpinUnlock(lock);
                 SCReturn;
             }
         } else {
@@ -421,9 +353,7 @@ void TmqhOutputPacketpool(ThreadVars *t, Packet *p)
             /* all tunnel packets are processed except us. Root already
              * processed. So return tunnel pkt and root packet to the
              * pool. */
-            if (outstanding == 0 &&
-                    p->root && IS_TUNNEL_PKT_VERDICTED(p->root))
-            {
+            if (outstanding == 0 && p->root && PacketTunnelIsVerdicted(p->root)) {
                 SCLogDebug("root verdicted == true && no outstanding");
 
                 /* handle freeing the root as well*/
@@ -438,30 +368,38 @@ void TmqhOutputPacketpool(ThreadVars *t, Packet *p)
                  * so get rid of the tunnel pkt only */
 
                 SCLogDebug("NOT IS_TUNNEL_PKT_VERDICTED (%s) || "
-                        "outstanding > 0 (%u)",
-                        (p->root && IS_TUNNEL_PKT_VERDICTED(p->root)) ? "true" : "false",
+                           "outstanding > 0 (%u)",
+                        (p->root && PacketTunnelIsVerdicted(p->root)) ? "true" : "false",
                         outstanding);
 
                 /* fall through */
             }
         }
-        SCMutexUnlock(m);
+        SCSpinUnlock(lock);
 
         SCLogDebug("tunnel stuff done, move on (proot %d)", proot);
+
+    } else {
+        CaptureStatsUpdate(t, p);
     }
 
-    /* we're done with the tunnel root now as well */
-    if (proot == true) {
-        SCLogDebug("getting rid of root pkt... alloc'd %s", p->root->flags & PKT_ALLOC ? "true" : "false");
+    SCLogDebug("[packet %p][%s] %s", p,
+            PacketIsTunnel(p) ? PacketIsTunnelRoot(p) ? "tunnel::root" : "tunnel::leaf"
+                              : "no tunnel",
+            (p->action & ACTION_DROP) ? "DROP" : "no drop");
 
-        PACKET_RELEASE_REFS(p->root);
+    /* we're done with the tunnel root now as well */
+    if (proot) {
+        SCLogDebug("getting rid of root pkt... alloc'd %s", BOOL2STR(p->root->pool == NULL));
+
+        PacketReleaseRefs(p->root);
         p->root->ReleasePacket(p->root);
         p->root = NULL;
     }
 
     PACKET_PROFILING_END(p);
 
-    PACKET_RELEASE_REFS(p);
+    PacketReleaseRefs(p);
     p->ReleasePacket(p);
 
     SCReturn;
@@ -484,13 +422,13 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *pq)
     if (pq == NULL)
         return;
 
-    while ( (p = PacketDequeue(pq)) != NULL)
+    while ((p = PacketDequeue(pq)) != NULL) {
+        DEBUG_VALIDATE_BUG_ON(p->flow != NULL);
         TmqhOutputPacketpool(NULL, p);
-
-    return;
+    }
 }
 
-/** number of packets to keep reserved when calculating the the pending
+/** number of packets to keep reserved when calculating the pending
  *  return packets count. This assumes we need at max 10 packets in one
  *  PacketPoolWaitForN call. The actual number is 9 now, so this has a
  *  bit of margin. */
@@ -499,7 +437,7 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *pq)
 /**
  *  \brief Set the max_pending_return_packets value
  *
- *  Set it to the max pending packets value, devided by the number
+ *  Set it to the max pending packets value, divided by the number
  *  of lister threads. Normally, in autofp these are the stream/detect/log
  *  worker threads.
  *
@@ -511,13 +449,14 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *pq)
  */
 void PacketPoolPostRunmodes(void)
 {
-    extern intmax_t max_pending_packets;
-    intmax_t pending_packets = max_pending_packets;
+    extern uint32_t max_pending_packets;
+    uint32_t pending_packets = max_pending_packets;
     if (pending_packets < RESERVED_PACKETS) {
-        FatalError(SC_ERR_INVALID_ARGUMENT, "'max-pending-packets' setting "
-                "must be at least %d", RESERVED_PACKETS);
+        FatalError("'max-pending-packets' setting "
+                   "must be at least %d",
+                RESERVED_PACKETS);
     }
-    uint32_t threads = TmThreadCountThreadsByTmmFlags(TM_FLAG_DETECT_TM);
+    uint32_t threads = TmThreadCountThreadsByTmmFlags(TM_FLAG_FLOWWORKER_TM);
     if (threads == 0)
         return;
 

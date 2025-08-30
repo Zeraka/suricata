@@ -36,8 +36,11 @@
  *  from thread Y.
  */
 
-#ifndef __UTIL_POOL_THREAD_H__
-#define __UTIL_POOL_THREAD_H__
+#ifndef SURICATA_UTIL_POOL_THREAD_H
+#define SURICATA_UTIL_POOL_THREAD_H
+
+#include "threads.h"
+#include "util-pool.h"
 
 struct PoolThreadElement_ {
     SCMutex lock;                   /**< lock, should have low contention */
@@ -54,7 +57,7 @@ typedef struct PoolThread_ {
 
 /** per data item reserved data containing the
  *  thread pool id */
-typedef uint16_t PoolThreadReserved;
+typedef uint16_t PoolThreadId;
 
 void PoolThreadRegisterTests(void);
 
@@ -88,12 +91,16 @@ void *PoolThreadGetById(PoolThread *pt, uint16_t id);
  *  \param data memory block to return, with PoolThreadReserved as it's first member */
 void PoolThreadReturn(PoolThread *pt, void *data);
 
+void PoolThreadLock(PoolThread *pt, PoolThreadId id);
+void PoolThreadReturnRaw(PoolThread *pt, PoolThreadId id, void *data);
+void PoolThreadUnlock(PoolThread *pt, PoolThreadId id);
+
 /** \brief get size of PoolThread (number of 'threads', so array elements)
  *  \param pt thread pool
  *  \retval size or -1 on error */
 int PoolThreadSize(PoolThread *pt);
 
-#endif /* __UTIL_POOL_THREAD_H__ */
+#endif /* SURICATA_UTIL_POOL_THREAD_H */
 
 /**
  * @}

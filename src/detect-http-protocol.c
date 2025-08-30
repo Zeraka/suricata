@@ -37,6 +37,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -63,8 +64,6 @@
 #include "detect-http-header.h"
 #include "stream-tcp.h"
 
-#include "util-print.h"
-
 #define KEYWORD_NAME "http.protocol"
 #define KEYWORD_NAME_LEGACY "http_protocol"
 #define KEYWORD_DOC "http-keywords.html#http-protocol"
@@ -74,10 +73,10 @@ static int g_buffer_id = 0;
 
 static int DetectHttpProtocolSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(s, g_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
 
     return 0;
@@ -89,31 +88,67 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 {
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        bstr *str = NULL;
+        const bstr *str = NULL;
         htp_tx_t *tx = (htp_tx_t *)txv;
 
         if (flow_flags & STREAM_TOSERVER)
-            str = tx->request_protocol;
+            str = htp_tx_request_protocol(tx);
         else if (flow_flags & STREAM_TOCLIENT)
-            str = tx->response_protocol;
+            str = htp_tx_response_protocol(tx);
 
         if (str == NULL) {
             SCLogDebug("HTTP protocol not set");
             return NULL;
         }
 
-        uint32_t data_len = bstr_size(str);
+        uint32_t data_len = (uint32_t)bstr_size(str);
         uint8_t *data = bstr_ptr(str);
         if (data == NULL || data_len == 0) {
             SCLogDebug("HTTP protocol not present");
             return NULL;
         }
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;
+}
+
+static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id)
+{
+    InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
+    if (buffer->inspect == NULL) {
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, (const uint8_t *)"HTTP/2", strlen("HTTP/2"), transforms);
+    }
+
+    return buffer;
+}
+
+static bool DetectHttpProtocolValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt)
+{
+    for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
+        if (s->init_data->buffers[x].id != (uint32_t)dbt->id)
+            continue;
+        const SigMatch *sm = s->init_data->buffers[x].head;
+        for (; sm != NULL; sm = sm->next) {
+            if (sm->type != DETECT_CONTENT)
+                continue;
+            const DetectContentData *cd = (DetectContentData *)sm->ctx;
+            for (size_t i = 0; i < cd->content_len; ++i) {
+                if (cd->content[i] == ' ') {
+                    *sigerror = "Invalid http.protocol string containing a space";
+                    SCLogWarning("rule %u: %s", s->id, *sigerror);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 /**
@@ -121,28 +156,34 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
  */
 void DetectHttpProtocolRegister(void)
 {
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].alias = KEYWORD_NAME_LEGACY;
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].desc = BUFFER_NAME " sticky buffer";
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].url = "/rules/" KEYWORD_DOC;
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].Setup = DetectHttpProtocolSetup;
-    sigmatch_table[DETECT_AL_HTTP_PROTOCOL].flags |= SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_HTTP_PROTOCOL].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_HTTP_PROTOCOL].alias = KEYWORD_NAME_LEGACY;
+    sigmatch_table[DETECT_HTTP_PROTOCOL].desc = BUFFER_NAME " sticky buffer";
+    sigmatch_table[DETECT_HTTP_PROTOCOL].url = "/rules/" KEYWORD_DOC;
+    sigmatch_table[DETECT_HTTP_PROTOCOL].Setup = DetectHttpProtocolSetup;
+    sigmatch_table[DETECT_HTTP_PROTOCOL].flags |= SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_NOOPT;
 
-    DetectAppLayerMpmRegister2(BUFFER_NAME, SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP,
-            HTP_REQUEST_LINE);
-    DetectAppLayerMpmRegister2(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP,
-            HTP_RESPONSE_LINE);
-    DetectAppLayerInspectEngineRegister2(BUFFER_NAME, ALPROTO_HTTP,
-            SIG_FLAG_TOSERVER, HTP_REQUEST_LINE,
-            DetectEngineInspectBufferGeneric, GetData);
-    DetectAppLayerInspectEngineRegister2(BUFFER_NAME, ALPROTO_HTTP,
-            SIG_FLAG_TOCLIENT, HTP_RESPONSE_LINE,
-            DetectEngineInspectBufferGeneric, GetData);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_LINE);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_HTTP1, HTP_RESPONSE_PROGRESS_LINE);
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+            HTP_REQUEST_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+            HTP_RESPONSE_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
+
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+            HTTP2StateDataClient, DetectEngineInspectBufferGeneric, GetData2);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetData2, ALPROTO_HTTP2, HTTP2StateDataClient);
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetData2);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetData2, ALPROTO_HTTP2, HTTP2StateDataServer);
 
     DetectBufferTypeSetDescriptionByName(BUFFER_NAME,
             BUFFER_DESC);
+    DetectBufferTypeRegisterValidateCallback(BUFFER_NAME, DetectHttpProtocolValidateCallback);
 
     g_buffer_id = DetectBufferTypeGetByName(BUFFER_NAME);
 }

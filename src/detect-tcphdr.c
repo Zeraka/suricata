@@ -27,6 +27,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-content-inspection.h"
@@ -65,10 +66,7 @@ void DetectTcphdrRegister(void)
 
     DetectPktMpmRegister("tcp.hdr", 2, PrefilterGenericMpmPktRegister, GetData);
 
-    DetectPktInspectEngineRegister("tcp.hdr", GetData,
-            DetectEngineInspectPktBufferGeneric);
-
-    return;
+    DetectPktInspectEngineRegister("tcp.hdr", GetData, DetectEngineInspectPktBufferGeneric);
 }
 
 /**
@@ -88,7 +86,7 @@ static int DetectTcphdrSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
 
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
-    if (DetectBufferSetActiveList(s, g_tcphdr_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_tcphdr_buffer_id) < 0)
         return -1;
 
     return 0;
@@ -101,21 +99,25 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        uint32_t hlen = TCP_GET_HLEN(p);
-        if (((uint8_t *)p->tcph + (ptrdiff_t)hlen) >
-                ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p)))
-        {
-            SCLogDebug("data out of range: %p > %p",
-                    ((uint8_t *)p->tcph + (ptrdiff_t)hlen),
+        if (!PacketIsTCP(p)) {
+            // may happen when DecodeTCPPacket fails
+            // for instance with invalid header length
+            return NULL;
+        }
+        const TCPHdr *tcph = PacketGetTCP(p);
+        const uint32_t hlen = TCP_GET_RAW_HLEN(tcph);
+        if (((uint8_t *)tcph + (ptrdiff_t)hlen) >
+                ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p))) {
+            SCLogDebug("data out of range: %p > %p", ((uint8_t *)tcph + (ptrdiff_t)hlen),
                     ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p)));
             return NULL;
         }
 
         const uint32_t data_len = hlen;
-        const uint8_t *data = (const uint8_t *)p->tcph;
+        const uint8_t *data = (const uint8_t *)tcph;
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;

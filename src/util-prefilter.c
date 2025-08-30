@@ -24,6 +24,7 @@
  */
 
 #include "suricata-common.h"
+#include "util-prefilter.h"
 
 /**
  *  \brief Setup a pmq
@@ -82,7 +83,7 @@ PrefilterAddSidsResize(PrefilterRuleStore *pmq, uint32_t new_size)
                                          new_size * sizeof(SigIntId));
         if (unlikely(new_array == NULL)) {
 
-            SCLogError(SC_ERR_MEM_ALLOC, "Failed to realloc PatternMatchQueue"
+            SCLogError("Failed to realloc PatternMatchQueue"
                        " rule ID array. Some signature ID matches lost");
             return 0;
         }
@@ -103,8 +104,7 @@ void PmqReset(PrefilterRuleStore *pmq)
     if (pmq == NULL)
         return;
 
-    pmq->rule_id_array_cnt = 0;
-    /* TODO: Realloc the rule id array smaller at some size? */
+    PMQ_RESET(pmq);
 }
 
 /** \brief Cleanup a Pmq

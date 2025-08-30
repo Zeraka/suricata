@@ -59,11 +59,9 @@ util_lua_dnp3_objects_c_template = """/* Copyright (C) 2015 Open Information Sec
 #include "app-layer-dnp3.h"
 #include "app-layer-dnp3-objects.h"
 
-#ifdef HAVE_LUA
-
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
 
 #include "util-lua.h"
 #include "util-lua-dnp3-objects.h"
@@ -120,8 +118,6 @@ void DNP3PushPoint(lua_State *luastate, DNP3Object *object,
     }
 }
 
-#endif /* HAVE_LUA */
-
 """
 
 output_json_dnp3_objects_template = """/* Copyright (C) 2015 Open Information Security Foundation
@@ -150,13 +146,12 @@ output_json_dnp3_objects_template = """/* Copyright (C) 2015 Open Information Se
 
 #include "suricata-common.h"
 
-#include "util-crypt.h"
-
 #include "app-layer-dnp3.h"
 #include "app-layer-dnp3-objects.h"
 #include "output-json-dnp3-objects.h"
 #include "output-json.h"
 
+// clang-format off
 void OutputJsonDNP3SetItem(JsonBuilder *js, DNP3Object *object,
     DNP3Point *point)
 {
@@ -167,31 +162,23 @@ void OutputJsonDNP3SetItem(JsonBuilder *js, DNP3Object *object,
             DNP3ObjectG{{object.group}}V{{object.variation}} *data = point->data;
 {% for field in object.fields %}
 {% if is_integer_type(field.type) %}
-            jb_set_uint(js, "{{field.name}}", data->{{field.name}});
+            SCJbSetUint(js, "{{field.name}}", data->{{field.name}});
 {% elif field.type in ["flt32", "flt64"] %}
-            jb_set_float(js, "{{field.name}}", data->{{field.name}});
+            SCJbSetFloat(js, "{{field.name}}", data->{{field.name}});
 {% elif field.type == "bytearray" %}
-            unsigned long {{field.name}}_b64_len = data->{{field.len_field}} * 2;
-            uint8_t {{field.name}}_b64[{{field.name}}_b64_len];
-            Base64Encode(data->{{field.name}}, data->{{field.len_field}},
-                {{field.name}}_b64, &{{field.name}}_b64_len);
-            jb_set_string(js, "data->{{field.name}}", (char *){{field.name}}_b64);
+            SCJbSetBase64(js, "data->{{field.name}}", data->{{field.name}}, data->{{field.len_field}});
 {% elif field.type == "vstr4" %}
-            jb_set_string(js, "data->{{field.name}}", data->{{field.name}});
+            SCJbSetString(js, "data->{{field.name}}", data->{{field.name}});
 {% elif field.type == "chararray" %}
             if (data->{{field.len_field}} > 0) {
-                /* First create a null terminated string as not all versions
-                 * of jansson have json_stringn. */
-                char tmpbuf[data->{{field.len_field}} + 1];
-                memcpy(tmpbuf, data->{{field.name}}, data->{{field.len_field}});
-                tmpbuf[data->{{field.len_field}}] = '\\0';
-                jb_set_string(js, "{{field.name}}", tmpbuf);
+                SCJbSetStringFromBytes(
+                        js, "{{field.name}}", (const uint8_t *)data->{{field.name}}, data->{{field.len_field}});
             } else {
-                jb_set_string(js, "{{field.name}}", "");
+                SCJbSetString(js, "{{field.name}}", "");
             }
 {% elif field.type == "bstr8" %}
 {% for field in field.fields %}
-            jb_set_uint(js, "{{field.name}}", data->{{field.name}});
+            SCJbSetUint(js, "{{field.name}}", data->{{field.name}});
 {% endfor %}
 {% else %}
 {{ raise("Unhandled datatype: %s" % (field.type)) }}
@@ -207,6 +194,7 @@ void OutputJsonDNP3SetItem(JsonBuilder *js, DNP3Object *object,
     }
 
 }
+// clang-format on
 
 """
 
@@ -354,15 +342,15 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
     DNP3PointList *points)
 {
     DNP3ObjectG{{object.group}}V{{object.variation}} *object = NULL;
-    int bytes = (count / 8) + 1;
+    uint32_t bytes = (count / 8) + 1;
     uint32_t prefix = 0;
-    int point_index = start;
+    uint32_t point_index = start;
 
     if (!DNP3ReadPrefix(buf, len, prefix_code, &prefix)) {
         goto error;
     }
 
-    for (int i = 0; i < bytes; i++) {
+    for (uint32_t i = 0; i < bytes; i++) {
 
         uint8_t octet;
 
@@ -432,6 +420,9 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
 {% endfor %}
 {% endif %}
 
+    if (*len < count/8) {
+        goto error;
+    }
     while (count--) {
 
         object = SCCalloc(1, sizeof(*object));
@@ -498,7 +489,10 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
         *len -= 4;
 {% elif field.type == "bytearray" %}
 {% if field.len_from_prefix %}
-        object->{{field.len_field}} = prefix - (offset - *len);
+        if (prefix < (offset - *len)) {
+            goto error;
+        }
+        object->{{field.len_field}} = (uint16_t)(prefix - (offset - *len));
 {% endif %}
         if (object->{{field.len_field}} > 0) {
             if (*len < object->{{field.len_field}}) {
@@ -515,7 +509,14 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
         }
 {% elif field.type == "chararray" %}
 {% if field.len_from_prefix %}
-        object->{{field.len_field}} = prefix - (offset - *len);
+        if (prefix - (offset - *len) >= {{field.size}} || prefix < (offset - *len)) {
+            goto error;
+        }
+{% if field.size == 255 %}
+        object->{{field.len_field}} = (uint8_t)(prefix - (offset - *len));
+{% else %}
+        object->{{field.len_field}} = (uint16_t)(prefix - (offset - *len));
+{% endif %}
 {% endif %}
         if (object->{{field.len_field}} > 0) {
             if (*len < object->{{field.len_field}}) {
@@ -566,6 +567,13 @@ static int DNP3DecodeObjectG{{object.group}}V{{object.variation}}(const uint8_t 
     return 1;
 error:
     if (object != NULL) {
+{% for field in object.fields %}
+{% if field.type == "bytearray" %}
+        if (object->{{field.name}} != NULL) {
+            SCFree(object->{{field.name}});
+        }
+{% endif %}
+{% endfor %}
         SCFree(object);
     }
 
@@ -702,7 +710,7 @@ def main():
         print("error: jinja2 v2.10 or great required")
         return 1
 
-    definitions = yaml.load(open("scripts/dnp3-gen/dnp3-objects.yaml"))
+    definitions = yaml.load(open("scripts/dnp3-gen/dnp3-objects.yaml"), yaml.Loader)
     print("Loaded %s objects." % (len(definitions["objects"])))
     definitions["objects"] = map(preprocess_object, definitions["objects"])
 

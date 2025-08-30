@@ -21,12 +21,34 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-
 #include "suricata-common.h"
-#include "suricata.h"
 #include "util-bpf.h"
+#include "threads.h"
+#include "conf.h"
+#include "util-debug.h"
 
-#if !defined __OpenBSD__
+void ConfSetBPFFilter(
+        SCConfNode *if_root, SCConfNode *if_default, const char *iface, const char **bpf_filter)
+{
+    if (*bpf_filter != NULL) {
+        SCLogInfo("BPF filter already configured");
+        return;
+    }
+
+    /* command line value has precedence */
+    if (SCConfGet("bpf-filter", bpf_filter) == 1) {
+        if (strlen(*bpf_filter) > 0) {
+            SCLogConfig("%s: using command-line provided bpf filter '%s'", iface, *bpf_filter);
+        }
+    } else if (SCConfGetChildValueWithDefault(if_root, if_default, "bpf-filter", bpf_filter) ==
+               1) { // reading from a file
+        if (strlen(*bpf_filter) > 0) {
+            SCLogConfig("%s: using file provided bpf filter %s", iface, *bpf_filter);
+        }
+    } else {
+        SCLogDebug("No BPF filter found, skipping");
+    }
+}
 
 /** protect bpf filter build, as it is not thread safe */
 static SCMutex bpf_set_filter_lock = SCMUTEX_INITIALIZER;
@@ -72,5 +94,3 @@ int SCBPFCompile(int snaplen_arg, int linktype_arg, struct bpf_program *program,
 
     return (ret);
 }
-
-#endif /* Not __OpenBSD__ */

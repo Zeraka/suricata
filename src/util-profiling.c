@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2012 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,27 +27,20 @@
  */
 
 #include "suricata-common.h"
-#include "decode.h"
-#include "detect.h"
-#include "detect-engine-prefilter.h"
-#include "conf.h"
-#include "flow-worker.h"
-
-#include "tm-threads.h"
-
-#include "util-unittest.h"
-#include "util-byte.h"
 #include "util-profiling.h"
-#include "util-profiling-locks.h"
 
 #ifdef PROFILING
+#include "tm-threads.h"
+#include "conf.h"
+#include "util-unittest.h"
+#include "util-byte.h"
+#include "util-profiling-locks.h"
+#include "util-conf.h"
+#include "util-path.h"
 
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
-
-#define DEFAULT_LOG_FILENAME "profile.log"
-#define DEFAULT_LOG_MODE_APPEND "yes"
 
 static pthread_mutex_t packet_profile_lock;
 static FILE *packet_profile_csv_fp = NULL;
@@ -79,8 +72,8 @@ SCProfilePacketData packet_profile_data6[257]; /**< all proto's + tunnel */
 SCProfilePacketData packet_profile_tmm_data4[TMM_SIZE][257];
 SCProfilePacketData packet_profile_tmm_data6[TMM_SIZE][257];
 
-SCProfilePacketData packet_profile_app_data4[TMM_SIZE][257];
-SCProfilePacketData packet_profile_app_data6[TMM_SIZE][257];
+SCProfilePacketData *packet_profile_app_data4;
+SCProfilePacketData *packet_profile_app_data6;
 
 SCProfilePacketData packet_profile_app_pd_data4[257];
 SCProfilePacketData packet_profile_app_pd_data6[257];
@@ -118,7 +111,7 @@ thread_local int profiling_rules_entered = 0;
 
 void SCProfilingDumpPacketStats(void);
 const char * PacketProfileDetectIdToString(PacketProfileDetectId id);
-const char * PacketProfileLoggertIdToString(LoggerId id);
+const char *PacketProfileLoggerIdToString(LoggerId id);
 static void PrintCSVHeader(void);
 
 static void FormatNumber(uint64_t num, char *str, size_t size)
@@ -139,12 +132,12 @@ static void FormatNumber(uint64_t num, char *str, size_t size)
 void
 SCProfilingInit(void)
 {
-    ConfNode *conf;
+    SCConfNode *conf;
 
     SC_ATOMIC_INIT(samples);
 
     intmax_t rate_v = 0;
-    (void)ConfGetInt("profiling.sample-rate", &rate_v);
+    (void)SCConfGetInt("profiling.sample-rate", &rate_v);
     if (rate_v > 0 && rate_v < INT_MAX) {
         rate = (int)rate_v;
         if (rate != 1)
@@ -153,21 +146,26 @@ SCProfilingInit(void)
             SCLogInfo("profiling runs for every packet");
     }
 
-    conf = ConfGetNode("profiling.packets");
+    conf = SCConfGetNode("profiling.packets");
     if (conf != NULL) {
-        if (ConfNodeChildValueIsTrue(conf, "enabled")) {
+        if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
             profiling_packets_enabled = 1;
 
             if (pthread_mutex_init(&packet_profile_lock, NULL) != 0) {
-                        FatalError(SC_ERR_FATAL,
-                                   "Failed to initialize packet profiling mutex.");
+                FatalError("Failed to initialize packet profiling mutex.");
             }
             memset(&packet_profile_data4, 0, sizeof(packet_profile_data4));
             memset(&packet_profile_data6, 0, sizeof(packet_profile_data6));
             memset(&packet_profile_tmm_data4, 0, sizeof(packet_profile_tmm_data4));
             memset(&packet_profile_tmm_data6, 0, sizeof(packet_profile_tmm_data6));
-            memset(&packet_profile_app_data4, 0, sizeof(packet_profile_app_data4));
-            memset(&packet_profile_app_data6, 0, sizeof(packet_profile_app_data6));
+            packet_profile_app_data4 = SCCalloc(g_alproto_max * 257, sizeof(SCProfilePacketData));
+            if (packet_profile_app_data4 == NULL) {
+                FatalError("Failed to allocate packet_profile_app_data4");
+            }
+            packet_profile_app_data6 = SCCalloc(g_alproto_max * 257, sizeof(SCProfilePacketData));
+            if (packet_profile_app_data6 == NULL) {
+                FatalError("Failed to allocate packet_profile_app_data6");
+            }
             memset(&packet_profile_app_pd_data4, 0, sizeof(packet_profile_app_pd_data4));
             memset(&packet_profile_app_pd_data6, 0, sizeof(packet_profile_app_pd_data6));
             memset(&packet_profile_detect_data4, 0, sizeof(packet_profile_detect_data4));
@@ -176,16 +174,19 @@ SCProfilingInit(void)
             memset(&packet_profile_log_data6, 0, sizeof(packet_profile_log_data6));
             memset(&packet_profile_flowworker_data, 0, sizeof(packet_profile_flowworker_data));
 
-            const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            const char *filename = SCConfNodeLookupChildValue(conf, "filename");
             if (filename != NULL) {
-                const char *log_dir;
-                log_dir = ConfigGetLogDirectory();
+                if (PathIsAbsolute(filename)) {
+                    strlcpy(profiling_packets_file_name, filename,
+                            sizeof(profiling_packets_file_name));
+                } else {
+                    const char *log_dir = SCConfigGetLogDirectory();
+                    snprintf(profiling_packets_file_name, sizeof(profiling_packets_file_name),
+                            "%s/%s", log_dir, filename);
+                }
 
-                snprintf(profiling_packets_file_name, sizeof(profiling_packets_file_name),
-                        "%s/%s", log_dir, filename);
-
-                const char *v = ConfNodeLookupChildValue(conf, "append");
-                if (v == NULL || ConfValIsTrue(v)) {
+                const char *v = SCConfNodeLookupChildValue(conf, "append");
+                if (v == NULL || SCConfValIsTrue(v)) {
                     profiling_packets_file_mode = "a";
                 } else {
                     profiling_packets_file_mode = "w";
@@ -195,21 +196,27 @@ SCProfilingInit(void)
             }
         }
 
-        conf = ConfGetNode("profiling.packets.csv");
+        conf = SCConfGetNode("profiling.packets.csv");
         if (conf != NULL) {
-            if (ConfNodeChildValueIsTrue(conf, "enabled")) {
-                const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
+                const char *filename = SCConfNodeLookupChildValue(conf, "filename");
                 if (filename == NULL) {
                     filename = "packet_profile.csv";
                 }
+                if (PathIsAbsolute(filename)) {
+                    profiling_csv_file_name = SCStrdup(filename);
+                    if (unlikely(profiling_csv_file_name == NULL)) {
+                        FatalError("out of memory");
+                    }
+                } else {
+                    profiling_csv_file_name = SCMalloc(PATH_MAX);
+                    if (unlikely(profiling_csv_file_name == NULL)) {
+                        FatalError("out of memory");
+                    }
 
-                const char *log_dir = ConfigGetLogDirectory();
-
-                profiling_csv_file_name = SCMalloc(PATH_MAX);
-                if (unlikely(profiling_csv_file_name == NULL)) {
-                    FatalError(SC_ERR_FATAL, "out of memory");
+                    const char *log_dir = SCConfigGetLogDirectory();
+                    snprintf(profiling_csv_file_name, PATH_MAX, "%s/%s", log_dir, filename);
                 }
-                snprintf(profiling_csv_file_name, PATH_MAX, "%s/%s", log_dir, filename);
 
                 packet_profile_csv_fp = fopen(profiling_csv_file_name, "w");
                 if (packet_profile_csv_fp == NULL) {
@@ -225,29 +232,30 @@ SCProfilingInit(void)
         }
     }
 
-    conf = ConfGetNode("profiling.locks");
+    conf = SCConfGetNode("profiling.locks");
     if (conf != NULL) {
-        if (ConfNodeChildValueIsTrue(conf, "enabled")) {
+        if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
 #ifndef PROFILE_LOCKING
-            SCLogWarning(SC_WARN_PROFILE, "lock profiling not compiled in. Add --enable-profiling-locks to configure.");
+            SCLogWarning(
+                    "lock profiling not compiled in. Add --enable-profiling-locks to configure.");
 #else
             profiling_locks_enabled = 1;
 
             LockRecordInitHash();
 
-            const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            const char *filename = SCConfNodeLookupChildValue(conf, "filename");
             if (filename != NULL) {
-                const char *log_dir = ConfigGetLogDirectory();
+                const char *log_dir = SCConfigGetLogDirectory();
 
                 profiling_locks_file_name = SCMalloc(PATH_MAX);
                 if (unlikely(profiling_locks_file_name == NULL)) {
-                    FatalError(SC_ERR_FATAL, "can't duplicate file name");
+                    FatalError("can't duplicate file name");
                 }
 
                 snprintf(profiling_locks_file_name, PATH_MAX, "%s/%s", log_dir, filename);
 
-                const char *v = ConfNodeLookupChildValue(conf, "append");
-                if (v == NULL || ConfValIsTrue(v)) {
+                const char *v = SCConfNodeLookupChildValue(conf, "append");
+                if (v == NULL || SCConfValIsTrue(v)) {
                     profiling_locks_file_mode = "a";
                 } else {
                     profiling_locks_file_mode = "w";
@@ -267,6 +275,15 @@ SCProfilingInit(void)
 void
 SCProfilingDestroy(void)
 {
+    if (packet_profile_app_data4) {
+        SCFree(packet_profile_app_data4);
+        packet_profile_app_data4 = NULL;
+    }
+    if (packet_profile_app_data6) {
+        SCFree(packet_profile_app_data6);
+        packet_profile_app_data6 = NULL;
+    }
+
     if (profiling_packets_enabled) {
         pthread_mutex_destroy(&packet_profile_lock);
     }
@@ -348,7 +365,6 @@ static void DumpFlowWorker(FILE *fp)
 
 void SCProfilingDumpPacketStats(void)
 {
-    int i;
     FILE *fp;
     char totalstr[256];
     uint64_t total;
@@ -360,8 +376,7 @@ void SCProfilingDumpPacketStats(void)
         fp = fopen(profiling_packets_file_name, profiling_packets_file_mode);
 
         if (fp == NULL) {
-            SCLogError(SC_ERR_FOPEN, "failed to open %s: %s",
-                    profiling_packets_file_name, strerror(errno));
+            SCLogError("failed to open %s: %s", profiling_packets_file_name, strerror(errno));
             return;
         }
     } else {
@@ -375,16 +390,15 @@ void SCProfilingDumpPacketStats(void)
     fprintf(fp, "%-6s   %-5s   %-12s   %-12s   %-12s   %-12s   %-12s  %-3s\n",
             "------", "-----", "----------", "------------", "------------", "-----------", "-----------", "---");
     total = 0;
-    for (i = 0; i < 257; i++) {
+    for (int i = 0; i < 257; i++) {
         SCProfilePacketData *pd = &packet_profile_data4[i];
         total += pd->tot;
         pd = &packet_profile_data6[i];
         total += pd->tot;
     }
 
-    for (i = 0; i < 257; i++) {
+    for (int i = 0; i < 257; i++) {
         SCProfilePacketData *pd = &packet_profile_data4[i];
-
         if (pd->cnt == 0) {
             continue;
         }
@@ -397,9 +411,8 @@ void SCProfilingDumpPacketStats(void)
             pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
     }
 
-    for (i = 0; i < 257; i++) {
+    for (int i = 0; i < 257; i++) {
         SCProfilePacketData *pd = &packet_profile_data6[i];
-
         if (pd->cnt == 0) {
             continue;
         }
@@ -431,14 +444,9 @@ void SCProfilingDumpPacketStats(void)
 #else
     fprintf(fp, "\n");
 #endif
-    int m;
     total = 0;
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (tmm_modules[m].flags & TM_FLAG_LOGAPI_TM)
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data4[m][p];
             total += pd->tot;
 
@@ -447,14 +455,9 @@ void SCProfilingDumpPacketStats(void)
         }
     }
 
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (tmm_modules[m].flags & TM_FLAG_LOGAPI_TM)
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data4[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -474,14 +477,9 @@ void SCProfilingDumpPacketStats(void)
         }
     }
 
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (tmm_modules[m].flags & TM_FLAG_LOGAPI_TM)
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data6[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -505,21 +503,18 @@ void SCProfilingDumpPacketStats(void)
             "--------------------", "------", "-----", "----------", "------------", "------------", "-----------");
 
     total = 0;
-    for (m = 0; m < ALPROTO_MAX; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
-            SCProfilePacketData *pd = &packet_profile_app_data4[m][p];
+    for (AppProto a = 0; a < g_alproto_max; a++) {
+        for (int p = 0; p < 257; p++) {
+            SCProfilePacketData *pd = &packet_profile_app_data4[a * 257 + p];
             total += pd->tot;
 
-            pd = &packet_profile_app_data6[m][p];
+            pd = &packet_profile_app_data6[a * 257 + p];
             total += pd->tot;
         }
     }
-    for (m = 0; m < ALPROTO_MAX; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
-            SCProfilePacketData *pd = &packet_profile_app_data4[m][p];
-
+    for (AppProto a = 0; a < g_alproto_max; a++) {
+        for (int p = 0; p < 257; p++) {
+            SCProfilePacketData *pd = &packet_profile_app_data4[a * 257 + p];
             if (pd->cnt == 0) {
                 continue;
             }
@@ -528,16 +523,17 @@ void SCProfilingDumpPacketStats(void)
             double percent = (long double)pd->tot /
                 (long double)total * 100;
 
-            fprintf(fp, "%-20s    IPv4     %3d  %12"PRIu64"     %12"PRIu64"   %12"PRIu64"  %12"PRIu64"  %12s  %-6.2f\n",
-                    AppProtoToString(m), p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
+            fprintf(fp,
+                    "%-20s    IPv4     %3d  %12" PRIu64 "     %12" PRIu64 "   %12" PRIu64
+                    "  %12" PRIu64 "  %12s  %-6.2f\n",
+                    AppProtoToString(a), p, pd->cnt, pd->min, pd->max,
+                    (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
         }
     }
 
-    for (m = 0; m < ALPROTO_MAX; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
-            SCProfilePacketData *pd = &packet_profile_app_data6[m][p];
-
+    for (AppProto a = 0; a < g_alproto_max; a++) {
+        for (int p = 0; p < 257; p++) {
+            SCProfilePacketData *pd = &packet_profile_app_data6[a * 257 + p];
             if (pd->cnt == 0) {
                 continue;
             }
@@ -546,17 +542,18 @@ void SCProfilingDumpPacketStats(void)
             double percent = (long double)pd->tot /
                 (long double)total * 100;
 
-            fprintf(fp, "%-20s    IPv6     %3d  %12"PRIu64"     %12"PRIu64"   %12"PRIu64"  %12"PRIu64"  %12s  %-6.2f\n",
-                    AppProtoToString(m), p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
+            fprintf(fp,
+                    "%-20s    IPv6     %3d  %12" PRIu64 "     %12" PRIu64 "   %12" PRIu64
+                    "  %12" PRIu64 "  %12s  %-6.2f\n",
+                    AppProtoToString(a), p, pd->cnt, pd->min, pd->max,
+                    (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
         }
     }
 
     /* proto detect output */
     {
-        int p;
-        for (p = 0; p < 257; p++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_app_pd_data4[p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -566,9 +563,8 @@ void SCProfilingDumpPacketStats(void)
                     "Proto detect", p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr);
         }
 
-        for (p = 0; p < 257; p++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_app_pd_data6[p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -580,9 +576,8 @@ void SCProfilingDumpPacketStats(void)
     }
 
     total = 0;
-    for (m = 0; m < PROF_DETECT_SIZE; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < PROF_DETECT_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_detect_data4[m][p];
             total += pd->tot;
 
@@ -590,7 +585,6 @@ void SCProfilingDumpPacketStats(void)
             total += pd->tot;
         }
     }
-
 
     fprintf(fp, "\n%-24s   %-6s   %-5s   %-12s   %-12s   %-12s   %-12s   %-12s  %-3s",
             "Log Thread Module", "IP ver", "Proto", "cnt", "min", "max", "avg", "tot", "%%");
@@ -609,12 +603,8 @@ void SCProfilingDumpPacketStats(void)
     fprintf(fp, "\n");
 #endif
     total = 0;
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (!(tmm_modules[m].flags & TM_FLAG_LOGAPI_TM))
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data4[m][p];
             total += pd->tot;
 
@@ -623,14 +613,9 @@ void SCProfilingDumpPacketStats(void)
         }
     }
 
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (!(tmm_modules[m].flags & TM_FLAG_LOGAPI_TM))
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data4[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -650,14 +635,9 @@ void SCProfilingDumpPacketStats(void)
         }
     }
 
-    for (m = 0; m < TMM_SIZE; m++) {
-        if (!(tmm_modules[m].flags & TM_FLAG_LOGAPI_TM))
-            continue;
-
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < TMM_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_tmm_data6[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -674,9 +654,8 @@ void SCProfilingDumpPacketStats(void)
     fprintf(fp, "\nLogger/output stats:\n");
 
     total = 0;
-    for (m = 0; m < LOGGER_SIZE; m++) {
-        int p;
-        for (p = 0; p < 256; p++) {
+    for (int m = 0; m < LOGGER_SIZE; m++) {
+        for (int p = 0; p < 256; p++) {
             SCProfilePacketData *pd = &packet_profile_log_data4[m][p];
             total += pd->tot;
             pd = &packet_profile_log_data6[m][p];
@@ -688,11 +667,9 @@ void SCProfilingDumpPacketStats(void)
             "Logger", "IP ver", "Proto", "cnt", "min", "max", "avg", "tot");
     fprintf(fp, "%-24s   %-6s   %-5s   %-12s   %-12s   %-12s   %-12s   %-12s\n",
             "------------------------", "------", "-----", "----------", "------------", "------------", "-----------", "-----------");
-    for (m = 0; m < LOGGER_SIZE; m++) {
-        int p;
-        for (p = 0; p < 256; p++) {
+    for (int m = 0; m < LOGGER_SIZE; m++) {
+        for (int p = 0; p < 256; p++) {
             SCProfilePacketData *pd = &packet_profile_log_data4[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -701,15 +678,16 @@ void SCProfilingDumpPacketStats(void)
             double percent = (long double)pd->tot /
                 (long double)total * 100;
 
-            fprintf(fp, "%-24s    IPv4     %3d  %12"PRIu64"     %12"PRIu64"   %12"PRIu64"  %12"PRIu64"  %12s  %-6.2f\n",
-                    PacketProfileLoggertIdToString(m), p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
+            fprintf(fp,
+                    "%-24s    IPv4     %3d  %12" PRIu64 "     %12" PRIu64 "   %12" PRIu64
+                    "  %12" PRIu64 "  %12s  %-6.2f\n",
+                    PacketProfileLoggerIdToString(m), p, pd->cnt, pd->min, pd->max,
+                    (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
         }
     }
-    for (m = 0; m < LOGGER_SIZE; m++) {
-        int p;
-        for (p = 0; p < 256; p++) {
+    for (int m = 0; m < LOGGER_SIZE; m++) {
+        for (int p = 0; p < 256; p++) {
             SCProfilePacketData *pd = &packet_profile_log_data6[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -718,17 +696,19 @@ void SCProfilingDumpPacketStats(void)
             double percent = (long double)pd->tot /
                 (long double)total * 100;
 
-            fprintf(fp, "%-24s    IPv6     %3d  %12"PRIu64"     %12"PRIu64"   %12"PRIu64"  %12"PRIu64"  %12s  %-6.2f\n",
-                    PacketProfileLoggertIdToString(m), p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
+            fprintf(fp,
+                    "%-24s    IPv6     %3d  %12" PRIu64 "     %12" PRIu64 "   %12" PRIu64
+                    "  %12" PRIu64 "  %12s  %-6.2f\n",
+                    PacketProfileLoggerIdToString(m), p, pd->cnt, pd->min, pd->max,
+                    (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
         }
     }
 
     fprintf(fp, "\nGeneral detection engine stats:\n");
 
     total = 0;
-    for (m = 0; m < PROF_DETECT_SIZE; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < PROF_DETECT_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_detect_data4[m][p];
             total += pd->tot;
             pd = &packet_profile_detect_data6[m][p];
@@ -740,11 +720,9 @@ void SCProfilingDumpPacketStats(void)
             "Detection phase", "IP ver", "Proto", "cnt", "min", "max", "avg", "tot");
     fprintf(fp, "%-24s   %-6s   %-5s   %-12s   %-12s   %-12s   %-12s   %-12s\n",
             "------------------------", "------", "-----", "----------", "------------", "------------", "-----------", "-----------");
-    for (m = 0; m < PROF_DETECT_SIZE; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < PROF_DETECT_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_detect_data4[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -757,11 +735,9 @@ void SCProfilingDumpPacketStats(void)
                     PacketProfileDetectIdToString(m), p, pd->cnt, pd->min, pd->max, (uint64_t)(pd->tot / pd->cnt), totalstr, percent);
         }
     }
-    for (m = 0; m < PROF_DETECT_SIZE; m++) {
-        int p;
-        for (p = 0; p < 257; p++) {
+    for (int m = 0; m < PROF_DETECT_SIZE; m++) {
+        for (int p = 0; p < 257; p++) {
             SCProfilePacketData *pd = &packet_profile_detect_data6[m][p];
-
             if (pd->cnt == 0) {
                 continue;
             }
@@ -795,7 +771,7 @@ static void PrintCSVHeader(void)
 
     /* individual loggers */
     for (LoggerId i = 0; i < LOGGER_SIZE; i++) {
-        fprintf(packet_profile_csv_fp, "%s,", PacketProfileLoggertIdToString(i));
+        fprintf(packet_profile_csv_fp, "%s,", PacketProfileLoggerIdToString(i));
     }
 
     fprintf(packet_profile_csv_fp, "\n");
@@ -844,7 +820,7 @@ void SCProfilingPrintPacketProfile(Packet *p)
 
     /* count ticks for app layer */
     uint64_t app_total = 0;
-    for (AppProto i = 1; i < ALPROTO_FAILED; i++) {
+    for (AppProto i = 0; i < g_alproto_max; i++) {
         const PktProfilingAppData *pdt = &p->profile->app[i];
 
         if (p->proto == IPPROTO_TCP) {
@@ -921,7 +897,7 @@ static void SCProfilingUpdatePacketDetectRecords(Packet *p)
         PktProfilingDetectData *pdt = &p->profile->detect[i];
 
         if (pdt->ticks_spent > 0) {
-            if (PKT_IS_IPV4(p)) {
+            if (PacketIsIPv4(p)) {
                 SCProfilingUpdatePacketDetectRecord(i, p->proto, pdt, 4);
             } else {
                 SCProfilingUpdatePacketDetectRecord(i, p->proto, pdt, 6);
@@ -957,9 +933,9 @@ static void SCProfilingUpdatePacketAppRecord(int alproto, uint8_t ipproto, PktPr
 
     SCProfilePacketData *pd;
     if (ipver == 4)
-        pd = &packet_profile_app_data4[alproto][ipproto];
+        pd = &packet_profile_app_data4[alproto * 257 + ipproto];
     else
-        pd = &packet_profile_app_data6[alproto][ipproto];
+        pd = &packet_profile_app_data6[alproto * 257 + ipproto];
 
     if (pd->min == 0 || pdt->ticks_spent < pd->min) {
         pd->min = pdt->ticks_spent;
@@ -975,11 +951,11 @@ static void SCProfilingUpdatePacketAppRecord(int alproto, uint8_t ipproto, PktPr
 static void SCProfilingUpdatePacketAppRecords(Packet *p)
 {
     int i;
-    for (i = 0; i < ALPROTO_MAX; i++) {
+    for (i = 0; i < g_alproto_max; i++) {
         PktProfilingAppData *pdt = &p->profile->app[i];
 
         if (pdt->ticks_spent > 0) {
-            if (PKT_IS_IPV4(p)) {
+            if (PacketIsIPv4(p)) {
                 SCProfilingUpdatePacketAppRecord(i, p->proto, pdt, 4);
             } else {
                 SCProfilingUpdatePacketAppRecord(i, p->proto, pdt, 6);
@@ -988,7 +964,7 @@ static void SCProfilingUpdatePacketAppRecords(Packet *p)
     }
 
     if (p->profile->proto_detect > 0) {
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             SCProfilingUpdatePacketAppPdRecord(p->proto, p->profile->proto_detect, 4);
         } else {
             SCProfilingUpdatePacketAppPdRecord(p->proto, p->profile->proto_detect, 6);
@@ -1039,7 +1015,7 @@ static void SCProfilingUpdatePacketTmmRecords(Packet *p)
             continue;
         }
 
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             SCProfilingUpdatePacketTmmRecord(i, p->proto, pdt, 4);
         } else {
             SCProfilingUpdatePacketTmmRecord(i, p->proto, pdt, 6);
@@ -1080,7 +1056,7 @@ static void SCProfilingUpdatePacketGenericRecords(Packet *p, PktProfilingData *p
         struct ProfileProtoRecords *r = &records[i];
         SCProfilePacketData *store = NULL;
 
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             store = &(r->records4[p->proto]);
         } else {
             store = &(r->records6[p->proto]);
@@ -1120,7 +1096,7 @@ static void SCProfilingUpdatePacketLogRecords(Packet *p)
         PktProfilingLoggerData *pdt = &p->profile->logger[i];
 
         if (pdt->ticks_spent > 0) {
-            if (PKT_IS_IPV4(p)) {
+            if (PacketIsIPv4(p)) {
                 SCProfilingUpdatePacketLogRecord(i, p->proto, pdt, 4);
             } else {
                 SCProfilingUpdatePacketLogRecord(i, p->proto, pdt, 6);
@@ -1139,7 +1115,7 @@ void SCProfilingAddPacket(Packet *p)
     pthread_mutex_lock(&packet_profile_lock);
     {
 
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             SCProfilePacketData *pd = &packet_profile_data4[p->proto];
 
             uint64_t delta = p->profile->ticks_end - p->profile->ticks_start;
@@ -1153,7 +1129,7 @@ void SCProfilingAddPacket(Packet *p)
             pd->tot += delta;
             pd->cnt ++;
 
-            if (IS_TUNNEL_PKT(p)) {
+            if (PacketIsTunnel(p)) {
                 pd = &packet_profile_data4[256];
 
                 if (pd->min == 0 || delta < pd->min) {
@@ -1175,7 +1151,7 @@ void SCProfilingAddPacket(Packet *p)
             SCProfilingUpdatePacketDetectRecords(p);
             SCProfilingUpdatePacketLogRecords(p);
 
-        } else if (PKT_IS_IPV6(p)) {
+        } else if (PacketIsIPv6(p)) {
             SCProfilePacketData *pd = &packet_profile_data6[p->proto];
 
             uint64_t delta = p->profile->ticks_end - p->profile->ticks_start;
@@ -1189,7 +1165,7 @@ void SCProfilingAddPacket(Packet *p)
             pd->tot += delta;
             pd->cnt ++;
 
-            if (IS_TUNNEL_PKT(p)) {
+            if (PacketIsTunnel(p)) {
                 pd = &packet_profile_data6[256];
 
                 if (pd->min == 0 || delta < pd->min) {
@@ -1223,9 +1199,8 @@ PktProfiling *SCProfilePacketStart(void)
 {
     uint64_t sample = SC_ATOMIC_ADD(samples, 1);
     if (sample % rate == 0)
-        return SCCalloc(1, sizeof(PktProfiling));
-    else
-        return NULL;
+        return SCCalloc(1, sizeof(PktProfiling) + g_alproto_max * sizeof(PktProfilingAppData));
+    return NULL;
 }
 
 /* see if we want to profile rules for this packet */
@@ -1236,13 +1211,16 @@ int SCProfileRuleStart(Packet *p)
         p->flags |= PKT_PROFILE;
         return 1;
     }
-#else
+#endif
+    if (p->flags & PKT_PROFILE) {
+        return 1;
+    }
+
     uint64_t sample = SC_ATOMIC_ADD(samples, 1);
-    if (sample % rate == 0) {
+    if ((sample % rate) == 0) {
         p->flags |= PKT_PROFILE;
         return 1;
     }
-#endif
     return 0;
 }
 
@@ -1258,20 +1236,21 @@ int SCProfileRuleStart(Packet *p)
 const char * PacketProfileDetectIdToString(PacketProfileDetectId id)
 {
     switch (id) {
-        CASE_CODE (PROF_DETECT_SETUP);
-        CASE_CODE (PROF_DETECT_GETSGH);
-        CASE_CODE (PROF_DETECT_IPONLY);
-        CASE_CODE (PROF_DETECT_RULES);
-        CASE_CODE (PROF_DETECT_PF_PKT);
-        CASE_CODE (PROF_DETECT_PF_PAYLOAD);
-        CASE_CODE (PROF_DETECT_PF_TX);
-        CASE_CODE (PROF_DETECT_PF_SORT1);
-        CASE_CODE (PROF_DETECT_PF_SORT2);
-        CASE_CODE (PROF_DETECT_NONMPMLIST);
-        CASE_CODE (PROF_DETECT_TX);
-        CASE_CODE (PROF_DETECT_ALERT);
-        CASE_CODE (PROF_DETECT_TX_UPDATE);
-        CASE_CODE (PROF_DETECT_CLEANUP);
+        CASE_CODE(PROF_DETECT_SETUP);
+        CASE_CODE(PROF_DETECT_GETSGH);
+        CASE_CODE(PROF_DETECT_IPONLY);
+        CASE_CODE(PROF_DETECT_RULES);
+        CASE_CODE(PROF_DETECT_PF_PKT);
+        CASE_CODE(PROF_DETECT_PF_PAYLOAD);
+        CASE_CODE(PROF_DETECT_PF_TX);
+        CASE_CODE(PROF_DETECT_PF_RECORD);
+        CASE_CODE(PROF_DETECT_PF_SORT1);
+        CASE_CODE(PROF_DETECT_PF_SORT2);
+        CASE_CODE(PROF_DETECT_NONMPMLIST);
+        CASE_CODE(PROF_DETECT_TX);
+        CASE_CODE(PROF_DETECT_ALERT);
+        CASE_CODE(PROF_DETECT_TX_UPDATE);
+        CASE_CODE(PROF_DETECT_CLEANUP);
         default:
             return "UNKNOWN";
     }
@@ -1284,57 +1263,37 @@ const char * PacketProfileDetectIdToString(PacketProfileDetectId id)
  *
  * \retval string equivalent for the LoggerId id
  */
-const char * PacketProfileLoggertIdToString(LoggerId id)
+const char *PacketProfileLoggerIdToString(LoggerId id)
 {
     switch (id) {
-        CASE_CODE (LOGGER_UNDEFINED);
-        CASE_CODE (LOGGER_ALERT_DEBUG);
-        CASE_CODE (LOGGER_ALERT_FAST);
-        CASE_CODE (LOGGER_UNIFIED2);
-        CASE_CODE (LOGGER_ALERT_SYSLOG);
-        CASE_CODE (LOGGER_DROP);
-        CASE_CODE (LOGGER_JSON_ALERT);
-        CASE_CODE (LOGGER_JSON_ANOMALY);
-        CASE_CODE (LOGGER_JSON_DROP);
-        CASE_CODE (LOGGER_JSON_SSH);
-        CASE_CODE (LOGGER_DNS_TS);
-        CASE_CODE (LOGGER_DNS_TC);
-        CASE_CODE (LOGGER_JSON_SMB);
-        CASE_CODE (LOGGER_JSON_NFS);
-        CASE_CODE (LOGGER_HTTP);
-        CASE_CODE (LOGGER_JSON_DNS_TS);
-        CASE_CODE (LOGGER_JSON_DNS_TC);
-        CASE_CODE (LOGGER_JSON_DNP3_TS);
-        CASE_CODE (LOGGER_JSON_DNP3_TC);
-        CASE_CODE (LOGGER_JSON_HTTP);
-        CASE_CODE (LOGGER_JSON_DHCP);
-        CASE_CODE (LOGGER_JSON_KRB5);
-        CASE_CODE (LOGGER_JSON_IKEV2);
-        CASE_CODE (LOGGER_JSON_FTP);
-        CASE_CODE (LOGGER_JSON_TFTP);
-        CASE_CODE (LOGGER_JSON_SMTP);
-        CASE_CODE (LOGGER_JSON_SNMP);
-        CASE_CODE (LOGGER_JSON_TLS);
-        CASE_CODE (LOGGER_JSON_SIP);
-        CASE_CODE (LOGGER_JSON_TEMPLATE_RUST);
-        CASE_CODE (LOGGER_JSON_RFB);
-        CASE_CODE (LOGGER_JSON_MQTT);
-        CASE_CODE (LOGGER_JSON_TEMPLATE);
-        CASE_CODE (LOGGER_JSON_RDP);
-        CASE_CODE (LOGGER_JSON_DCERPC);
-        CASE_CODE (LOGGER_JSON_HTTP2);
-        CASE_CODE (LOGGER_TLS_STORE);
-        CASE_CODE (LOGGER_TLS);
-        CASE_CODE (LOGGER_FILE_STORE);
-        CASE_CODE (LOGGER_JSON_FILE);
-        CASE_CODE (LOGGER_TCP_DATA);
-        CASE_CODE (LOGGER_JSON_FLOW);
-        CASE_CODE (LOGGER_JSON_NETFLOW);
-        CASE_CODE (LOGGER_STATS);
-        CASE_CODE (LOGGER_JSON_STATS);
-        CASE_CODE (LOGGER_PRELUDE);
-        CASE_CODE (LOGGER_PCAP);
-        CASE_CODE (LOGGER_JSON_METADATA);
+        CASE_CODE(LOGGER_UNDEFINED);
+        CASE_CODE(LOGGER_HTTP);
+        CASE_CODE(LOGGER_TLS_STORE);
+        CASE_CODE(LOGGER_TLS_STORE_CLIENT);
+        CASE_CODE(LOGGER_TLS);
+        CASE_CODE(LOGGER_JSON_TX);
+        CASE_CODE(LOGGER_FILE);
+        CASE_CODE(LOGGER_FILEDATA);
+        CASE_CODE(LOGGER_ALERT_DEBUG);
+        CASE_CODE(LOGGER_ALERT_FAST);
+        CASE_CODE(LOGGER_ALERT_SYSLOG);
+        CASE_CODE(LOGGER_JSON_ALERT);
+        CASE_CODE(LOGGER_JSON_ANOMALY);
+        CASE_CODE(LOGGER_JSON_DROP);
+        CASE_CODE(LOGGER_FILE_STORE);
+        CASE_CODE(LOGGER_JSON_FILE);
+        CASE_CODE(LOGGER_TCP_DATA);
+        CASE_CODE(LOGGER_JSON_FLOW);
+        CASE_CODE(LOGGER_JSON_NETFLOW);
+        CASE_CODE(LOGGER_STATS);
+        CASE_CODE(LOGGER_JSON_STATS);
+        CASE_CODE(LOGGER_PCAP);
+        CASE_CODE(LOGGER_JSON_METADATA);
+        CASE_CODE(LOGGER_JSON_FRAME);
+        CASE_CODE(LOGGER_JSON_STREAM);
+        CASE_CODE(LOGGER_JSON_ARP);
+        CASE_CODE(LOGGER_USER);
+
         case LOGGER_SIZE:
             return "UNKNOWN";
     }
@@ -1451,6 +1410,83 @@ SCProfilingRegisterTests(void)
 #ifdef UNITTESTS
     UtRegisterTest("ProfilingGenericTicksTest01", ProfilingGenericTicksTest01);
 #endif /* UNITTESTS */
+}
+
+void SCProfileRuleStartCollection(void)
+{
+}
+
+void SCProfileRuleStopCollection(void)
+{
+}
+
+#elif PROFILE_RULES
+
+thread_local int profiling_rules_entered = 0;
+int profiling_output_to_file = 0;
+static SC_ATOMIC_DECLARE(uint64_t, samples);
+static uint64_t rate = 0;
+static SC_ATOMIC_DECLARE(bool, profiling_rules_active);
+
+/**
+ * \brief Initialize profiling.
+ */
+void SCProfilingInit(void)
+{
+    SC_ATOMIC_INIT(profiling_rules_active);
+    SC_ATOMIC_INIT(samples);
+    intmax_t rate_v = 0;
+    SCConfNode *conf;
+
+    (void)SCConfGetInt("profiling.sample-rate", &rate_v);
+    if (rate_v > 0 && rate_v < INT_MAX) {
+        int literal_rate = (int)rate_v;
+        for (int i = literal_rate; i >= 1; i--) {
+            /* If i is a power of 2 */
+            if ((i & (i - 1)) == 0) {
+                rate = i - 1;
+                break;
+            }
+        }
+        if (rate != 0)
+            SCLogInfo("profiling runs for every %luth packet", rate + 1);
+        else
+            SCLogInfo("profiling runs for every packet");
+    }
+
+    conf = SCConfGetNode("profiling.rules");
+    if (SCConfNodeChildValueIsTrue(conf, "active")) {
+        SC_ATOMIC_SET(profiling_rules_active, 1);
+    }
+}
+
+/* see if we want to profile rules for this packet */
+int SCProfileRuleStart(Packet *p)
+{
+    /* Move first so we'll always finish even if dynamically disabled */
+    if (p->flags & PKT_PROFILE)
+        return 1;
+
+    if (!SC_ATOMIC_GET(profiling_rules_active)) {
+        return 0;
+    }
+
+    uint64_t sample = SC_ATOMIC_ADD(samples, 1);
+    if ((sample & rate) == 0) {
+        p->flags |= PKT_PROFILE;
+        return 1;
+    }
+    return 0;
+}
+
+void SCProfileRuleStartCollection(void)
+{
+    SC_ATOMIC_SET(profiling_rules_active, true);
+}
+
+void SCProfileRuleStopCollection(void)
+{
+    SC_ATOMIC_SET(profiling_rules_active, false);
 }
 
 #endif /* PROFILING */

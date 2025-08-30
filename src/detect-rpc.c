@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
@@ -34,6 +33,7 @@
 #include "detect-engine-mpm.h"
 #include "detect-engine-siggroup.h"
 #include "detect-engine-address.h"
+#include "detect-engine-build.h"
 
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
@@ -96,14 +96,14 @@ static int DetectRpcMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
     const DetectRpcData *rd = (const DetectRpcData *)ctx;
     char *rpcmsg = (char *)p->payload;
 
-    if (PKT_IS_TCP(p)) {
+    if (PacketIsTCP(p)) {
         /* if Rpc msg too small */
         if (p->payload_len < 28) {
             SCLogDebug("TCP packet to small for the rpc msg (%u)", p->payload_len);
             return 0;
         }
         rpcmsg += 4;
-    } else if (PKT_IS_UDP(p)) {
+    } else if (PacketIsUDP(p)) {
         /* if Rpc msg too small */
         if (p->payload_len < 24) {
             SCLogDebug("UDP packet to small for the rpc msg (%u)", p->payload_len);
@@ -149,36 +149,37 @@ static DetectRpcData *DetectRpcParse (DetectEngineCtx *de_ctx, const char *rpcst
 {
     DetectRpcData *rd = NULL;
     char *args[3] = {NULL,NULL,NULL};
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2_len;
 
-    ret = DetectParsePcreExec(&parse_regex, rpcstr, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, rpcstr, 0, 0);
     if (ret < 1 || ret > 4) {
-        SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 ", string %s", ret, rpcstr);
+        SCLogError("parse error, ret %" PRId32 ", string %s", ret, rpcstr);
         goto error;
     }
 
     if (ret > 1) {
         const char *str_ptr;
-        res = pcre_get_substring((char *)rpcstr, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+        res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
         args[0] = (char *)str_ptr;
 
         if (ret > 2) {
-            res = pcre_get_substring((char *)rpcstr, ov, MAX_SUBSTRINGS, 2, &str_ptr);
+            res = pcre2_substring_get_bynumber(match, 2, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
             if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError("pcre2_substring_get_bynumber failed");
                 goto error;
             }
             args[1] = (char *)str_ptr;
         }
         if (ret > 3) {
-            res = pcre_get_substring((char *)rpcstr, ov, MAX_SUBSTRINGS, 3, &str_ptr);
+            res = pcre2_substring_get_bynumber(match, 3, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
             if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError("pcre2_substring_get_bynumber failed");
                 goto error;
             }
             args[2] = (char *)str_ptr;
@@ -199,7 +200,7 @@ static DetectRpcData *DetectRpcParse (DetectEngineCtx *de_ctx, const char *rpcst
             switch (i) {
                 case 0:
                     if (StringParseUint32(&rd->program, 10, strlen(args[i]), args[i]) <= 0) {
-                        SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid size specified for the rpc program:\"%s\"", args[i]);
+                        SCLogError("Invalid size specified for the rpc program:\"%s\"", args[i]);
                         goto error;
                     }
                     rd->flags |= DETECT_RPC_CHECK_PROGRAM;
@@ -207,7 +208,8 @@ static DetectRpcData *DetectRpcParse (DetectEngineCtx *de_ctx, const char *rpcst
                 case 1:
                     if (args[i][0] != '*') {
                         if (StringParseUint32(&rd->program_version, 10, strlen(args[i]), args[i]) <= 0) {
-                            SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid size specified for the rpc version:\"%s\"", args[i]);
+                            SCLogError(
+                                    "Invalid size specified for the rpc version:\"%s\"", args[i]);
                             goto error;
                         }
                         rd->flags |= DETECT_RPC_CHECK_VERSION;
@@ -216,7 +218,8 @@ static DetectRpcData *DetectRpcParse (DetectEngineCtx *de_ctx, const char *rpcst
                 case 2:
                     if (args[i][0] != '*') {
                         if (StringParseUint32(&rd->procedure, 10, strlen(args[i]), args[i]) <= 0) {
-                            SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid size specified for the rpc procedure:\"%s\"", args[i]);
+                            SCLogError(
+                                    "Invalid size specified for the rpc procedure:\"%s\"", args[i]);
                             goto error;
                         }
                         rd->flags |= DETECT_RPC_CHECK_PROCEDURE;
@@ -224,20 +227,24 @@ static DetectRpcData *DetectRpcParse (DetectEngineCtx *de_ctx, const char *rpcst
                 break;
             }
         } else {
-            SCLogError(SC_ERR_INVALID_VALUE, "invalid rpc option %s",rpcstr);
+            SCLogError("invalid rpc option %s", rpcstr);
             goto error;
         }
     }
     for (i = 0; i < (ret -1); i++){
         if (args[i] != NULL)
-            SCFree(args[i]);
+            pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
     }
+    pcre2_match_data_free(match);
     return rd;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     for (i = 0; i < (ret -1) && i < 3; i++){
         if (args[i] != NULL)
-            SCFree(args[i]);
+            pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
     }
     if (rd != NULL)
         DetectRpcFree(de_ctx, rd);
@@ -259,26 +266,21 @@ error:
 int DetectRpcSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rpcstr)
 {
     DetectRpcData *rd = NULL;
-    SigMatch *sm = NULL;
 
     rd = DetectRpcParse(de_ctx, rpcstr);
     if (rd == NULL) goto error;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_RPC, (SigMatchCtx *)rd, DETECT_SM_LIST_MATCH) ==
+            NULL) {
         goto error;
-
-    sm->type = DETECT_RPC;
-    sm->ctx = (SigMatchCtx *)rd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
 
 error:
-    if (rd != NULL) DetectRpcFree(de_ctx, rd);
-    if (sm != NULL) SCFree(sm);
+    if (rd != NULL)
+        DetectRpcFree(de_ctx, rd);
     return -1;
 
 }
@@ -303,21 +305,18 @@ void DetectRpcFree(DetectEngineCtx *de_ctx, void *ptr)
 }
 
 #ifdef UNITTESTS
+#include "detect-engine-alert.h"
 /**
  * \test DetectRpcTestParse01 is a test to make sure that we return "something"
  *  when given valid rpc opt
  */
 static int DetectRpcTestParse01 (void)
 {
-    int result = 0;
-    DetectRpcData *rd = NULL;
-    rd = DetectRpcParse(NULL, "123,444,555");
-    if (rd != NULL) {
-        DetectRpcFree(NULL, rd);
-        result = 1;
-    }
+    DetectRpcData *rd = DetectRpcParse(NULL, "123,444,555");
+    FAIL_IF_NULL(rd);
 
-    return result;
+    DetectRpcFree(NULL, rd);
+    PASS;
 }
 
 /**
@@ -325,23 +324,19 @@ static int DetectRpcTestParse01 (void)
  */
 static int DetectRpcTestParse02 (void)
 {
-    int result = 0;
     DetectRpcData *rd = NULL;
     rd = DetectRpcParse(NULL, "111,222,333");
-    if (rd != NULL) {
-        if (rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-            rd->flags & DETECT_RPC_CHECK_VERSION &&
-            rd->flags & DETECT_RPC_CHECK_PROCEDURE &&
-            rd->program == 111 && rd->program_version == 222 &&
-            rd->procedure == 333) {
-            result = 1;
-        } else {
-            SCLogDebug("Error: Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
-        }
-        DetectRpcFree(NULL, rd);
-    }
+    FAIL_IF_NULL(rd);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 222);
+    FAIL_IF_NOT(rd->procedure == 333);
 
-    return result;
+    DetectRpcFree(NULL, rd);
+
+    PASS;
 }
 
 /**
@@ -350,78 +345,68 @@ static int DetectRpcTestParse02 (void)
  */
 static int DetectRpcTestParse03 (void)
 {
-    int result = 1;
     DetectRpcData *rd = NULL;
-    rd = DetectRpcParse(NULL, "111,*,333");
-    if (rd == NULL)
-        return 0;
 
-    if ( !(rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-        !(rd->flags & DETECT_RPC_CHECK_VERSION) &&
-        rd->flags & DETECT_RPC_CHECK_PROCEDURE &&
-        rd->program == 111 && rd->program_version == 0 &&
-        rd->procedure == 333))
-            result = 0;
-    SCLogDebug("rd1 Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
+    rd = DetectRpcParse(NULL, "111,*,333");
+    FAIL_IF_NULL(rd);
+
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 0);
+    FAIL_IF_NOT(rd->procedure == 333);
 
     DetectRpcFree(NULL, rd);
 
     rd = DetectRpcParse(NULL, "111,222,*");
-    if (rd == NULL)
-        return 0;
+    FAIL_IF_NULL(rd);
 
-    if ( !(rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-        rd->flags & DETECT_RPC_CHECK_VERSION &&
-        !(rd->flags & DETECT_RPC_CHECK_PROCEDURE) &&
-        rd->program == 111 && rd->program_version == 222 &&
-        rd->procedure == 0))
-            result = 0;
-    SCLogDebug("rd2 Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 222);
+    FAIL_IF_NOT(rd->procedure == 0);
 
     DetectRpcFree(NULL, rd);
 
     rd = DetectRpcParse(NULL, "111,*,*");
-    if (rd == NULL)
-        return 0;
+    FAIL_IF_NULL(rd);
 
-    if ( !(rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-        !(rd->flags & DETECT_RPC_CHECK_VERSION) &&
-        !(rd->flags & DETECT_RPC_CHECK_PROCEDURE) &&
-        rd->program == 111 && rd->program_version == 0 &&
-        rd->procedure == 0))
-            result = 0;
-    SCLogDebug("rd2 Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 0);
+    FAIL_IF_NOT(rd->procedure == 0);
 
     DetectRpcFree(NULL, rd);
 
     rd = DetectRpcParse(NULL, "111,222");
-    if (rd == NULL)
-        return 0;
+    FAIL_IF_NULL(rd);
 
-    if ( !(rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-        rd->flags & DETECT_RPC_CHECK_VERSION &&
-        !(rd->flags & DETECT_RPC_CHECK_PROCEDURE) &&
-        rd->program == 111 && rd->program_version == 222 &&
-        rd->procedure == 0))
-            result = 0;
-    SCLogDebug("rd2 Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 222);
+    FAIL_IF_NOT(rd->procedure == 0);
 
     DetectRpcFree(NULL, rd);
 
     rd = DetectRpcParse(NULL, "111");
-    if (rd == NULL)
-        return 0;
+    FAIL_IF_NULL(rd);
 
-    if ( !(rd->flags & DETECT_RPC_CHECK_PROGRAM &&
-        !(rd->flags & DETECT_RPC_CHECK_VERSION) &&
-        !(rd->flags & DETECT_RPC_CHECK_PROCEDURE) &&
-        rd->program == 111 && rd->program_version == 0 &&
-        rd->procedure == 0))
-            result = 0;
-    SCLogDebug("rd2 Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
+    FAIL_IF_NOT(rd->flags & DETECT_RPC_CHECK_PROGRAM);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_VERSION);
+    FAIL_IF(rd->flags & DETECT_RPC_CHECK_PROCEDURE);
+    FAIL_IF_NOT(rd->program == 111);
+    FAIL_IF_NOT(rd->program_version == 0);
+    FAIL_IF_NOT(rd->procedure == 0);
 
     DetectRpcFree(NULL, rd);
-    return result;
+    PASS;
 }
 
 /**
@@ -429,17 +414,13 @@ static int DetectRpcTestParse03 (void)
  */
 static int DetectRpcTestParse04 (void)
 {
-    int result = 0;
     DetectRpcData *rd = NULL;
     rd = DetectRpcParse(NULL, "");
-    if (rd == NULL) {
-        result = 1;
-    } else {
-        SCLogDebug("Error: Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
-        DetectRpcFree(NULL, rd);
-    }
 
-    return result;
+    FAIL_IF_NOT_NULL(rd);
+    DetectRpcFree(NULL, rd);
+
+    PASS;
 }
 
 /**
@@ -447,17 +428,13 @@ static int DetectRpcTestParse04 (void)
  */
 static int DetectRpcTestParse05 (void)
 {
-    int result = 0;
     DetectRpcData *rd = NULL;
     rd = DetectRpcParse(NULL, "111,aaa,*");
-    if (rd == NULL) {
-        result = 1;
-    } else {
-        SCLogDebug("Error: Flags: %d; program: %u, version: %u, procedure: %u", rd->flags, rd->program, rd->program_version, rd->procedure);
-        DetectRpcFree(NULL, rd);
-    }
 
-    return result;
+    FAIL_IF_NOT_NULL(rd);
+    DetectRpcFree(NULL, rd);
+
+    PASS;
 }
 
 /**
@@ -500,77 +477,52 @@ static int DetectRpcTestSig01(void)
     Signature *s = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx;
-    int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
 
     p = UTHBuildPacket(buf, buflen, IPPROTO_UDP);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
 
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, 2, 3; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx,
+            "alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, 2, 3; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    s = s->next = SigInit(de_ctx,"alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, 2, *; sid:2;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx,
+            "alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, 2, *; sid:2;)");
+    FAIL_IF_NULL(s);
 
-    s = s->next = SigInit(de_ctx,"alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, *, 3; sid:3;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx,
+            "alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, *, 3; sid:3;)");
+    FAIL_IF_NULL(s);
 
-    s = s->next = SigInit(de_ctx,"alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, *, *; sid:4;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx,
+            "alert udp any any -> any any (msg:\"RPC Get Port Call\"; rpc:100000, *, *; sid:4;)");
+    FAIL_IF_NULL(s);
 
-    s = s->next = SigInit(de_ctx,"alert udp any any -> any any (msg:\"RPC Get XXX Call.. no match\"; rpc:123456, *, 3; sid:5;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx, "alert udp any any -> any any (msg:\"RPC Get XXX Call.. no "
+                                      "match\"; rpc:123456, *, 3; sid:5;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, 1) == 0) {
-        printf("sid 1 didnt alert, but it should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 2) == 0) {
-        printf("sid 2 didnt alert, but it should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 3) == 0) {
-        printf("sid 3 didnt alert, but it should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 4) == 0) {
-        printf("sid 4 didnt alert, but it should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 5) > 0) {
-        printf("sid 5 did alert, but should not: ");
-        goto cleanup;
-    }
-
-    result = 1;
-
-cleanup:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    FAIL_IF(PacketAlertCheck(p, 1) == 0);
+    FAIL_IF(PacketAlertCheck(p, 2) == 0);
+    FAIL_IF(PacketAlertCheck(p, 3) == 0);
+    FAIL_IF(PacketAlertCheck(p, 4) == 0);
+    FAIL_IF(PacketAlertCheck(p, 5) > 0);
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
     UTHFreePackets(&p, 1);
-end:
-    return result;
+
+    PASS;
 }
 
 /**

@@ -1,4 +1,4 @@
-/* Copyright (C) 2014-2020 Open Information Security Foundation
+/* Copyright (C) 2014-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "detect.h"
 #include "pkt-var.h"
 #include "conf.h"
@@ -35,7 +34,9 @@
 #include "tm-threads.h"
 
 #include "util-print.h"
+#include "util-time.h"
 #include "util-unittest.h"
+#include "util-validate.h"
 
 #include "util-debug.h"
 #include "output.h"
@@ -43,7 +44,6 @@
 #include "util-buffer.h"
 
 #include "util-logopenfile.h"
-#include "util-crypt.h"
 
 #include "output-json.h"
 #include "output-json-stats.h"
@@ -65,7 +65,7 @@ typedef enum OutputEngineInfo_ {
 
 typedef struct OutputStatsCtx_ {
     LogFileCtx *file_ctx;
-    uint32_t flags; /** Store mode */
+    uint8_t flags; /** Store mode */
 } OutputStatsCtx;
 
 typedef struct JsonStatsLogThread_ {
@@ -77,7 +77,6 @@ typedef struct JsonStatsLogThread_ {
 static json_t *EngineStats2Json(const DetectEngineCtx *de_ctx,
                                 const OutputEngineInfo output)
 {
-    struct timeval last_reload;
     char timebuf[64];
     const SigFileLoaderStat *sig_stat = NULL;
 
@@ -87,8 +86,8 @@ static json_t *EngineStats2Json(const DetectEngineCtx *de_ctx,
     }
 
     if (output == OUTPUT_ENGINE_LAST_RELOAD || output == OUTPUT_ENGINE_ALL) {
-        last_reload = de_ctx->last_reload;
-        CreateIsoTimeString(&last_reload, timebuf, sizeof(timebuf));
+        SCTime_t last_reload = SCTIME_FROM_TIMEVAL(&de_ctx->last_reload);
+        CreateIsoTimeString(last_reload, timebuf, sizeof(timebuf));
         json_object_set_new(jdata, "last_reload", json_string(timebuf));
     }
 
@@ -100,6 +99,7 @@ static json_t *EngineStats2Json(const DetectEngineCtx *de_ctx,
                             json_integer(sig_stat->good_sigs_total));
         json_object_set_new(jdata, "rules_failed",
                             json_integer(sig_stat->bad_sigs_total));
+        json_object_set_new(jdata, "rules_skipped", json_integer(sig_stat->skipped_sigs_total));
     }
 
     return jdata;
@@ -229,20 +229,28 @@ json_t *StatsToJSON(const StatsTable *st, uint8_t flags)
         for (u = 0; u < st->nstats; u++) {
             if (st->stats[u].name == NULL)
                 continue;
-            const char *name = st->stats[u].name;
-            const char *shortname = name;
-            if (strrchr(name, '.') != NULL) {
-                shortname = &name[strrchr(name, '.') - name + 1];
+            if (flags & JSON_STATS_NO_ZEROES && st->stats[u].value == 0) {
+                continue;
             }
-            json_t *js_type = OutputStats2Json(js_stats, name);
+
+            json_t *js_type = NULL;
+            const char *stat_name = st->stats[u].short_name;
+            /*
+             * When there's no short-name, the stat is added to
+             * the "global" stats namespace, just like "uptime"
+             */
+            if (st->stats[u].short_name == NULL) {
+                stat_name = st->stats[u].name;
+                js_type = js_stats;
+            } else {
+                js_type = OutputStats2Json(js_stats, st->stats[u].name);
+            }
             if (js_type != NULL) {
-                json_object_set_new(js_type, shortname,
-                    json_integer(st->stats[u].value));
+                json_object_set_new(js_type, stat_name, json_integer(st->stats[u].value));
 
                 if (flags & JSON_STATS_DELTAS) {
-                    char deltaname[strlen(shortname) + strlen(delta_suffix) + 1];
-                    snprintf(deltaname, sizeof(deltaname), "%s%s", shortname,
-                        delta_suffix);
+                    char deltaname[strlen(stat_name) + strlen(delta_suffix) + 1];
+                    snprintf(deltaname, sizeof(deltaname), "%s%s", stat_name, delta_suffix);
                     json_object_set_new(js_type, deltaname,
                         json_integer(st->stats[u].value - st->stats[u].pvalue));
                 }
@@ -261,28 +269,57 @@ json_t *StatsToJSON(const StatsTable *st, uint8_t flags)
         uint32_t x;
         for (x = 0; x < st->ntstats; x++) {
             uint32_t offset = x * st->nstats;
+            const char *tm_name = NULL;
+            json_t *thread = NULL;
 
             /* for each counter */
             for (u = offset; u < (offset + st->nstats); u++) {
                 if (st->tstats[u].name == NULL)
                     continue;
+                if (flags & JSON_STATS_NO_ZEROES && st->tstats[u].value == 0) {
+                    continue;
+                }
 
-                char str[256];
-                snprintf(str, sizeof(str), "%s.%s", st->tstats[u].tm_name, st->tstats[u].name);
-                char *shortname = &str[strrchr(str, '.') - str + 1];
-                json_t *js_type = OutputStats2Json(threads, str);
+                DEBUG_VALIDATE_BUG_ON(st->tstats[u].tm_name == NULL);
+
+                if (tm_name == NULL) {
+                    // First time we see a set tm_name. Remember it
+                    // and allocate the stats object for this thread.
+                    tm_name = st->tstats[u].tm_name;
+                    thread = json_object();
+                    if (unlikely(thread == NULL)) {
+                        json_decref(js_stats);
+                        json_decref(threads);
+                        return NULL;
+                    }
+                } else {
+                    DEBUG_VALIDATE_BUG_ON(strcmp(tm_name, st->tstats[u].tm_name) != 0);
+                    DEBUG_VALIDATE_BUG_ON(thread == NULL);
+                }
+
+                json_t *js_type = NULL;
+                const char *stat_name = st->tstats[u].short_name;
+                if (st->tstats[u].short_name == NULL) {
+                    stat_name = st->tstats[u].name;
+                    js_type = threads;
+                } else {
+                    js_type = OutputStats2Json(thread, st->tstats[u].name);
+                }
 
                 if (js_type != NULL) {
-                    json_object_set_new(js_type, shortname, json_integer(st->tstats[u].value));
+                    json_object_set_new(js_type, stat_name, json_integer(st->tstats[u].value));
 
                     if (flags & JSON_STATS_DELTAS) {
-                        char deltaname[strlen(shortname) + strlen(delta_suffix) + 1];
-                        snprintf(deltaname, sizeof(deltaname), "%s%s",
-                            shortname, delta_suffix);
+                        char deltaname[strlen(stat_name) + strlen(delta_suffix) + 1];
+                        snprintf(deltaname, sizeof(deltaname), "%s%s", stat_name, delta_suffix);
                         json_object_set_new(js_type, deltaname,
                             json_integer(st->tstats[u].value - st->tstats[u].pvalue));
                     }
                 }
+            }
+            if (tm_name != NULL) {
+                DEBUG_VALIDATE_BUG_ON(thread == NULL);
+                json_object_set_new(threads, tm_name, thread);
             }
         }
         json_object_set_new(js_stats, "threads", threads);
@@ -302,7 +339,7 @@ static int JsonStatsLogger(ThreadVars *tv, void *thread_data, const StatsTable *
     if (unlikely(js == NULL))
         return 0;
     char timebuf[64];
-    CreateIsoTimeString(&tval, timebuf, sizeof(timebuf));
+    CreateIsoTimeString(SCTIME_FROM_TIMEVAL(&tval), timebuf, sizeof(timebuf));
     json_object_set_new(js, "timestamp", json_string(timebuf));
     json_object_set_new(js, "event_type", json_string("stats"));
 
@@ -345,7 +382,7 @@ static TmEcode JsonStatsLogThreadInit(ThreadVars *t, const void *initdata, void 
     /* Use the Output Context (file pointer and mutex) */
     aft->statslog_ctx = ((OutputCtx *)initdata)->data;
 
-    aft->file_ctx = LogFileEnsureExists(aft->statslog_ctx->file_ctx, t->id);
+    aft->file_ctx = LogFileEnsureExists(t->id, aft->statslog_ctx->file_ctx);
     if (!aft->file_ctx) {
         goto error_exit;
     }
@@ -377,88 +414,6 @@ static TmEcode JsonStatsLogThreadDeinit(ThreadVars *t, void *data)
     return TM_ECODE_OK;
 }
 
-static void OutputStatsLogDeinit(OutputCtx *output_ctx)
-{
-
-    OutputStatsCtx *stats_ctx = output_ctx->data;
-    LogFileCtx *logfile_ctx = stats_ctx->file_ctx;
-    LogFileFreeCtx(logfile_ctx);
-    SCFree(stats_ctx);
-    SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "stats.json"
-static OutputInitResult OutputStatsLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-
-    if (!StatsEnabled()) {
-        SCLogError(SC_ERR_STATS_LOG_GENERIC,
-                "stats.json: stats are disabled globally: set stats.enabled to true. "
-                "See %s/configuration/suricata-yaml.html#stats", GetDocURL());
-        return result;
-    }
-
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_STATS_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (stats_decoder_events &&
-            strcmp(stats_decoder_events_prefix, "decoder") == 0) {
-        SCLogWarning(SC_WARN_EVE_MISSING_EVENTS, "json stats will not display "
-                "all decoder events correctly. See #2225. Set a prefix in "
-                "stats.decoder-events-prefix.");
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputStatsCtx *stats_ctx = SCMalloc(sizeof(OutputStatsCtx));
-    if (unlikely(stats_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-    stats_ctx->flags = JSON_STATS_TOTALS;
-
-    if (conf != NULL) {
-        const char *totals = ConfNodeLookupChildValue(conf, "totals");
-        const char *threads = ConfNodeLookupChildValue(conf, "threads");
-        const char *deltas = ConfNodeLookupChildValue(conf, "deltas");
-        SCLogDebug("totals %s threads %s deltas %s", totals, threads, deltas);
-
-        if (totals != NULL && ConfValIsFalse(totals)) {
-            stats_ctx->flags &= ~JSON_STATS_TOTALS;
-        }
-        if (threads != NULL && ConfValIsTrue(threads)) {
-            stats_ctx->flags |= JSON_STATS_THREADS;
-        }
-        if (deltas != NULL && ConfValIsTrue(deltas)) {
-            stats_ctx->flags |= JSON_STATS_DELTAS;
-        }
-        SCLogDebug("stats_ctx->flags %08x", stats_ctx->flags);
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(stats_ctx);
-        return result;
-    }
-
-    stats_ctx->file_ctx = file_ctx;
-
-    output_ctx->data = stats_ctx;
-    output_ctx->DeInit = OutputStatsLogDeinit;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
 static void OutputStatsLogDeinitSub(OutputCtx *output_ctx)
 {
     OutputStatsCtx *stats_ctx = output_ctx->data;
@@ -466,15 +421,15 @@ static void OutputStatsLogDeinitSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputStatsLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ajt = parent_ctx->data;
 
     if (!StatsEnabled()) {
-        SCLogError(SC_ERR_STATS_LOG_GENERIC,
-                "eve.stats: stats are disabled globally: set stats.enabled to true. "
-                "See %s/configuration/suricata-yaml.html#stats", GetDocURL());
+        SCLogError("eve.stats: stats are disabled globally: set stats.enabled to true. "
+                   "See %s/configuration/suricata-yaml.html#stats",
+                GetDocURL());
         return result;
     }
 
@@ -484,35 +439,38 @@ static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_
 
     if (stats_decoder_events &&
             strcmp(stats_decoder_events_prefix, "decoder") == 0) {
-        SCLogWarning(SC_WARN_EVE_MISSING_EVENTS, "eve.stats will not display "
-                "all decoder events correctly. See #2225. Set a prefix in "
-                "stats.decoder-events-prefix.");
+        SCLogWarning("eve.stats will not display "
+                     "all decoder events correctly. See ticket #2225. Set a prefix in "
+                     "stats.decoder-events-prefix.");
     }
 
     stats_ctx->flags = JSON_STATS_TOTALS;
 
     if (conf != NULL) {
-        const char *totals = ConfNodeLookupChildValue(conf, "totals");
-        const char *threads = ConfNodeLookupChildValue(conf, "threads");
-        const char *deltas = ConfNodeLookupChildValue(conf, "deltas");
+        const char *totals = SCConfNodeLookupChildValue(conf, "totals");
+        const char *threads = SCConfNodeLookupChildValue(conf, "threads");
+        const char *deltas = SCConfNodeLookupChildValue(conf, "deltas");
+        const char *zero_counters = SCConfNodeLookupChildValue(conf, "null-values");
         SCLogDebug("totals %s threads %s deltas %s", totals, threads, deltas);
 
-        if ((totals != NULL && ConfValIsFalse(totals)) &&
-                (threads != NULL && ConfValIsFalse(threads))) {
+        if ((totals != NULL && SCConfValIsFalse(totals)) &&
+                (threads != NULL && SCConfValIsFalse(threads))) {
             SCFree(stats_ctx);
-            SCLogError(SC_ERR_JSON_STATS_LOG_NEGATED,
-                    "Cannot disable both totals and threads in stats logging");
+            SCLogError("Cannot disable both totals and threads in stats logging");
             return result;
         }
 
-        if (totals != NULL && ConfValIsFalse(totals)) {
+        if (totals != NULL && SCConfValIsFalse(totals)) {
             stats_ctx->flags &= ~JSON_STATS_TOTALS;
         }
-        if (threads != NULL && ConfValIsTrue(threads)) {
+        if (threads != NULL && SCConfValIsTrue(threads)) {
             stats_ctx->flags |= JSON_STATS_THREADS;
         }
-        if (deltas != NULL && ConfValIsTrue(deltas)) {
+        if (deltas != NULL && SCConfValIsTrue(deltas)) {
             stats_ctx->flags |= JSON_STATS_DELTAS;
+        }
+        if (zero_counters != NULL && SCConfValIsFalse(zero_counters)) {
+            stats_ctx->flags |= JSON_STATS_NO_ZEROES;
         }
         SCLogDebug("stats_ctx->flags %08x", stats_ctx->flags);
     }
@@ -523,7 +481,14 @@ static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_
         return result;
     }
 
-    stats_ctx->file_ctx = ajt->file_ctx;
+    SCLogDebug("Preparing file context for stats submodule logger");
+    /* prepared by suricata-main */
+    stats_ctx->file_ctx = LogFileEnsureExists(0, ajt->file_ctx);
+    if (!stats_ctx->file_ctx) {
+        SCFree(stats_ctx);
+        SCFree(output_ctx);
+        return result;
+    }
 
     output_ctx->data = stats_ctx;
     output_ctx->DeInit = OutputStatsLogDeinitSub;
@@ -534,13 +499,12 @@ static OutputInitResult OutputStatsLogInitSub(ConfNode *conf, OutputCtx *parent_
 }
 
 void JsonStatsLogRegister(void) {
-    /* register as separate module */
-    OutputRegisterStatsModule(LOGGER_JSON_STATS, MODULE_NAME, "stats-json",
-        OutputStatsLogInit, JsonStatsLogger, JsonStatsLogThreadInit,
-        JsonStatsLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
-    OutputRegisterStatsSubModule(LOGGER_JSON_STATS, "eve-log", MODULE_NAME,
-        "eve-log.stats", OutputStatsLogInitSub, JsonStatsLogger,
-        JsonStatsLogThreadInit, JsonStatsLogThreadDeinit, NULL);
+    /* register as child of eve-log */
+    OutputRegisterStatsSubModule(LOGGER_JSON_STATS, "eve-log", MODULE_NAME, "eve-log.stats",
+            OutputStatsLogInitSub, JsonStatsLogger, JsonStatsLogThreadInit,
+            JsonStatsLogThreadDeinit);
 }
+
+#ifdef UNITTESTS
+#include "tests/output-json-stats.c"
+#endif

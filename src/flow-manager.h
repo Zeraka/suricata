@@ -21,8 +21,11 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __FLOW_MANAGER_H__
-#define __FLOW_MANAGER_H__
+#ifndef SURICATA_FLOW_MANAGER_H
+#define SURICATA_FLOW_MANAGER_H
+
+void FlowWakeupFlowManagerThread(void);
+void FlowWakeupFlowRecyclerThread(void);
 
 #define FlowTimeoutsReset() FlowTimeoutsInit()
 void FlowTimeoutsInit(void);
@@ -34,4 +37,4 @@ void FlowDisableFlowRecyclerThread(void);
 void TmModuleFlowManagerRegister (void);
 void TmModuleFlowRecyclerRegister (void);
 
-#endif /* __FLOW_MANAGER_H__ */
+#endif /* SURICATA_FLOW_MANAGER_H */

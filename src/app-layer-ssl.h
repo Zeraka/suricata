@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2012 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,14 +23,21 @@
  *
  */
 
-#ifndef __APP_LAYER_SSL_H__
-#define __APP_LAYER_SSL_H__
+#ifndef SURICATA_APP_LAYER_SSL_H
+#define SURICATA_APP_LAYER_SSL_H
 
-#include "app-layer-protos.h"
-#include "app-layer-parser.h"
-#include "decode-events.h"
 #include "util-ja3.h"
-#include "queue.h"
+#include "rust.h"
+
+enum TlsFrameTypes {
+    TLS_FRAME_PDU = 0, /**< whole PDU, so header + data */
+    TLS_FRAME_HDR,     /**< only header portion */
+    TLS_FRAME_DATA,    /**< only data portion */
+    TLS_FRAME_ALERT_DATA,
+    TLS_FRAME_HB_DATA,
+    TLS_FRAME_SSLV2_HDR,
+    TLS_FRAME_SSLV2_PDU,
+};
 
 enum {
     /* TLS protocol messages */
@@ -38,6 +45,7 @@ enum {
     TLS_DECODER_EVENT_INVALID_TLS_HEADER,
     TLS_DECODER_EVENT_INVALID_RECORD_VERSION,
     TLS_DECODER_EVENT_INVALID_RECORD_TYPE,
+    TLS_DECODER_EVENT_INVALID_RECORD_LENGTH,
     TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE,
     TLS_DECODER_EVENT_HEARTBEAT,
     TLS_DECODER_EVENT_INVALID_HEARTBEAT,
@@ -48,6 +56,7 @@ enum {
     TLS_DECODER_EVENT_INVALID_SNI_TYPE,
     TLS_DECODER_EVENT_INVALID_SNI_LENGTH,
     TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET,
+    TLS_DECODER_EVENT_INVALID_ALERT,
     /* Certificates decoding messages */
     TLS_DECODER_EVENT_INVALID_CERTIFICATE,
     TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH,
@@ -65,11 +74,21 @@ enum {
     TLS_DECODER_EVENT_INVALID_SSL_RECORD,
 };
 
-enum {
-    TLS_STATE_IN_PROGRESS = 0,
-    TLS_STATE_CERT_READY = 1,
-    TLS_HANDSHAKE_DONE = 2,
-    TLS_STATE_FINISHED = 3
+enum TlsStateClient {
+    TLS_STATE_CLIENT_IN_PROGRESS = 0,
+    TLS_STATE_CLIENT_HELLO_DONE,
+    TLS_STATE_CLIENT_CERT_DONE,
+    TLS_STATE_CLIENT_HANDSHAKE_DONE,
+    TLS_STATE_CLIENT_FINISHED,
+};
+
+enum TlsStateServer {
+    TLS_STATE_SERVER_IN_PROGRESS = 0,
+    TLS_STATE_SERVER_HELLO,
+    TLS_STATE_SERVER_CERT_DONE,
+    TLS_STATE_SERVER_HELLO_DONE,
+    TLS_STATE_SERVER_HANDSHAKE_DONE,
+    TLS_STATE_SERVER_FINISHED,
 };
 
 /* Flag to indicate that server will now on send encrypted msgs */
@@ -93,20 +112,11 @@ enum {
 #define SSL_AL_FLAG_STATE_SERVER_KEYX           BIT_U32(12)
 #define SSL_AL_FLAG_STATE_UNKNOWN               BIT_U32(13)
 
-/* flag to indicate that session is finished */
-#define SSL_AL_FLAG_STATE_FINISHED              BIT_U32(14)
-
 /* flags specific to HeartBeat state */
 #define SSL_AL_FLAG_HB_INFLIGHT                 BIT_U32(15)
 #define SSL_AL_FLAG_HB_CLIENT_INIT              BIT_U32(16)
 #define SSL_AL_FLAG_HB_SERVER_INIT              BIT_U32(17)
 
-/* flag to indicate that handshake is done */
-#define SSL_AL_FLAG_HANDSHAKE_DONE              BIT_U32(18)
-
-/* A session ID in the Client Hello message, indicating the client
-   wants to resume a session */
-#define SSL_AL_FLAG_SSL_CLIENT_SESSION_ID       BIT_U32(19)
 /* Session resumed without a full handshake */
 #define SSL_AL_FLAG_SESSION_RESUMED             BIT_U32(20)
 
@@ -121,6 +131,14 @@ enum {
    used by 0-RTT. */
 #define SSL_AL_FLAG_EARLY_DATA                  BIT_U32(23)
 
+/* flag to indicate that server random was filled */
+#define TLS_TS_RANDOM_SET BIT_U32(24)
+
+/* flag to indicate that client random was filled */
+#define TLS_TC_RANDOM_SET BIT_U32(25)
+
+#define SSL_AL_FLAG_NEED_CLIENT_CERT BIT_U32(26)
+
 /* config flags */
 #define SSL_TLS_LOG_PEM                         (1 << 0)
 
@@ -128,6 +146,8 @@ enum {
 #define SSL_EXTENSION_SNI                       0x0000
 #define SSL_EXTENSION_ELLIPTIC_CURVES           0x000a
 #define SSL_EXTENSION_EC_POINT_FORMATS          0x000b
+#define SSL_EXTENSION_SIGNATURE_ALGORITHMS      0x000d
+#define SSL_EXTENSION_ALPN                      0x0010
 #define SSL_EXTENSION_SESSION_TICKET            0x0023
 #define SSL_EXTENSION_EARLY_DATA                0x002a
 #define SSL_EXTENSION_SUPPORTED_VERSIONS        0x002b
@@ -135,46 +155,14 @@ enum {
 /* SNI types */
 #define SSL_SNI_TYPE_HOST_NAME                  0
 
-/* Max string length of the TLS version string */
-#define SSL_VERSION_MAX_STRLEN 20
-
-/* SSL versions.  We'll use a unified format for all, with the top byte
- * holding the major version and the lower byte the minor version */
-enum {
-    TLS_VERSION_UNKNOWN = 0x0000,
-    SSL_VERSION_2 = 0x0200,
-    SSL_VERSION_3 = 0x0300,
-    TLS_VERSION_10 = 0x0301,
-    TLS_VERSION_11 = 0x0302,
-    TLS_VERSION_12 = 0x0303,
-    TLS_VERSION_13 = 0x0304,
-    TLS_VERSION_13_DRAFT28 = 0x7f1c,
-    TLS_VERSION_13_DRAFT27 = 0x7f1b,
-    TLS_VERSION_13_DRAFT26 = 0x7f1a,
-    TLS_VERSION_13_DRAFT25 = 0x7f19,
-    TLS_VERSION_13_DRAFT24 = 0x7f18,
-    TLS_VERSION_13_DRAFT23 = 0x7f17,
-    TLS_VERSION_13_DRAFT22 = 0x7f16,
-    TLS_VERSION_13_DRAFT21 = 0x7f15,
-    TLS_VERSION_13_DRAFT20 = 0x7f14,
-    TLS_VERSION_13_DRAFT19 = 0x7f13,
-    TLS_VERSION_13_DRAFT18 = 0x7f12,
-    TLS_VERSION_13_DRAFT17 = 0x7f11,
-    TLS_VERSION_13_DRAFT16 = 0x7f10,
-    TLS_VERSION_13_PRE_DRAFT16 = 0x7f01,
-    TLS_VERSION_13_DRAFT20_FB = 0xfb14,
-    TLS_VERSION_13_DRAFT21_FB = 0xfb15,
-    TLS_VERSION_13_DRAFT22_FB = 0xfb16,
-    TLS_VERSION_13_DRAFT23_FB = 0xfb17,
-    TLS_VERSION_13_DRAFT26_FB = 0xfb1a,
-};
+/* TLS random bytes for the sticky buffer */
+#define TLS_RANDOM_LEN 32
 
 typedef struct SSLCertsChain_ {
     uint8_t *cert_data;
     uint32_t cert_len;
     TAILQ_ENTRY(SSLCertsChain_) next;
 } SSLCertsChain;
-
 
 typedef struct SSLStateConnp_ {
     /* record length */
@@ -183,29 +171,28 @@ typedef struct SSLStateConnp_ {
     uint32_t record_lengths_length;
 
     /* offset of the beginning of the current message (including header) */
-    uint32_t message_start;
     uint32_t message_length;
 
     uint16_t version;
     uint8_t content_type;
 
     uint8_t handshake_type;
-    uint32_t handshake_length;
 
     /* the no of bytes processed in the currently parsed record */
-    uint16_t bytes_processed;
-    /* the no of bytes processed in the currently parsed handshake */
-    uint16_t hs_bytes_processed;
+    uint32_t bytes_processed;
 
     uint16_t session_id_length;
 
+    uint8_t random[TLS_RANDOM_LEN];
     char *cert0_subject;
     char *cert0_issuerdn;
     char *cert0_serial;
-    time_t cert0_not_before;
-    time_t cert0_not_after;
+    int64_t cert0_not_before;
+    int64_t cert0_not_after;
     char *cert0_fingerprint;
 
+    char **cert0_sans;
+    uint16_t cert0_sans_len;
     /* ssl server name indication extension */
     char *sni;
 
@@ -213,16 +200,23 @@ typedef struct SSLStateConnp_ {
 
     TAILQ_HEAD(, SSLCertsChain_) certs;
 
+    uint8_t *certs_buffer;
+    uint32_t certs_buffer_size;
+
     uint32_t cert_log_flag;
 
     JA3Buffer *ja3_str;
     char *ja3_hash;
 
-    /* buffer for the tls record.
-     * We use a malloced buffer, if the record is fragmented */
-    uint8_t *trec;
-    uint32_t trec_len;
-    uint32_t trec_pos;
+    HandshakeParams *hs;
+
+    /* handshake tls fragmentation buffer. Handshake messages can be fragmented over multiple
+     * TLS records. */
+    uint8_t *hs_buffer;
+    uint8_t hs_buffer_message_type;
+    uint32_t hs_buffer_message_size;
+    uint32_t hs_buffer_size;   /**< allocation size */
+    uint32_t hs_buffer_offset; /**< write offset */
 } SSLStateConnp;
 
 /**
@@ -233,13 +227,14 @@ typedef struct SSLStateConnp_ {
 typedef struct SSLState_ {
     Flow *f;
 
+    AppLayerStateData state_data;
     AppLayerTxData tx_data;
 
     /* holds some state flags we need */
     uint32_t flags;
 
     /* there might be a better place to store this*/
-    uint16_t hb_record_len;
+    uint32_t hb_record_len;
 
     uint16_t events;
 
@@ -247,18 +242,17 @@ typedef struct SSLState_ {
 
     SSLStateConnp *curr_connp;
 
+    enum TlsStateClient client_state;
+    enum TlsStateServer server_state;
+
     SSLStateConnp client_connp;
     SSLStateConnp server_connp;
-
-    DetectEngineState *de_state;
-    AppLayerDecoderEvents *decoder_events;
 } SSLState;
 
 void RegisterSSLParsers(void);
-void SSLParserRegisterTests(void);
-void SSLSetEvent(SSLState *ssl_state, uint8_t event);
-void SSLVersionToString(uint16_t, char *);
 void SSLEnableJA3(void);
 bool SSLJA3IsEnabled(void);
+void SSLEnableJA4(void);
+bool SSLJA4IsEnabled(void);
 
-#endif /* __APP_LAYER_SSL_H__ */
+#endif /* SURICATA_APP_LAYER_SSL_H */

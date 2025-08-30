@@ -1,4 +1,4 @@
-/* Copyright (C) 2011-2016 Open Information Security Foundation
+/* Copyright (C) 2011-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,15 +17,18 @@
 
 #include "suricata-common.h"
 #include "conf.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-ioctl.h"
 #include "util-misc.h"
+#include "util-dpdk.h"
 
 #include "device-storage.h"
+#include "util-debug.h"
+#include "util-affinity.h"
 
 #define MAX_DEVNAME 10
 
-static int g_bypass_storage_id = -1;
+static LiveDevStorageId g_bypass_storage_id = { .id = -1 };
 
 /**
  * \file
@@ -38,6 +41,11 @@ static int g_bypass_storage_id = -1;
 /** private device list */
 static TAILQ_HEAD(, LiveDevice_) live_devices =
     TAILQ_HEAD_INITIALIZER(live_devices);
+
+typedef struct LiveDeviceName_ {
+    char *dev; /**< the device (e.g. "eth0") */
+    TAILQ_ENTRY(LiveDeviceName_) next;
+} LiveDeviceName;
 
 /** List of the name of devices
  *
@@ -130,6 +138,12 @@ int LiveRegisterDevice(const char *dev)
         return -1;
     }
 
+    int id = LiveGetDeviceCount();
+    if (id > UINT16_MAX) {
+        SCFree(pd);
+        return -1;
+    }
+
     pd->dev = SCStrdup(dev);
     if (unlikely(pd->dev == NULL)) {
         SCFree(pd);
@@ -141,7 +155,7 @@ int LiveRegisterDevice(const char *dev)
     SC_ATOMIC_INIT(pd->pkts);
     SC_ATOMIC_INIT(pd->drop);
     SC_ATOMIC_INIT(pd->invalid_checksums);
-    pd->id = LiveGetDeviceCount();
+    pd->id = (uint16_t)id;
     TAILQ_INSERT_TAIL(&live_devices, pd, next);
 
     SCLogDebug("Device \"%s\" registered and created.", dev);
@@ -160,6 +174,20 @@ int LiveGetDeviceCount(void)
 
     TAILQ_FOREACH(pd, &live_devices, next) {
         i++;
+    }
+
+    return i;
+}
+
+int LiveGetDeviceCountWithoutAssignedThreading(void)
+{
+    int i = 0;
+    LiveDevice *pd;
+
+    TAILQ_FOREACH (pd, &live_devices, next) {
+        if (GetAffinityTypeForNameAndIface("worker-cpu-set", pd->dev) == NULL) {
+            i++;
+        }
     }
 
     return i;
@@ -189,49 +217,6 @@ const char *LiveGetDeviceName(int number)
     return NULL;
 }
 
-/**
- *  \brief Get the number of pre registered devices
- *
- *  \retval cnt the number of pre registered devices
- */
-int LiveGetDeviceNameCount(void)
-{
-    int i = 0;
-    LiveDeviceName *pd;
-
-    TAILQ_FOREACH(pd, &pre_live_devices, next) {
-        i++;
-    }
-
-    return i;
-}
-
-/**
- *  \brief Get a pointer to the pre device name at idx
- *
- *  \param number idx of the pre device in our list
- *
- *  \retval ptr pointer to the string containing the device
- *  \retval NULL on error
- */
-const char *LiveGetDeviceNameName(int number)
-{
-    int i = 0;
-    LiveDeviceName *pd;
-
-    TAILQ_FOREACH(pd, &pre_live_devices, next) {
-        if (i == number) {
-            return pd->dev;
-        }
-
-        i++;
-    }
-
-    return NULL;
-}
-
-
-
 /** \internal
  *  \brief Shorten a device name that is to long
  *
@@ -245,6 +230,11 @@ static int LiveSafeDeviceName(const char *devname, char *newdevname, size_t dest
 
     /* If we have to shorten the interface name */
     if (devnamelen > MAX_DEVNAME) {
+        /* special mode for DPDK pci addresses */
+        if (devnamelen >= 5 && strncmp(devname, "0000:", 5) == 0) {
+            strlcpy(newdevname, devname + 5, destlen);
+            return 0;
+        }
 
         /* IF the dest length is over 10 chars long it will not do any
          * good for the shortening. The shortening is done due to the
@@ -260,7 +250,7 @@ static int LiveSafeDeviceName(const char *devname, char *newdevname, size_t dest
 
         ShortenString(devname, newdevname, destlen, '.');
 
-        SCLogInfo("Shortening device name to: %s", newdevname);
+        SCLogInfo("%s: shortening device name to %s", devname, newdevname);
     } else {
         strlcpy(newdevname, devname, destlen);
     }
@@ -277,11 +267,10 @@ static int LiveSafeDeviceName(const char *devname, char *newdevname, size_t dest
  */
 LiveDevice *LiveGetDevice(const char *name)
 {
-    int i = 0;
     LiveDevice *pd;
 
     if (name == NULL) {
-        SCLogWarning(SC_ERR_INVALID_VALUE, "Name of device should not be null");
+        SCLogWarning("Name of device should not be null");
         return NULL;
     }
 
@@ -289,8 +278,6 @@ LiveDevice *LiveGetDevice(const char *name)
         if (!strcmp(name, pd->dev)) {
             return pd;
         }
-
-        i++;
     }
 
     return NULL;
@@ -311,15 +298,15 @@ int LiveBuildDeviceList(const char *runmode)
 
 int LiveBuildDeviceListCustom(const char *runmode, const char *itemname)
 {
-    ConfNode *base = ConfGetNode(runmode);
-    ConfNode *child;
+    SCConfNode *base = SCConfGetNode(runmode);
+    SCConfNode *child;
     int i = 0;
 
     if (base == NULL)
         return 0;
 
     TAILQ_FOREACH(child, &base->head, next) {
-        ConfNode *subchild;
+        SCConfNode *subchild;
         TAILQ_FOREACH(subchild, &child->head, next) {
             if ((!strcmp(subchild->name, itemname))) {
                 if (!strcmp(subchild->val, "default"))
@@ -339,27 +326,33 @@ int LiveBuildDeviceListCustom(const char *runmode, const char *itemname)
  *
  * This can be useful in the case, this is not a real interface.
  */
-void LiveDeviceHasNoStats()
+void LiveDeviceHasNoStats(void)
 {
     live_devices_stats = 0;
 }
 
-int LiveDeviceListClean()
+int LiveDeviceListClean(void)
 {
     SCEnter();
     LiveDevice *pd, *tpd;
 
+    /* dpdk: need to close all devices before freeing them. */
+    TAILQ_FOREACH (pd, &live_devices, next) {
+        DPDKCloseDevice(pd);
+    }
     TAILQ_FOREACH_SAFE(pd, &live_devices, next, tpd) {
         if (live_devices_stats) {
-            SCLogNotice("Stats for '%s':  pkts: %" PRIu64", drop: %" PRIu64 " (%.2f%%), invalid chksum: %" PRIu64,
-                    pd->dev,
-                    SC_ATOMIC_GET(pd->pkts),
-                    SC_ATOMIC_GET(pd->drop),
-                    100 * (SC_ATOMIC_GET(pd->drop) * 1.0) / SC_ATOMIC_GET(pd->pkts),
+            SCLogNotice("%s: packets: %" PRIu64 ", drops: %" PRIu64
+                        " (%.2f%%), invalid chksum: %" PRIu64,
+                    pd->dev, SC_ATOMIC_GET(pd->pkts), SC_ATOMIC_GET(pd->drop),
+                    SC_ATOMIC_GET(pd->pkts) > 0 ? 100 * ((double)SC_ATOMIC_GET(pd->drop)) /
+                                                          (double)SC_ATOMIC_GET(pd->pkts)
+                                                : 0,
                     SC_ATOMIC_GET(pd->invalid_checksums));
         }
 
         RestoreIfaceOffloading(pd);
+        DPDKFreeDevice(pd);
 
         if (pd->dev)
             SCFree(pd->dev);
@@ -502,7 +495,7 @@ int LiveDevUseBypass(LiveDevice *dev)
 {
     BypassInfo *bpinfo = SCCalloc(1, sizeof(*bpinfo));
     if (bpinfo == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Can't allocate bypass info structure");
+        SCLogError("Can't allocate bypass info structure");
         return -1;
     }
 
@@ -511,25 +504,6 @@ int LiveDevUseBypass(LiveDevice *dev)
 
     LiveDevSetStorageById(dev, g_bypass_storage_id, bpinfo);
     return 0;
-}
-
-/**
- * Set number of currently bypassed flows for a protocol family
- *
- * \param dev pointer to LiveDevice to set stats for
- * \param cnt number of currently bypassed flows
- * \param family AF_INET to set IPv4 count or AF_INET6 to set IPv6 count
- */
-void LiveDevSetBypassStats(LiveDevice *dev, uint64_t cnt, int family)
-{
-    BypassInfo *bpfdata = LiveDevGetStorageById(dev, g_bypass_storage_id);
-    if (bpfdata) {
-        if (family == AF_INET) {
-            SC_ATOMIC_SET(bpfdata->ipv4_hash_count, cnt);
-        } else if (family == AF_INET6) {
-            SC_ATOMIC_SET(bpfdata->ipv6_hash_count, cnt);
-        }
-    }
 }
 
 /**
@@ -590,7 +564,7 @@ void LiveDevAddBypassFail(LiveDevice *dev, uint64_t cnt, int family)
 }
 
 /**
- * Increase number of currently succesfully bypassed flows for a protocol family
+ * Increase number of currently successfully bypassed flows for a protocol family
  *
  * \param dev pointer to LiveDevice to set stats for
  * \param cnt number of flows to add
@@ -611,8 +585,11 @@ void LiveDevAddBypassSuccess(LiveDevice *dev, uint64_t cnt, int family)
 #ifdef BUILD_UNIX_SOCKET
 TmEcode LiveDeviceGetBypassedStats(json_t *cmd, json_t *answer, void *data)
 {
-    LiveDevice *ldev = NULL, *ndev;
-
+    if (g_bypass_storage_id.id < 0) {
+        json_object_set_new(answer, "message", json_string("Bypass not enabled"));
+        SCReturnInt(TM_ECODE_FAILED);
+    }
+    LiveDevice *ldev = NULL, *ndev = NULL;
     json_t *ifaces = NULL;
     while(LiveDeviceForEach(&ldev, &ndev)) {
         BypassInfo *bpinfo = LiveDevGetStorageById(ldev, g_bypass_storage_id);
@@ -651,3 +628,33 @@ TmEcode LiveDeviceGetBypassedStats(json_t *cmd, json_t *answer, void *data)
     SCReturnInt(TM_ECODE_FAILED);
 }
 #endif
+
+uint64_t LiveDevicePktsGet(LiveDevice *dev)
+{
+    return SC_ATOMIC_GET(dev->pkts);
+}
+
+void LiveDevicePktsIncr(LiveDevice *dev)
+{
+    (void)SC_ATOMIC_ADD(dev->pkts, 1);
+}
+
+void LiveDevicePktsAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->pkts, n);
+}
+
+void LiveDeviceDropAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->drop, n);
+}
+
+void LiveDeviceBypassedAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->bypassed, n);
+}
+
+uint64_t LiveDeviceInvalidChecksumsGet(LiveDevice *dev)
+{
+    return SC_ATOMIC_GET(dev->invalid_checksums);
+}

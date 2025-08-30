@@ -24,8 +24,10 @@
  */
 
 #include "suricata-common.h"
+#include "suricata.h"
 #include "stream.h"
 #include "conf.h"
+#include "rust.h"
 
 #include "app-layer-detect-proto.h"
 #include "app-layer-parser.h"
@@ -40,51 +42,49 @@ AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *p, int e
     const char *ip_proto_str = NULL;
 
     if (p == NULL)
-        FatalError(SC_ERR_FATAL, "Call to %s with NULL pointer.", __FUNCTION__);
+        FatalError("Call to %s with NULL pointer.", __FUNCTION__);
 
     alproto = StringToAppProto(p->name);
     if (alproto == ALPROTO_UNKNOWN || alproto == ALPROTO_FAILED)
-        FatalError(SC_ERR_FATAL, "Unknown or invalid AppProto '%s'.", p->name);
+        FatalError("Unknown or invalid AppProto '%s'.", p->name);
+
+    BUG_ON(strcmp(p->name, AppProtoToString(alproto)) != 0);
 
     ip_proto_str = IpProtoToString(p->ip_proto);
     if (ip_proto_str == NULL)
-        FatalError(SC_ERR_FATAL, "Unknown or unsupported ip_proto field in parser '%s'", p->name);
+        FatalError("Unknown or unsupported ip_proto field in parser '%s'", p->name);
 
     SCLogDebug("%s %s protocol detection enabled.", ip_proto_str, p->name);
 
     AppLayerProtoDetectRegisterProtocol(alproto, p->name);
 
     if (p->ProbeTS == NULL && p->ProbeTC == NULL) {
+        BUG_ON(p->default_port != NULL);
         return alproto;
     }
 
     if (RunmodeIsUnittests()) {
 
         SCLogDebug("Unittest mode, registering default configuration.");
-        AppLayerProtoDetectPPRegister(p->ip_proto, p->default_port,
-                alproto, p->min_depth, p->max_depth, STREAM_TOSERVER,
-                p->ProbeTS, p->ProbeTC);
+        SCAppLayerProtoDetectPPRegister(p->ip_proto, p->default_port, alproto, p->min_depth,
+                p->max_depth, STREAM_TOSERVER, p->ProbeTS, p->ProbeTC);
 
     }
     else {
 
-        if (!AppLayerProtoDetectPPParseConfPorts(ip_proto_str, p->ip_proto,
-                    p->name, alproto, p->min_depth, p->max_depth,
-                    p->ProbeTS, p->ProbeTC)) {
+        if (!SCAppLayerProtoDetectPPParseConfPorts(ip_proto_str, p->ip_proto, p->name, alproto,
+                    p->min_depth, p->max_depth, p->ProbeTS, p->ProbeTC)) {
             if (enable_default != 0) {
                 SCLogDebug("No %s app-layer configuration, enabling %s"
                         " detection %s detection on port %s.",
                         p->name, p->name, ip_proto_str, p->default_port);
-                AppLayerProtoDetectPPRegister(p->ip_proto,
-                        p->default_port, alproto,
-                        p->min_depth, p->max_depth, STREAM_TOSERVER,
-                        p->ProbeTS, p->ProbeTC);
+                SCAppLayerProtoDetectPPRegister(p->ip_proto, p->default_port, alproto, p->min_depth,
+                        p->max_depth, STREAM_TOSERVER, p->ProbeTS, p->ProbeTC);
             } else {
                 SCLogDebug("No %s app-layer configuration for detection port (%s).",
                         p->name, ip_proto_str);
             }
         }
-
     }
 
     return alproto;
@@ -95,14 +95,16 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
     const char *ip_proto_str = NULL;
 
     if (p == NULL)
-        FatalError(SC_ERR_FATAL, "Call to %s with NULL pointer.", __FUNCTION__);
+        FatalError("Call to %s with NULL pointer.", __FUNCTION__);
 
-    if (alproto == ALPROTO_UNKNOWN || alproto >= ALPROTO_FAILED)
-        FatalError(SC_ERR_FATAL, "Unknown or invalid AppProto '%s'.", p->name);
+    if (!AppProtoIsValid(alproto))
+        FatalError("Unknown or invalid AppProto '%s'.", p->name);
+
+    BUG_ON(strcmp(p->name, AppProtoToString(alproto)) != 0);
 
     ip_proto_str = IpProtoToString(p->ip_proto);
     if (ip_proto_str == NULL)
-        FatalError(SC_ERR_FATAL, "Unknown or unsupported ip_proto field in parser '%s'", p->name);
+        FatalError("Unknown or unsupported ip_proto field in parser '%s'", p->name);
 
     SCLogDebug("Registering %s protocol parser.", p->name);
 
@@ -129,16 +131,12 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
         p->StateGetTxCnt);
 
     /* Transaction handling. */
-    AppLayerParserRegisterGetStateProgressCompletionStatus(alproto,
-        p->StateGetProgressCompletionStatus);
+    AppLayerParserRegisterStateProgressCompletionStatus(alproto, p->complete_ts, p->complete_tc);
+
     AppLayerParserRegisterGetStateProgressFunc(p->ip_proto, alproto,
         p->StateGetProgress);
     AppLayerParserRegisterGetTx(p->ip_proto, alproto,
         p->StateGetTx);
-
-    /* What is this being registered for? */
-    AppLayerParserRegisterDetectStateFuncs(p->ip_proto, alproto,
-        p->GetTxDetectState, p->SetTxDetectState);
 
     if (p->StateGetEventInfo) {
         AppLayerParserRegisterGetEventInfo(p->ip_proto, alproto,
@@ -148,17 +146,12 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
         AppLayerParserRegisterGetEventInfoById(p->ip_proto, alproto,
                 p->StateGetEventInfoById);
     }
-    if (p->StateGetEvents) {
-        AppLayerParserRegisterGetEventsFunc(p->ip_proto, alproto,
-                p->StateGetEvents);
-    }
     if (p->LocalStorageAlloc && p->LocalStorageFree) {
         AppLayerParserRegisterLocalStorageFunc(p->ip_proto, alproto,
                 p->LocalStorageAlloc, p->LocalStorageFree);
     }
-    if (p->StateGetFiles) {
-        AppLayerParserRegisterGetFilesFunc(p->ip_proto, alproto,
-                p->StateGetFiles);
+    if (p->GetTxFiles) {
+        AppLayerParserRegisterGetTxFilesFunc(p->ip_proto, alproto, p->GetTxFiles);
     }
 
     if (p->GetTxIterator) {
@@ -171,6 +164,10 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
                 p->GetTxData);
     }
 
+    if (p->GetStateData) {
+        AppLayerParserRegisterStateDataFunc(p->ip_proto, alproto, p->GetStateData);
+    }
+
     if (p->ApplyTxConfig) {
         AppLayerParserRegisterApplyTxConfigFunc(p->ip_proto, alproto,
                 p->ApplyTxConfig);
@@ -181,6 +178,23 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
                 p->flags);
 
     }
+
+    if (p->GetFrameIdByName && p->GetFrameNameById) {
+        AppLayerParserRegisterGetFrameFuncs(
+                p->ip_proto, alproto, p->GetFrameIdByName, p->GetFrameNameById);
+    }
+
+    if (p->GetStateIdByName && p->GetStateNameById) {
+        AppLayerParserRegisterGetStateFuncs(
+                p->ip_proto, alproto, p->GetStateIdByName, p->GetStateNameById);
+    }
+
+    return 0;
+}
+
+int AppLayerRegisterParserAlias(const char *proto_name, const char *proto_alias)
+{
+    AppLayerProtoDetectRegisterAlias(proto_name, proto_alias);
 
     return 0;
 }

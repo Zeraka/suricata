@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,55 +21,64 @@
  * \author Mike Pomraning <mpomraning@qualys.com>
  */
 
-#ifndef __UTIL_LOGOPENFILE_H__
-#define __UTIL_LOGOPENFILE_H__
+#ifndef SURICATA_UTIL_LOGOPENFILE_H
+#define SURICATA_UTIL_LOGOPENFILE_H
 
+#include "threads.h"
 #include "conf.h"            /* ConfNode   */
 #include "util-buffer.h"
+#include "util-hash.h"
 
 #ifdef HAVE_LIBHIREDIS
 #include "util-log-redis.h"
 #endif /* HAVE_LIBHIREDIS */
 
-#include "suricata-plugin.h"
+#include "output-eve.h"
 
-typedef struct {
-    uint16_t fileno;
-} PcieFile;
+enum LogFileType {
+    LOGFILE_TYPE_FILE,
+    LOGFILE_TYPE_UNIX_DGRAM,
+    LOGFILE_TYPE_UNIX_STREAM,
+    LOGFILE_TYPE_REDIS,
+    /** New style or modular filetypes. */
+    LOGFILE_TYPE_FILETYPE,
+    LOGFILE_TYPE_NOTSET
+};
 
-enum LogFileType { LOGFILE_TYPE_FILE,
-                   LOGFILE_TYPE_SYSLOG,
-                   LOGFILE_TYPE_UNIX_DGRAM,
-                   LOGFILE_TYPE_UNIX_STREAM,
-                   LOGFILE_TYPE_REDIS,
-                   LOGFILE_TYPE_PLUGIN };
+typedef struct ThreadLogFileHashEntry {
+    struct LogFileCtx_ *ctx;
 
-typedef struct SyslogSetup_ {
-    int alert_syslog_level;
-} SyslogSetup;
+    uint64_t thread_id;          /* OS thread identifier */
+    ThreadId internal_thread_id; /* Suri internal thread id; to assist output plugins correlating
+                                    usage */
+    uint16_t slot_number;        /* Slot identifier - used when forming per-thread output names*/
+    bool isopen;
+} ThreadLogFileHashEntry;
 
 struct LogFileCtx_;
 typedef struct LogThreadedFileCtx_ {
-    int slot_count;
     SCMutex mutex;
-    struct LogFileCtx_ **lf_slots;
+    HashTable *ht;
     char *append;
 } LogThreadedFileCtx;
+
+typedef struct LogFileTypeCtx_ {
+    SCEveFileType *filetype;
+    void *init_data;
+    void *thread_data;
+} LogFileTypeCtx;
 
 /** Global structure for Output Context */
 typedef struct LogFileCtx_ {
     union {
         FILE *fp;
-        PcieFile *pcie_fp;
-        LogThreadedFileCtx *threads;
-        void *plugin_data;
 #ifdef HAVE_LIBHIREDIS
         void *redis;
 #endif
     };
+    LogThreadedFileCtx *threads;
 
     union {
-        SyslogSetup syslog_setup;
 #ifdef HAVE_LIBHIREDIS
         RedisSetup redis_setup;
 #endif
@@ -77,8 +86,9 @@ typedef struct LogFileCtx_ {
 
     int (*Write)(const char *buffer, int buffer_len, struct LogFileCtx_ *fp);
     void (*Close)(struct LogFileCtx_ *fp);
+    void (*Flush)(struct LogFileCtx_ *fp);
 
-    SCPluginFileType *plugin;
+    LogFileTypeCtx filetype;
 
     /** It will be locked if the log/alert
      * record cannot be written to the file in one call */
@@ -87,7 +97,7 @@ typedef struct LogFileCtx_ {
     /** When threaded, track of the parent and thread id */
     bool threaded;
     struct LogFileCtx_ *parent;
-    int id;
+    ThreadLogFileHashEntry *entry;
 
     /** the type of file */
     enum LogFileType type;
@@ -97,6 +107,9 @@ typedef struct LogFileCtx_ {
 
     /** File permissions */
     uint32_t filemode;
+
+    /** File buffering */
+    uint32_t buffer_size;
 
     /** Suricata sensor name */
     char *sensor_name;
@@ -116,7 +129,7 @@ typedef struct LogFileCtx_ {
     /**< Used by some alert loggers like the unified ones that append
      * the date onto the end of files. */
     char *prefix;
-    size_t prefix_len;
+    uint32_t prefix_len;
 
     /** Generic size_limit and size_current
      * They must be common to the threads accessing the same file */
@@ -139,31 +152,36 @@ typedef struct LogFileCtx_ {
     /* Flag set when file rotation notification is received. */
     int rotation_flag;
 
-    /* Set to true if the filename should not be timestamped. */
-    bool nostamp;
-
     /* if set to true EVE will add a pcap file record */
     bool is_pcap_offline;
 
     /* Socket types may need to drop events to keep from blocking
      * Suricata. */
     uint64_t dropped;
+
+    uint64_t output_errors;
+
+    /* Track buffered content */
+    uint64_t bytes_since_last_flush;
 } LogFileCtx;
 
 /* Min time (msecs) before trying to reconnect a Unix domain socket */
 #define LOGFILE_RECONN_MIN_TIME     500
 
 /* flags for LogFileCtx */
-#define LOGFILE_HEADER_WRITTEN  0x01
-#define LOGFILE_ALERTS_PRINTED  0x02
 #define LOGFILE_ROTATE_INTERVAL 0x04
+
+/* Default EVE output buffering size */
+#define LOGFILE_EVE_BUFFER_SIZE 0
 
 LogFileCtx *LogFileNewCtx(void);
 int LogFileFreeCtx(LogFileCtx *);
 int LogFileWrite(LogFileCtx *file_ctx, MemBuffer *buffer);
+void LogFileFlush(LogFileCtx *file_ctx);
 
-LogFileCtx *LogFileEnsureExists(LogFileCtx *lf_ctx, int thread_id);
-int SCConfLogOpenGeneric(ConfNode *conf, LogFileCtx *, const char *, int);
+LogFileCtx *LogFileEnsureExists(ThreadId thread_id, LogFileCtx *lf_ctx);
+int SCConfLogOpenGeneric(SCConfNode *conf, LogFileCtx *, const char *, int);
 int SCConfLogReopen(LogFileCtx *);
+bool SCLogOpenThreadedFile(const char *log_path, const char *append, LogFileCtx *parent_ctx);
 
-#endif /* __UTIL_LOGOPENFILE_H__ */
+#endif /* SURICATA_UTIL_LOGOPENFILE_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DECODE_ETHERNET_H__
-#define __DECODE_ETHERNET_H__
+#ifndef SURICATA_DECODE_ETHERNET_H
+#define SURICATA_DECODE_ETHERNET_H
 
 #define ETHERNET_HEADER_LEN           14
 
@@ -33,7 +33,7 @@
 #define ETHERNET_TYPE_PUP             0x0200 /* PUP protocol */
 #define ETHERNET_TYPE_IP              0x0800
 #define ETHERNET_TYPE_ARP             0x0806
-#define ETHERNET_TYPE_BRIDGE          0x6558 /* transparant ethernet bridge (GRE) */
+#define ETHERNET_TYPE_BRIDGE          0x6558 /* transparent ethernet bridge (GRE) */
 #define ETHERNET_TYPE_REVARP          0x8035
 #define ETHERNET_TYPE_EAPOL           0x888e
 #define ETHERNET_TYPE_IPV6            0x86dd
@@ -48,6 +48,8 @@
 #define ETHERNET_TYPE_ERSPAN          0x88BE
 #define ETHERNET_TYPE_DCE             0x8903 /* Data center ethernet,
                                               * Cisco Fabric Path */
+#define ETHERNET_TYPE_NSH 0x894F
+#define ETHERNET_TYPE_VNTAG 0x8926 /* 802.1Qbh */
 
 typedef struct EthernetHdr_ {
     uint8_t eth_dst[6];
@@ -57,5 +59,4 @@ typedef struct EthernetHdr_ {
 
 void DecodeEthernetRegisterTests(void);
 
-#endif /* __DECODE_ETHERNET_H__ */
-
+#endif /* SURICATA_DECODE_ETHERNET_H */

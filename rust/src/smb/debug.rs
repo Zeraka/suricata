@@ -17,9 +17,6 @@
 
 use crate::smb::smb::*;
 
-#[cfg(feature = "debug")]
-use crate::log::*;
-
 impl SMBState {
     #[cfg(not(feature = "debug"))]
     pub fn _debug_tx_stats(&self) { }
@@ -27,8 +24,8 @@ impl SMBState {
     #[cfg(feature = "debug")]
     pub fn _debug_tx_stats(&self) {
         if self.transactions.len() > 1 {
-            let txf = self.transactions.first().unwrap();
-            let txl = self.transactions.last().unwrap();
+            let txf = self.transactions.front().unwrap();
+            let txl = self.transactions.back().unwrap();
 
             SCLogDebug!("TXs {} MIN {} MAX {}", self.transactions.len(), txf.id, txl.id);
             SCLogDebug!("- OLD tx.id {}: {:?}", txf.id, txf);
@@ -45,14 +42,13 @@ impl SMBState {
         for i in 0..len {
             let tx = &self.transactions[i];
             let ver = tx.vercmd.get_version();
-            let _smbcmd;
-            if ver == 2 {
+            let _smbcmd = if ver == 2 {
                 let (_, cmd) = tx.vercmd.get_smb2_cmd();
-                _smbcmd = cmd;
+                cmd
             } else {
                 let (_, cmd) = tx.vercmd.get_smb1_cmd();
-                _smbcmd = cmd as u16;
-            }
+                cmd as u16
+            };
 
             match tx.type_data {
                 Some(SMBTransactionTypeData::FILE(ref d)) => {
@@ -73,6 +69,14 @@ impl SMBState {
 
     #[cfg(feature = "debug")]
     pub fn _debug_state_stats(&self) {
-        SCLogDebug!("ssn2vec_map {} guid2name_map {} ssn2vecoffset_map {} ssn2tree_map {} ssnguid2vec_map {} file_ts_guid {} file_tc_guid {} transactions {}", self.ssn2vec_map.len(), self.guid2name_map.len(), self.ssn2vecoffset_map.len(), self.ssn2tree_map.len(), self.ssnguid2vec_map.len(), self.file_ts_guid.len(), self.file_tc_guid.len(), self.transactions.len());
+        SCLogDebug!("ssn2vec_cache {} guid2name_cache {} read_offset_cache {} ssn2tree_cache {} dcerpc_rec_frag_cache {} file_ts_guid {} file_tc_guid {} transactions {}",
+            self.ssn2vec_cache.len(),
+            self.guid2name_cache.len(),
+            self.read_offset_cache.len(),
+            self.ssn2tree_cache.len(),
+            self.dcerpc_rec_frag_cache.len(),
+            self.file_ts_guid.len(),
+            self.file_tc_guid.len(),
+            self.transactions.len());
     }
 }

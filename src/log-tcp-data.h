@@ -21,10 +21,13 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __LOG_TCPDATALOG_H__
-#define __LOG_TCPDATALOG_H__
+#ifndef SURICATA_LOG_TCPDATALOG_H
+#define SURICATA_LOG_TCPDATALOG_H
+
+#include "conf.h"
+#include "output.h"
 
 void LogTcpDataLogRegister(void);
-OutputInitResult LogTcpDataLogInitCtx(ConfNode *);
+OutputInitResult LogTcpDataLogInitCtx(SCConfNode *);
 
-#endif /* __LOG_TCPDATALOG_H__ */
+#endif /* SURICATA_LOG_TCPDATALOG_H */

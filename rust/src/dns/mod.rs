@@ -15,10 +15,10 @@
  * 02110-1301, USA.
  */
 
-pub mod parser;
+//! DNS parser, detection, logger and application layer module.
+
+pub mod detect;
 pub mod dns;
 pub mod log;
-pub mod detect;
-
-#[cfg(feature = "lua")]
 pub mod lua;
+pub mod parser;

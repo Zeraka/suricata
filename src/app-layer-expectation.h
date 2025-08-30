@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,17 +21,19 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __APP_LAYER_EXPECTATION__H__
-#define __APP_LAYER_EXPECTATION__H__
+#ifndef SURICATA_APP_LAYER_EXPECTATION__H
+#define SURICATA_APP_LAYER_EXPECTATION__H
+
+#include "flow-storage.h"
 
 void AppLayerExpectationSetup(void);
 int AppLayerExpectationCreate(Flow *f, int direction, Port src, Port dst,
                               AppProto alproto, void *data);
-AppProto AppLayerExpectationHandle(Flow *f, int direction);
-int AppLayerExpectationGetDataId(void);
+AppProto AppLayerExpectationHandle(Flow *f, uint8_t flags);
+FlowStorageId AppLayerExpectationGetFlowId(void);
 
 void AppLayerExpectationClean(Flow *f);
 
 uint64_t ExpectationGetCounter(void);
 
-#endif /* __APP_LAYER_EXPECTATION__H__ */
+#endif /* SURICATA_APP_LAYER_EXPECTATION__H */

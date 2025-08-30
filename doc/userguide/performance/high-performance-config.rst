@@ -82,7 +82,7 @@ socket system using x710:
 The commands above can be reviewed in detail in the help or manpages of the 
 ``ethtool``. In brief the sequence makes sure the NIC is reset, the number of 
 RSS queues is set to 16, load balancing is enabled for the NIC, a low entropy 
-toepiltz key is inserted to allow for symmetric hashing, receive offloading is 
+toeplitz key is inserted to allow for symmetric hashing, receive offloading is 
 disabled, the adaptive control is disabled for lowest possible latency and 
 last but not least, the ring rx descriptor size is set to 1024.
 Make sure the RSS hash function is Toeplitz:
@@ -202,18 +202,18 @@ In the cpu affinity section of suricata.yaml config:
  # Suricata is multi-threaded. Here the threading can be influenced.
  threading:
   cpu-affinity:
-    - management-cpu-set:
-        cpu: [ "1-10" ]  # include only these CPUs in affinity settings
-    - receive-cpu-set:
-        cpu: [ "0-10" ]  # include only these CPUs in affinity settings
-    - worker-cpu-set:
-        cpu: [ "18-35", "54-71" ]
-        mode: "exclusive"
-        prio:
-          low: [ 0 ]
-          medium: [ "1" ]
-          high: [ "18-35","54-71" ]
-          default: "high"
+    management-cpu-set:
+      cpu: [ "1-10" ]  # include only these CPUs in affinity settings
+    receive-cpu-set:
+      cpu: [ "0-10" ]  # include only these CPUs in affinity settings
+    worker-cpu-set:
+      cpu: [ "18-35", "54-71" ]
+      mode: "exclusive"
+      prio:
+        low: [ 0 ]
+        medium: [ "1" ]
+        high: [ "18-35","54-71" ]
+        default: "high"
 
 In the af-packet section of suricata.yaml config :
 
@@ -225,7 +225,6 @@ In the af-packet section of suricata.yaml config :
     cluster-id: 99
     cluster-type: cluster_qm
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000
@@ -236,7 +235,6 @@ In the af-packet section of suricata.yaml config :
     cluster-id: 99
     cluster-type: cluster_qm
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000
@@ -326,16 +324,16 @@ In the cpu affinity section of suricata.yaml config :
  threading:
   set-cpu-affinity: yes
   cpu-affinity:
-    - management-cpu-set:
-        cpu: [ "120-127" ]  # include only these cpus in affinity settings
-    - receive-cpu-set:
-        cpu: [ 0 ]  # include only these cpus in affinity settings
-    - worker-cpu-set:
-        cpu: [ "8-55" ]
-        mode: "exclusive"
-        prio:
-          high: [ "8-55" ]
-          default: "high"
+    management-cpu-set:
+      cpu: [ "120-127" ]  # include only these cpus in affinity settings
+    receive-cpu-set:
+      cpu: [ 0 ]  # include only these cpus in affinity settings
+    worker-cpu-set:
+      cpu: [ "8-55" ]
+      mode: "exclusive"
+      prio:
+        high: [ "8-55" ]
+        default: "high"
 
 In the af-packet section of suricata.yaml config:
 
@@ -347,7 +345,6 @@ In the af-packet section of suricata.yaml config:
     cluster-id: 99
     cluster-type: cluster_flow
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000

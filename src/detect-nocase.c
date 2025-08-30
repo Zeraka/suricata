@@ -24,6 +24,7 @@
  */
 
 #include "suricata-common.h"
+#include "suricata.h"
 #include "decode.h"
 
 #include "detect.h"
@@ -61,42 +62,20 @@ static int DetectNocaseSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
     int ret = -1;
 
     if (nullstr != NULL) {
-        SCLogError(SC_ERR_INVALID_VALUE, "nocase has value");
+        SCLogError("nocase has value");
         goto end;
     }
 
-    /* retrive the sm to apply the nocase against */
+    /* retrieve the sm to apply the nocase against */
     pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
     if (pm == NULL) {
-        SCLogError(SC_ERR_NOCASE_MISSING_PATTERN, "nocase needs "
+        SCLogError("nocase needs "
                    "preceding content option");
         goto end;
     }
 
-    /* verify other conditions. */
-    DetectContentData *cd = (DetectContentData *)pm->ctx;;
-
-    if (cd->flags & DETECT_CONTENT_NOCASE) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple nocase modifiers with the same content");
-        goto end;
-    }
-
-    /* for consistency in later use (e.g. by MPM construction and hashing),
-     * coerce the content string to lower-case. */
-    for (uint8_t *c = cd->content; c < cd->content + cd->content_len; c++) {
-        *c = u8_tolower(*c);
-    }
-
-    cd->flags |= DETECT_CONTENT_NOCASE;
-    /* Recreate the context with nocase chars */
-    SpmDestroyCtx(cd->spm_ctx);
-    cd->spm_ctx = SpmInitCtx(cd->content, cd->content_len, 1,
-                             de_ctx->spm_global_thread_ctx);
-    if (cd->spm_ctx == NULL) {
-        goto end;
-    }
-
-    ret = 0;
+    DetectContentData *cd = (DetectContentData *)pm->ctx;
+    ret = DetectContentConvertToNocase(de_ctx, cd);
  end:
     SCReturnInt(ret);
 }

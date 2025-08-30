@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -31,21 +31,19 @@
  */
 
 #include "suricata-common.h"
-#include "decode.h"
 #include "decode-raw.h"
+#include "decode.h"
 #include "decode-events.h"
 
+#include "util-validate.h"
 #include "util-unittest.h"
 #include "util-debug.h"
-
-#include "pkt-var.h"
-#include "util-profiling.h"
-#include "host.h"
-
 
 int DecodeRaw(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint32_t len)
 {
+    DEBUG_VALIDATE_BUG_ON(pkt == NULL);
+
     StatsIncr(tv, dtv->counter_raw);
 
     /* If it is ipv4 or ipv6 it should at least be the size of ipv4 */
@@ -61,13 +59,13 @@ int DecodeRaw(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
             return TM_ECODE_FAILED;
         }
         SCLogDebug("IPV4 Packet");
-        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
+        DecodeIPV4(tv, dtv, p, GET_PKT_DATA(p), (uint16_t)(GET_PKT_LEN(p)));
     } else if (IP_GET_RAW_VER(pkt) == 6) {
         if (unlikely(GET_PKT_LEN(p) > USHRT_MAX)) {
             return TM_ECODE_FAILED;
         }
         SCLogDebug("IPV6 Packet");
-        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), GET_PKT_LEN(p));
+        DecodeIPV6(tv, dtv, p, GET_PKT_DATA(p), (uint16_t)(GET_PKT_LEN(p)));
     } else {
         SCLogDebug("Unknown ip version %d", IP_GET_RAW_VER(pkt));
         ENGINE_SET_EVENT(p,IPRAW_INVALID_IPV);
@@ -76,8 +74,8 @@ int DecodeRaw(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 }
 
 #ifdef UNITTESTS
-#include "flow.h"
-#include "flow-util.h"
+#include "util-unittest-helper.h"
+#include "packet.h"
 
 /** DecodeRawtest01
  *  \brief Valid Raw packet
@@ -115,14 +113,9 @@ static int DecodeRawTest01 (void)
     FlowInitConfig(FLOW_QUIET);
 
     DecodeRaw(&tv, &dtv, p, raw_ip, GET_PKT_LEN(p));
-    if (p->ip6h == NULL) {
-        printf("expected a valid ipv6 header but it was NULL: ");
-        FlowShutdown();
-        SCFree(p);
-        return 0;
-    }
+    FAIL_IF_NOT(PacketIsIPv6(p));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     return 1;
@@ -161,15 +154,9 @@ static int DecodeRawTest02 (void)
     FlowInitConfig(FLOW_QUIET);
 
     DecodeRaw(&tv, &dtv, p, raw_ip, GET_PKT_LEN(p));
-    if (p->ip4h == NULL) {
-        printf("expected a valid ipv4 header but it was NULL: ");
-        PACKET_RECYCLE(p);
-        FlowShutdown();
-        SCFree(p);
-        return 0;
-    }
+    FAIL_IF_NOT(PacketIsIPv4(p));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     return 1;
@@ -215,7 +202,7 @@ static int DecodeRawTest03 (void)
         SCFree(p);
         return 0;
     }
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     return 1;

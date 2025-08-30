@@ -1,4 +1,4 @@
-SUBDIRS = userguide devguide
+SUBDIRS = userguide
 
 EXTRA_DIST = \
 AUTHORS \
@@ -7,8 +7,6 @@ INSTALL \
 NEWS \
 README \
 TODO \
-INSTALL.PF_RING \
-INSTALL.WINDOWS \
 \
 Basic_Setup.txt \
 Setting_up_IPSinline_for_Linux.txt \

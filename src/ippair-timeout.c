@@ -25,17 +25,6 @@
 #include "ippair.h"
 #include "ippair-bit.h"
 #include "ippair-timeout.h"
-#include "detect-engine-threshold.h"
-
-uint32_t IPPairGetSpareCount(void)
-{
-    return IPPairSpareQueueGetSize();
-}
-
-uint32_t IPPairGetActiveCount(void)
-{
-    return SC_ATOMIC_GET(ippair_counter);
-}
 
 /** \internal
  *  \brief See if we can really discard this ippair. Check use_cnt reference.
@@ -46,11 +35,9 @@ uint32_t IPPairGetActiveCount(void)
  *  \retval 0 not timed out just yet
  *  \retval 1 fully timed out, lets kill it
  */
-static int IPPairTimedOut(IPPair *h, struct timeval *ts)
+static int IPPairTimedOut(IPPair *h, SCTime_t ts)
 {
     int vars = 0;
-    int thresholds = 0;
-
     /** never prune a ippair that is used by a packet
      *  we are currently processing in one of the threads */
     if (SC_ATOMIC_GET(h->use_cnt) > 0) {
@@ -60,12 +47,7 @@ static int IPPairTimedOut(IPPair *h, struct timeval *ts)
     if (IPPairHasBits(h) && IPPairBitsTimedoutCheck(h, ts) == 0) {
         vars = 1;
     }
-
-    if (ThresholdIPPairHasThreshold(h) && ThresholdIPPairTimeoutCheck(h, ts) == 0) {
-        thresholds = 1;
-    }
-
-    if (vars || thresholds) {
+    if (vars) {
         return 0;
     }
 
@@ -84,7 +66,7 @@ static int IPPairTimedOut(IPPair *h, struct timeval *ts)
  *
  *  \retval cnt timed out ippairs
  */
-static uint32_t IPPairHashRowTimeout(IPPairHashRow *hb, IPPair *h, struct timeval *ts)
+static uint32_t IPPairHashRowTimeout(IPPairHashRow *hb, IPPair *h, SCTime_t ts)
 {
     uint32_t cnt = 0;
 
@@ -139,7 +121,7 @@ static uint32_t IPPairHashRowTimeout(IPPairHashRow *hb, IPPair *h, struct timeva
  *
  *  \retval cnt number of timed out ippair
  */
-uint32_t IPPairTimeoutHash(struct timeval *ts)
+uint32_t IPPairTimeoutHash(SCTime_t ts)
 {
     uint32_t idx = 0;
     uint32_t cnt = 0;

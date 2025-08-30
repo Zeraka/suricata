@@ -15,60 +15,53 @@
  * 02110-1301, USA.
  */
 
-use crate::core::*;
-use crate::log::*;
 use crate::smb::smb::*;
 
-#[repr(u32)]
+#[derive(AppLayerEvent)]
 pub enum SMBEvent {
-    InternalError = 0,
-    MalformedData = 1,
-    RecordOverflow = 2,
-    MalformedNtlmsspRequest = 3,
-    MalformedNtlmsspResponse = 4,
-    DuplicateNegotiate = 5,
-    NegotiateMalformedDialects = 6,
-}
+    InternalError,
+    MalformedData,
+    RecordOverflow,
+    MalformedNtlmsspRequest,
+    MalformedNtlmsspResponse,
+    DuplicateNegotiate,
+    NegotiateMalformedDialects,
+    FileOverlap,
+    /// A request was seen in the to client direction.
+    RequestToClient,
+    /// A response was seen in the to server direction,
+    ResponseToServer,
 
-impl SMBEvent {
-    pub fn from_i32(value: i32) -> Option<SMBEvent> {
-        match value {
-            0 => Some(SMBEvent::InternalError),
-            1 => Some(SMBEvent::MalformedData),
-            2 => Some(SMBEvent::RecordOverflow),
-            3 => Some(SMBEvent::MalformedNtlmsspRequest),
-            4 => Some(SMBEvent::MalformedNtlmsspResponse),
-            5 => Some(SMBEvent::DuplicateNegotiate),
-            6 => Some(SMBEvent::NegotiateMalformedDialects),
-            _ => None,
-        }
-    }
-}
+    /// Negotiated max sizes exceed our limit
+    NegotiateMaxReadSizeTooLarge,
+    NegotiateMaxWriteSizeTooLarge,
 
-pub fn smb_str_to_event(instr: &str) -> i32 {
-    SCLogDebug!("checking {}", instr);
-    match instr {
-        "internal_error"                => SMBEvent::InternalError as i32,
-        "malformed_data"                => SMBEvent::MalformedData as i32,
-        "record_overflow"               => SMBEvent::RecordOverflow as i32,
-        "malformed_ntlmssp_request"     => SMBEvent::MalformedNtlmsspRequest as i32,
-        "malformed_ntlmssp_response"    => SMBEvent::MalformedNtlmsspResponse as i32,
-        "duplicate_negotiate"           => SMBEvent::DuplicateNegotiate as i32,
-        "negotiate_malformed_dialects"  => SMBEvent::NegotiateMalformedDialects as i32,
-        _ => -1,
-    }
+    /// READ request asking for more than `max_read_size`
+    ReadRequestTooLarge,
+    /// READ response bigger than `max_read_size`
+    ReadResponseTooLarge,
+    ReadQueueSizeExceeded,
+    ReadQueueCntExceeded,
+    /// WRITE request for more than `max_write_size`
+    WriteRequestTooLarge,
+    WriteQueueSizeExceeded,
+    WriteQueueCntExceeded,
+    /// Unusual NTLMSSP fields order
+    UnusualNtlmsspOrder,
+    /// Too many live transactions in one flow
+    TooManyTransactions,
 }
 
 impl SMBTransaction {
     /// Set event.
     pub fn set_event(&mut self, e: SMBEvent) {
-        sc_app_layer_decoder_events_set_event_raw(&mut self.events, e as u8);
+        self.tx_data.set_event(e as u8);
     }
 
     /// Set events from vector of events.
     pub fn set_events(&mut self, events: Vec<SMBEvent>) {
         for e in events {
-            sc_app_layer_decoder_events_set_event_raw(&mut self.events, e as u8);
+            self.tx_data.set_event(e as u8);
         }
     }
 }
@@ -83,6 +76,5 @@ impl SMBState {
 
         let tx = &mut self.transactions[len - 1];
         tx.set_event(event);
-        //sc_app_layer_decoder_events_set_event_raw(&mut tx.events, event as u8);
     }
 }

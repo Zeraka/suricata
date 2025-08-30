@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2019 Open Information Security Foundation
+/* Copyright (C) 2017-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,11 +24,10 @@
 #include "suricata-common.h"
 #include "conf.h"
 #include "datasets.h"
+#include "datasets-context-json.h"
 #include "datasets-sha256.h"
+#include "util-hash-lookup3.h"
 #include "util-thash.h"
-#include "util-print.h"
-#include "util-crypt.h"     // encode base64
-#include "util-base64.h"    // decode base64
 
 int Sha256StrSet(void *dst, void *src)
 {
@@ -36,6 +35,20 @@ int Sha256StrSet(void *dst, void *src)
     Sha256Type *dst_s = dst;
     memcpy(dst_s->sha256, src_s->sha256, sizeof(dst_s->sha256));
     dst_s->rep = src_s->rep;
+    return 0;
+}
+
+int Sha256StrJsonSet(void *dst, void *src)
+{
+    if (Sha256StrSet(dst, src) < 0)
+        return -1;
+
+    Sha256Type *src_s = src;
+    Sha256Type *dst_s = dst;
+
+    if (DatajsonCopyJson(&dst_s->json, &src_s->json) < 0)
+        return -1;
+
     return 0;
 }
 
@@ -47,19 +60,28 @@ bool Sha256StrCompare(void *a, void *b)
     return (memcmp(as->sha256, bs->sha256, sizeof(as->sha256)) == 0);
 }
 
-uint32_t Sha256StrHash(void *s)
+uint32_t Sha256StrHash(uint32_t hash_seed, void *s)
 {
     Sha256Type *str = s;
-    uint32_t hash = 5381;
-
-    for (int i = 0; i < (int)sizeof(str->sha256); i++) {
-        hash = ((hash << 5) + hash) + str->sha256[i]; /* hash * 33 + c */
-    }
-    return hash;
+    return hashword((uint32_t *)str->sha256, sizeof(str->sha256) / 4, hash_seed);
 }
 
 // data stays in hash
 void Sha256StrFree(void *s)
 {
     // no dynamic data
+}
+
+void Sha256StrJsonFree(void *s)
+{
+    const Sha256Type *as = s;
+    if (as->json.value) {
+        SCFree(as->json.value);
+    }
+}
+
+uint32_t Sha256StrJsonGetLength(void *s)
+{
+    const Sha256Type *as = s;
+    return as->json.len;
 }

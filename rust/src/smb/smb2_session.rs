@@ -15,16 +15,15 @@
  * 02110-1301, USA.
  */
 
-use crate::log::*;
-
 use crate::smb::smb2_records::*;
 use crate::smb::smb::*;
-//use smb::events::*;
+use crate::smb::events::*;
 use crate::smb::auth::*;
 
 pub fn smb2_session_setup_request(state: &mut SMBState, r: &Smb2Record)
 {
     SCLogDebug!("SMB2_COMMAND_SESSION_SETUP: r.data.len() {}", r.data.len());
+    #[allow(clippy::single_match)]
     match parse_smb2_request_session_setup(r.data) {
         Ok((_, setup)) => {
             let hdr = SMBCommonHdr::from2(r, SMBHDR_TYPE_HEADER);
@@ -35,6 +34,11 @@ pub fn smb2_session_setup_request(state: &mut SMBState, r: &Smb2Record)
                 if let Some(s) = parse_secblob(setup.data) {
                     td.ntlmssp = s.ntlmssp;
                     td.krb_ticket = s.krb;
+                    if let Some(ntlm) = &td.ntlmssp {
+                        if ntlm.warning {
+                            tx.set_event(SMBEvent::UnusualNtlmsspOrder);
+                        }
+                    }
                 }
             }
         },
@@ -66,16 +70,13 @@ pub fn smb2_session_setup_response(state: &mut SMBState, r: &Smb2Record)
     };
     // otherwise try match with ssn id 0 (e.g. NTLMSSP_NEGOTIATE)
     if !found {
-        match state.get_sessionsetup_tx(
+        if let Some(tx) = state.get_sessionsetup_tx(
                 SMBCommonHdr::new(SMBHDR_TYPE_HEADER, 0, 0, r.message_id))
         {
-            Some(tx) => {
-                smb2_session_setup_update_tx(tx, r);
-                SCLogDebug!("smb2_session_setup_response: tx {:?}", tx);
-            },
-            None => {
-                SCLogDebug!("smb2_session_setup_response: tx not found for {:?}", r);
-            },
+            smb2_session_setup_update_tx(tx, r);
+            SCLogDebug!("smb2_session_setup_response: tx {:?}", tx);
+        } else {
+            SCLogDebug!("smb2_session_setup_response: tx not found for {:?}", r);
         }
     }
 }

@@ -21,15 +21,14 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_LUA_EXT_H__
-#define __DETECT_LUA_EXT_H__
+#ifndef SURICATA_DETECT_LUA_EXT_H
+#define SURICATA_DETECT_LUA_EXT_H
 
-#ifdef HAVE_LUA
-int LuaRegisterExtensions(lua_State *);
+extern const char luaext_key_ld[];
 
-void LuaExtensionsMatchSetup(lua_State *lua_state,
-        DetectLuaData *, DetectEngineThreadCtx *det_ctx,
-        Flow *f, Packet *p, uint8_t flags);
+void LuaExtensionsMatchSetup(lua_State *lua_state, DetectLuaData *, DetectEngineThreadCtx *det_ctx,
+        Flow *f, Packet *p, const Signature *s, uint8_t flags);
 
-#endif /* HAVE_LUA */
+void LuaLoadDatasetLib(lua_State *luastate);
+
 #endif

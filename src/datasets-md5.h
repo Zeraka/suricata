@@ -21,19 +21,26 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DATASETS_MD5_H__
-#define __DATASETS_MD5_H__
+#ifndef SURICATA_DATASETS_MD5_H
+#define SURICATA_DATASETS_MD5_H
 
 #include "datasets-reputation.h"
+#include "datasets-context-json.h"
 
 typedef struct Md5Type {
     uint8_t md5[16];
-    DataRepType rep;
+    union {
+        DataRepType rep;
+        DataJsonType json;
+    };
 } Md5Type;
 
 int Md5StrSet(void *dst, void *src);
+int Md5StrJsonSet(void *dst, void *src);
 bool Md5StrCompare(void *a, void *b);
-uint32_t Md5StrHash(void *s);
+uint32_t Md5StrHash(uint32_t hash_seed, void *s);
 void Md5StrFree(void *s);
+void Md5StrJsonFree(void *s);
+uint32_t Md5StrJsonGetLength(void *s);
 
-#endif /* __DATASETS_MD5_H__ */
+#endif /* SURICATA_DATASETS_MD5_H */

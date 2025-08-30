@@ -22,8 +22,8 @@
  * \author Pablo Rincon <pablo.rincon.crespo@gmail.com>
  */
 
-#ifndef __FLOW_VAR_H__
-#define __FLOW_VAR_H__
+#ifndef SURICATA_FLOW_VAR_H
+#define SURICATA_FLOW_VAR_H
 
 #include "flow.h"
 #include "util-var.h"
@@ -32,7 +32,9 @@
 
 #define FLOWVAR_TYPE_STR 1
 #define FLOWVAR_TYPE_INT 2
+#define FLOWVAR_TYPE_FLOAT 3
 
+typedef uint8_t FlowVarKeyLenType;
 /** Struct used to hold the string data type for flowvars */
 typedef struct FlowVarTypeStr {
     uint8_t *value;
@@ -44,11 +46,16 @@ typedef struct FlowVarTypeInt_ {
     uint32_t value;
 } FlowVarTypeInt;
 
+/** Struct used to hold the integer data type for flowvars */
+typedef struct FlowVarTypeFloat_ {
+    double value;
+} FlowVarTypeFloat;
+
 /** Generic Flowvar Structure */
 typedef struct FlowVar_ {
-    uint8_t type;       /* type, DETECT_FLOWVAR in this case */
+    uint16_t type; /* type, DETECT_FLOWVAR in this case */
     uint8_t datatype;
-    uint16_t keylen;
+    FlowVarKeyLenType keylen;
     uint32_t idx;       /* name idx */
     GenericVar *next;   /* right now just implement this as a list,
                          * in the long run we have think of something
@@ -56,6 +63,7 @@ typedef struct FlowVar_ {
     union {
         FlowVarTypeStr fv_str;
         FlowVarTypeInt fv_int;
+        FlowVarTypeFloat fv_float;
     } data;
     uint8_t *key;
 } FlowVar;
@@ -63,14 +71,15 @@ typedef struct FlowVar_ {
 /** Flowvar Interface API */
 
 void FlowVarAddIdValue(Flow *, uint32_t id, uint8_t *value, uint16_t size);
-void FlowVarAddKeyValue(Flow *f, uint8_t *key, uint16_t keysize, uint8_t *value, uint16_t size);
+void FlowVarAddKeyValue(
+        Flow *f, uint8_t *key, FlowVarKeyLenType keylen, uint8_t *value, uint16_t size);
 
 void FlowVarAddIntNoLock(Flow *, uint32_t, uint32_t);
 void FlowVarAddInt(Flow *, uint32_t, uint32_t);
+void FlowVarAddFloat(Flow *, uint32_t, double);
 FlowVar *FlowVarGet(Flow *, uint32_t);
-FlowVar *FlowVarGetByKey(Flow *f, const uint8_t *key, uint16_t keylen);
+FlowVar *FlowVarGetByKey(Flow *f, const uint8_t *key, FlowVarKeyLenType keylen);
 void FlowVarFree(FlowVar *);
 void FlowVarPrint(GenericVar *);
 
-#endif /* __FLOW_VAR_H__ */
-
+#endif /* SURICATA_FLOW_VAR_H */

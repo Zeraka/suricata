@@ -31,9 +31,8 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-
-#ifndef __DETECT_ENGINE_STATE_H__
-#define __DETECT_ENGINE_STATE_H__
+#ifndef SURICATA_DETECT_ENGINE_STATE_H
+#define SURICATA_DETECT_ENGINE_STATE_H
 
 #define DETECT_ENGINE_INSPECT_SIG_NO_MATCH 0
 #define DETECT_ENGINE_INSPECT_SIG_MATCH 1
@@ -81,8 +80,9 @@ typedef struct DeStateStore_ {
 } DeStateStore;
 
 typedef struct DetectEngineStateDirection_ {
-    DeStateStore *head;
-    DeStateStore *tail;
+    DeStateStore *head; /**< head of the list */
+    DeStateStore *cur;  /**< current active store */
+    DeStateStore *tail; /**< tail of the list */
     SigIntId cnt;
     uint16_t filestore_cnt;
     uint8_t flags;
@@ -92,19 +92,6 @@ typedef struct DetectEngineStateDirection_ {
 typedef struct DetectEngineState_ {
     DetectEngineStateDirection dir_state[2];
 } DetectEngineState;
-
-// TODO
-typedef struct DetectTransaction_ {
-    void *tx_ptr;
-    const uint64_t tx_id;
-    struct AppLayerTxData *tx_data_ptr;
-    DetectEngineStateDirection *de_state;
-    const uint64_t detect_flags;            /* detect flags get/set from/to applayer */
-    uint64_t prefilter_flags;               /* prefilter flags for direction, to be updated by prefilter code */
-    const uint64_t prefilter_flags_orig;    /* prefilter flags for direction, before prefilter has run */
-    const int tx_progress;
-    const int tx_end_state;
-} DetectTransaction;
 
 /**
  * \brief Alloc a DetectEngineState object.
@@ -120,34 +107,7 @@ DetectEngineState *DetectEngineStateAlloc(void);
  */
 void DetectEngineStateFree(DetectEngineState *state);
 
-/**
- *  \brief Update the inspect id.
- *
- *  \param f unlocked flow
- *  \param flags direction and disruption flags
- */
-void DeStateUpdateInspectTransactionId(Flow *f, const uint8_t flags,
-        const bool tag_txs_as_inspected);
-
-void DetectEngineStateResetTxs(Flow *f);
-
-void DeStateRegisterTests(void);
-
-
-void DetectRunStoreStateTx(
-        const SigGroupHead *sgh,
-        Flow *f, void *tx, uint64_t tx_id,
-        const Signature *s,
-        uint32_t inspect_flags, uint8_t flow_flags,
-        const uint16_t file_no_match);
-
-void DetectRunStoreStateTxFileOnly(
-        const SigGroupHead *sgh,
-        Flow *f, void *tx, uint64_t tx_id,
-        const uint8_t flow_flags,
-        const uint16_t file_no_match);
-
-#endif /* __DETECT_ENGINE_STATE_H__ */
+#endif /* SURICATA_DETECT_ENGINE_STATE_H */
 
 /**
  * @}

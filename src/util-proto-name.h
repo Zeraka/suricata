@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,22 +21,21 @@
  * \author Gurvinder Singh <gurvindersinghdahiya@gmail.com>
  */
 
-#ifndef __UTIL_PROTO_NAME_H__
-#define	__UTIL_PROTO_NAME_H__
-
-#ifndef OS_WIN32
-#define PROTO_FILE    "/etc/protocols"
-#else
-#define PROTO_FILE    "C:\\Windows\\system32\\drivers\\etc\\protocol"
-#endif /* OS_WIN32 */
+#ifndef SURICATA_UTIL_PROTO_NAME_H
+#define SURICATA_UTIL_PROTO_NAME_H
 
 /** Lookup array to hold the information related to known protocol
- *  in /etc/protocols */
-extern char *known_proto[256];
+ *  values
+ */
+extern const char *known_proto[256];
 
 bool SCProtoNameValid(uint16_t);
+bool SCGetProtoByName(const char *protoname, uint8_t *proto_number);
 void SCProtoNameInit(void);
-void SCProtoNameDeInit(void);
+void SCProtoNameRelease(void);
 
-#endif	/* __UTIL_PROTO_NAME_H__ */
+#ifdef UNITTESTS
+void SCProtoNameRegisterTests(void);
+#endif
 
+#endif /* SURICATA_UTIL_PROTO_NAME_H */

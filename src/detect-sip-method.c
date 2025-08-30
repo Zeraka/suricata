@@ -25,12 +25,12 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -52,7 +52,6 @@
 #include "stream-tcp.h"
 
 #include "rust.h"
-#include "app-layer-sip.h"
 
 #define KEYWORD_NAME "sip.method"
 #define KEYWORD_DOC  "sip-keywords.html#sip-method"
@@ -62,39 +61,44 @@ static int g_buffer_id = 0;
 
 static int DetectSipMethodSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(s, g_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_SIP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_SIP) < 0)
         return -1;
 
     return 0;
 }
 
-static bool DetectSipMethodValidateCallback(const Signature *s, const char **sigerror)
+static bool DetectSipMethodValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt)
 {
-    const SigMatch *sm = s->init_data->smlists[g_buffer_id];
-    for ( ; sm != NULL; sm = sm->next) {
-        if (sm->type != DETECT_CONTENT)
+    for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
+        if (s->init_data->buffers[x].id != (uint32_t)dbt->id)
             continue;
-        const DetectContentData *cd = (const DetectContentData *)sm->ctx;
-        if (cd->content && cd->content_len) {
-            if (cd->content[cd->content_len-1] == 0x20) {
-                *sigerror = "sip.method pattern with trailing space";
-                SCLogError(SC_ERR_INVALID_SIGNATURE, "%s", *sigerror);
-                return true;
-            } else if (cd->content[0] == 0x20) {
-                *sigerror = "sip.method pattern with leading space";
-                SCLogError(SC_ERR_INVALID_SIGNATURE, "%s", *sigerror);
-                return true;
-            } else if (cd->content[cd->content_len-1] == 0x09) {
-                *sigerror = "sip.method pattern with trailing tab";
-                SCLogError(SC_ERR_INVALID_SIGNATURE, "%s", *sigerror);
-                return true;
-            } else if (cd->content[0] == 0x09) {
-                *sigerror = "sip.method pattern with leading tab";
-                SCLogError(SC_ERR_INVALID_SIGNATURE, "%s", *sigerror);
-                return true;
+        const SigMatch *sm = s->init_data->buffers[x].head;
+        for (; sm != NULL; sm = sm->next) {
+            if (sm->type != DETECT_CONTENT)
+                continue;
+            const DetectContentData *cd = (const DetectContentData *)sm->ctx;
+            if (cd->content && cd->content_len) {
+                if (cd->content[cd->content_len - 1] == 0x20) {
+                    *sigerror = "sip.method pattern with trailing space";
+                    SCLogError("%s", *sigerror);
+                    return true;
+                } else if (cd->content[0] == 0x20) {
+                    *sigerror = "sip.method pattern with leading space";
+                    SCLogError("%s", *sigerror);
+                    return true;
+                } else if (cd->content[cd->content_len - 1] == 0x09) {
+                    *sigerror = "sip.method pattern with trailing tab";
+                    SCLogError("%s", *sigerror);
+                    return true;
+                } else if (cd->content[0] == 0x09) {
+                    *sigerror = "sip.method pattern with leading tab";
+                    SCLogError("%s", *sigerror);
+                    return true;
+                }
             }
         }
     }
@@ -110,13 +114,12 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *b = NULL;
         uint32_t b_len = 0;
 
-        if (rs_sip_tx_get_method(txv, &b, &b_len) != 1)
+        if (SCSipTxGetMethod(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -125,19 +128,17 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 void DetectSipMethodRegister(void)
 {
     /* sip.method sticky buffer */
-    sigmatch_table[DETECT_AL_SIP_METHOD].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_SIP_METHOD].desc = "sticky buffer to match on the SIP method buffer";
-    sigmatch_table[DETECT_AL_SIP_METHOD].url = "/rules/" KEYWORD_DOC;
-    sigmatch_table[DETECT_AL_SIP_METHOD].Setup = DetectSipMethodSetup;
-    sigmatch_table[DETECT_AL_SIP_METHOD].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_SIP_METHOD].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_SIP_METHOD].desc = "sticky buffer to match on the SIP method buffer";
+    sigmatch_table[DETECT_SIP_METHOD].url = "/rules/" KEYWORD_DOC;
+    sigmatch_table[DETECT_SIP_METHOD].Setup = DetectSipMethodSetup;
+    sigmatch_table[DETECT_SIP_METHOD].flags |= SIGMATCH_NOOPT;
 
-    DetectAppLayerInspectEngineRegister2(BUFFER_NAME, ALPROTO_SIP,
-            SIG_FLAG_TOSERVER, 0,
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_SIP, SIG_FLAG_TOSERVER, 0,
             DetectEngineInspectBufferGeneric, GetData);
 
-    DetectAppLayerMpmRegister2(BUFFER_NAME, SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_SIP,
-            1);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_SIP, 1);
 
     DetectBufferTypeSetDescriptionByName(BUFFER_NAME, BUFFER_DESC);
 

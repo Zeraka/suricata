@@ -15,38 +15,53 @@
  * 02110-1301, USA.
  */
 
-#ifndef __RUST_CONTEXT_H__
-#define __RUST_CONTEXT_H__
+#ifndef SURICATA_RUST_CONTEXT_H
+#define SURICATA_RUST_CONTEXT_H
 
+#include "flow.h"
+#include "detect.h"
 #include "detect-engine-state.h" //DetectEngineState
-#include "app-layer-krb5.h" //KRB5State, KRB5Transaction
-#include "app-layer-ikev2.h" //IKEV2State, IKEV2Transaction
-#include "app-layer-ntp.h" //NTPState, NTPTransaction
-#include "app-layer-snmp.h" //SNMPState, SNMPTransaction
+
+#include "app-layer-ike.h" //IKEState, IKETransaction
 #include "app-layer-tftp.h" //TFTPState, TFTPTransaction
 
+#include "util-debug.h"
+#include "util-file.h"
+#include "util-var.h"
+
+// hack for include orders cf SCSha256
+typedef struct HttpRangeContainerBlock HttpRangeContainerBlock;
+
+struct AppLayerParser;
+
 typedef struct SuricataContext_ {
-    SCError (*SCLogMessage)(const SCLogLevel, const char *, const unsigned int,
-            const char *, const SCError, const char *message);
+    SCError (*SCLogMessage)(const SCLogLevel, const char *, const unsigned int, const char *,
+            const char *, const char *message);
     void (*DetectEngineStateFree)(DetectEngineState *);
     void (*AppLayerDecoderEventsSetEventRaw)(AppLayerDecoderEvents **,
             uint8_t);
     void (*AppLayerDecoderEventsFreeEvents)(AppLayerDecoderEvents **);
+    void (*AppLayerParserTriggerRawStreamInspection)(Flow *, int direction);
+
+    void (*HttpRangeFreeBlock)(HttpRangeContainerBlock *);
+    bool (*HTPFileCloseHandleRange)(const StreamingBufferConfig *sbcfg, FileContainer *,
+            const uint16_t, HttpRangeContainerBlock *, const uint8_t *, uint32_t);
 
     int (*FileOpenFileWithId)(FileContainer *, const StreamingBufferConfig *,
         uint32_t track_id, const uint8_t *name, uint16_t name_len,
         const uint8_t *data, uint32_t data_len, uint16_t flags);
-    int (*FileCloseFileById)(FileContainer *, uint32_t track_id,
+    int (*FileCloseFileById)(FileContainer *, const StreamingBufferConfig *, uint32_t track_id,
             const uint8_t *data, uint32_t data_len, uint16_t flags);
-    int (*FileAppendDataById)(FileContainer *, uint32_t track_id,
+    int (*FileAppendDataById)(FileContainer *, const StreamingBufferConfig *, uint32_t track_id,
             const uint8_t *data, uint32_t data_len);
-    int (*FileAppendGAPById)(FileContainer *, uint32_t track_id,
+    int (*FileAppendGAPById)(FileContainer *, const StreamingBufferConfig *, uint32_t track_id,
             const uint8_t *data, uint32_t data_len);
-    void (*FileContainerRecycle)(FileContainer *ffc);
-    void (*FilePrune)(FileContainer *ffc);
-    void (*FileSetTx)(FileContainer *, uint64_t);
+    void (*FileContainerRecycle)(FileContainer *ffc, const StreamingBufferConfig *);
 
+    void (*GenericVarFree)(GenericVar *);
 } SuricataContext;
+
+extern const SuricataContext suricata_context;
 
 typedef struct SuricataFileContext_ {
 
@@ -54,9 +69,6 @@ typedef struct SuricataFileContext_ {
 
 } SuricataFileContext;
 
-struct _Store;
-typedef struct _Store Store;
+const SuricataContext *SCGetContext(void);
 
-/** Opaque Rust types. */
-
-#endif /* !__RUST_CONTEXT_H__ */
+#endif /* !SURICATA_RUST_CONTEXT_H */

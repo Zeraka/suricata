@@ -33,12 +33,12 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-content.h"
 #include "detect-pcre.h"
 #include "detect-engine-mpm.h"
@@ -72,6 +72,9 @@ static int g_http_stat_code_buffer_id = 0;
 static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         const DetectEngineTransforms *transforms, Flow *_f,
         const uint8_t _flow_flags, void *txv, const int list_id);
+static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id);
 
 /**
  * \brief Registration function for keyword: http_stat_code
@@ -79,15 +82,17 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 void DetectHttpStatCodeRegister (void)
 {
     /* http_stat_code content modifier */
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].name = "http_stat_code";
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].desc = "content modifier to match only on HTTP stat-code-buffer";
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].url = "/rules/http-keywords.html#http-stat-code";
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].Setup = DetectHttpStatCodeSetup;
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].name = "http_stat_code";
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].desc =
+            "content modifier to match only on HTTP stat-code-buffer";
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].url = "/rules/http-keywords.html#http-stat-code";
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].Setup = DetectHttpStatCodeSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].RegisterTests = DetectHttpStatCodeRegisterTests;
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].RegisterTests = DetectHttpStatCodeRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_STAT_CODE].alternative = DETECT_HTTP_STAT_CODE;
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].flags |=
+            SIGMATCH_NOOPT | SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_STAT_CODE_CM].alternative = DETECT_HTTP_STAT_CODE;
 
     /* http.stat_code content modifier */
     sigmatch_table[DETECT_HTTP_STAT_CODE].name = "http.stat_code";
@@ -96,13 +101,17 @@ void DetectHttpStatCodeRegister (void)
     sigmatch_table[DETECT_HTTP_STAT_CODE].Setup = DetectHttpStatCodeSetupSticky;
     sigmatch_table[DETECT_HTTP_STAT_CODE].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("http_stat_code", ALPROTO_HTTP,
-            SIG_FLAG_TOCLIENT, HTP_RESPONSE_LINE,
-            DetectEngineInspectBufferGeneric, GetData);
+    DetectAppLayerInspectEngineRegister("http_stat_code", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+            HTP_RESPONSE_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
 
-    DetectAppLayerMpmRegister2("http_stat_code", SIG_FLAG_TOCLIENT, 4,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP,
-            HTP_RESPONSE_LINE);
+    DetectAppLayerMpmRegister("http_stat_code", SIG_FLAG_TOCLIENT, 4, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_HTTP1, HTP_RESPONSE_PROGRESS_LINE);
+
+    DetectAppLayerInspectEngineRegister("http_stat_code", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetData2);
+
+    DetectAppLayerMpmRegister("http_stat_code", SIG_FLAG_TOCLIENT, 4, PrefilterGenericMpmRegister,
+            GetData2, ALPROTO_HTTP2, HTTP2StateDataServer);
 
     DetectBufferTypeSetDescriptionByName("http_stat_code",
             "http response status code");
@@ -123,10 +132,8 @@ void DetectHttpStatCodeRegister (void)
 
 static int DetectHttpStatCodeSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    return DetectEngineContentModifierBufferSetup(de_ctx, s, arg,
-                                                  DETECT_AL_HTTP_STAT_CODE,
-                                                  g_http_stat_code_buffer_id,
-                                                  ALPROTO_HTTP);
+    return DetectEngineContentModifierBufferSetup(
+            de_ctx, s, arg, DETECT_HTTP_STAT_CODE_CM, g_http_stat_code_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
@@ -140,9 +147,9 @@ static int DetectHttpStatCodeSetup(DetectEngineCtx *de_ctx, Signature *s, const 
  */
 static int DetectHttpStatCodeSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(s, g_http_stat_code_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_stat_code_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
     return 0;
 }
@@ -157,14 +164,36 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
 
-        if (tx->response_status == NULL)
+        if (htp_tx_response_status(tx) == NULL)
             return NULL;
 
-        const uint32_t data_len = bstr_len(tx->response_status);
-        const uint8_t *data = bstr_ptr(tx->response_status);
+        const uint32_t data_len = (uint32_t)bstr_len(htp_tx_response_status(tx));
+        const uint8_t *data = bstr_ptr(htp_tx_response_status(tx));
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
+    }
+
+    return buffer;
+}
+
+static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id)
+{
+    SCEnter();
+
+    InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
+    if (buffer->inspect == NULL) {
+        uint32_t b_len = 0;
+        const uint8_t *b = NULL;
+
+        if (SCHttp2TxGetStatus(txv, &b, &b_len) != 1)
+            return NULL;
+        if (b == NULL || b_len == 0)
+            return NULL;
+
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;

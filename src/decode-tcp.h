@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,8 +22,8 @@
  * \todo RAW* macro's should be returning the raw value, not the host order
  */
 
-#ifndef __DECODE_TCP_H__
-#define __DECODE_TCP_H__
+#ifndef SURICATA_DECODE_TCP_H
+#define SURICATA_DECODE_TCP_H
 
 #define TCP_HEADER_LEN                       20
 #define TCP_OPTLENMAX                        40
@@ -54,6 +54,8 @@
 #define TCP_OPT_TFO                          0x22   /* TCP Fast Open */
 #define TCP_OPT_EXP1                         0xfd   /* Experimental, could be TFO */
 #define TCP_OPT_EXP2                         0xfe   /* Experimental, could be TFO */
+#define TCP_OPT_MD5                          0x13   /* 19: RFC 2385 TCP MD5 option */
+#define TCP_OPT_AO                           0x1d   /* 29: RFC 5925 TCP AO option */
 
 #define TCP_OPT_SACKOK_LEN                   2
 #define TCP_OPT_WS_LEN                       3
@@ -61,13 +63,14 @@
 #define TCP_OPT_MSS_LEN                      4
 #define TCP_OPT_SACK_MIN_LEN                 10 /* hdr 2, 1 pair 8 = 10 */
 #define TCP_OPT_SACK_MAX_LEN                 34 /* hdr 2, 4 pair 32= 34 */
-#define TCP_OPT_TFO_MIN_LEN                  6  /* kind, len, 6 */
-#define TCP_OPT_TFO_MAX_LEN                  20 /* kind, len, 18 */
+#define TCP_OPT_TFO_MIN_LEN                  4  /* kind, len, 2 bytes cookie: 4 */
+#define TCP_OPT_TFO_MAX_LEN                  18 /* kind, len, 18 */
 
 /** Max valid wscale value. */
 #define TCP_WSCALE_MAX                       14
 
 #define TCP_GET_RAW_OFFSET(tcph)             (((tcph)->th_offx2 & 0xf0) >> 4)
+#define TCP_GET_RAW_HLEN(tcph)               ((uint8_t)(TCP_GET_RAW_OFFSET((tcph)) << 2))
 #define TCP_GET_RAW_X2(tcph)                 (unsigned char)((tcph)->th_offx2 & 0x0f)
 #define TCP_GET_RAW_SRC_PORT(tcph)           SCNtohs((tcph)->th_sport)
 #define TCP_GET_RAW_DST_PORT(tcph)           SCNtohs((tcph)->th_dport)
@@ -83,48 +86,54 @@
 #define TCP_GET_RAW_SUM(tcph)                SCNtohs((tcph)->th_sum)
 
 /** macro for getting the first timestamp from the packet in host order */
-#define TCP_GET_TSVAL(p)                    ((p)->tcpvars.ts_val)
+#define TCP_GET_TSVAL(p) ((p)->l4.vars.tcp.ts_val)
 
 /** macro for getting the second timestamp from the packet in host order. */
-#define TCP_GET_TSECR(p)                    ((p)->tcpvars.ts_ecr)
+#define TCP_GET_TSECR(p) ((p)->l4.vars.tcp.ts_ecr)
 
-#define TCP_HAS_WSCALE(p)                   ((p)->tcpvars.ws.type == TCP_OPT_WS)
-#define TCP_HAS_SACK(p)                     ((p)->tcpvars.sack.type == TCP_OPT_SACK)
-#define TCP_HAS_SACKOK(p)                   ((p)->tcpvars.sackok.type == TCP_OPT_SACKOK)
-#define TCP_HAS_TS(p)                       ((p)->tcpvars.ts_set == TRUE)
-#define TCP_HAS_MSS(p)                      ((p)->tcpvars.mss.type == TCP_OPT_MSS)
-#define TCP_HAS_TFO(p)                      ((p)->tcpvars.tfo.type == TCP_OPT_TFO)
+#define TCP_HAS_WSCALE(p) ((p)->l4.vars.tcp.wscale_set)
+#define TCP_HAS_SACK(p)   (p)->l4.vars.tcp.sack_set
+#define TCP_HAS_TS(p)     ((p)->l4.vars.tcp.ts_set)
+#define TCP_HAS_MSS(p)    ((p)->l4.vars.tcp.mss_set)
+#define TCP_HAS_TFO(p)    ((p)->l4.vars.tcp.tfo_set)
 
 /** macro for getting the wscale from the packet. */
-#define TCP_GET_WSCALE(p)                    (TCP_HAS_WSCALE((p)) ? \
-                                                (((*(uint8_t *)(p)->tcpvars.ws.data) <= TCP_WSCALE_MAX) ? \
-                                                  (*(uint8_t *)((p)->tcpvars.ws.data)) : 0) : 0)
+#define TCP_GET_WSCALE(p) (p)->l4.vars.tcp.wscale
 
-#define TCP_GET_SACKOK(p)                    (TCP_HAS_SACKOK((p)) ? 1 : 0)
-#define TCP_GET_SACK_PTR(p)                  TCP_HAS_SACK((p)) ? (p)->tcpvars.sack.data : NULL
-#define TCP_GET_SACK_CNT(p)                  (TCP_HAS_SACK((p)) ? (((p)->tcpvars.sack.len - 2) / 8) : 0)
-#define TCP_GET_MSS(p)                       SCNtohs(*(uint16_t *)((p)->tcpvars.mss.data))
+#define TCP_GET_SACKOK(p)         (p)->l4.vars.tcp.sack_ok
+#define TCP_GET_SACK_PTR(p, tcph) ((uint8_t *)(tcph)) + (p)->l4.vars.tcp.sack_offset
+#define TCP_GET_SACK_CNT(p)       (p)->l4.vars.tcp.sack_cnt
+#define TCP_GET_MSS(p)            (p)->l4.vars.tcp.mss
 
-#define TCP_GET_OFFSET(p)                    TCP_GET_RAW_OFFSET((p)->tcph)
-#define TCP_GET_X2(p)                        TCP_GET_RAW_X2((p)->tcph)
-#define TCP_GET_HLEN(p)                      (TCP_GET_OFFSET((p)) << 2)
-#define TCP_GET_SRC_PORT(p)                  TCP_GET_RAW_SRC_PORT((p)->tcph)
-#define TCP_GET_DST_PORT(p)                  TCP_GET_RAW_DST_PORT((p)->tcph)
-#define TCP_GET_SEQ(p)                       TCP_GET_RAW_SEQ((p)->tcph)
-#define TCP_GET_ACK(p)                       TCP_GET_RAW_ACK((p)->tcph)
-#define TCP_GET_WINDOW(p)                    TCP_GET_RAW_WINDOW((p)->tcph)
-#define TCP_GET_URG_POINTER(p)               TCP_GET_RAW_URG_POINTER((p)->tcph)
-#define TCP_GET_SUM(p)                       TCP_GET_RAW_SUM((p)->tcph)
-#define TCP_GET_FLAGS(p)                     (p)->tcph->th_flags
+#define TCP_GET_OFFSET(p)                    TCP_GET_RAW_OFFSET((p)->l4.hdrs.tcph)
+#define TCP_GET_X2(p)                        TCP_GET_RAW_X2((p)->l4.hdrs.tcph)
+#define TCP_GET_HLEN(p)                      ((uint8_t)(TCP_GET_OFFSET((p)) << 2))
+#define TCP_GET_SRC_PORT(p)                  TCP_GET_RAW_SRC_PORT((p)->l4.hdrs.tcph)
+#define TCP_GET_DST_PORT(p)                  TCP_GET_RAW_DST_PORT((p)->l4.hdrs.tcph)
+#define TCP_GET_SEQ(p)                       TCP_GET_RAW_SEQ((p)->l4.hdrs.tcph)
+#define TCP_GET_ACK(p)                       TCP_GET_RAW_ACK((p)->l4.hdrs.tcph)
+#define TCP_GET_WINDOW(p)                    TCP_GET_RAW_WINDOW((p)->l4.hdrs.tcph)
+#define TCP_GET_URG_POINTER(p)               TCP_GET_RAW_URG_POINTER((p)->l4.hdrs.tcph)
+#define TCP_GET_SUM(p)                       TCP_GET_RAW_SUM((p)->l4.hdrs.tcph)
+#define TCP_GET_FLAGS(p)                     (p)->l4.hdrs.tcph->th_flags
 
-#define TCP_ISSET_FLAG_FIN(p)                ((p)->tcph->th_flags & TH_FIN)
-#define TCP_ISSET_FLAG_SYN(p)                ((p)->tcph->th_flags & TH_SYN)
-#define TCP_ISSET_FLAG_RST(p)                ((p)->tcph->th_flags & TH_RST)
-#define TCP_ISSET_FLAG_PUSH(p)               ((p)->tcph->th_flags & TH_PUSH)
-#define TCP_ISSET_FLAG_ACK(p)                ((p)->tcph->th_flags & TH_ACK)
-#define TCP_ISSET_FLAG_URG(p)                ((p)->tcph->th_flags & TH_URG)
-#define TCP_ISSET_FLAG_RES2(p)               ((p)->tcph->th_flags & TH_RES2)
-#define TCP_ISSET_FLAG_RES1(p)               ((p)->tcph->th_flags & TH_RES1)
+#define TCP_ISSET_FLAG_RAW_FIN(tcph)  ((tcph)->th_flags & TH_FIN)
+#define TCP_ISSET_FLAG_RAW_SYN(tcph)  ((tcph)->th_flags & TH_SYN)
+#define TCP_ISSET_FLAG_RAW_RST(tcph)  ((tcph)->th_flags & TH_RST)
+#define TCP_ISSET_FLAG_RAW_PUSH(tcph) ((tcph)->th_flags & TH_PUSH)
+#define TCP_ISSET_FLAG_RAW_ACK(tcph)  ((tcph)->th_flags & TH_ACK)
+#define TCP_ISSET_FLAG_RAW_URG(tcph)  ((tcph)->th_flags & TH_URG)
+#define TCP_ISSET_FLAG_RAW_RES2(tcph) ((tcph)->th_flags & TH_RES2)
+#define TCP_ISSET_FLAG_RAW_RES1(tcph) ((tcph)->th_flags & TH_RES1)
+
+#define TCP_ISSET_FLAG_FIN(p)  ((p)->l4.hdrs.tcph->th_flags & TH_FIN)
+#define TCP_ISSET_FLAG_SYN(p)  ((p)->l4.hdrs.tcph->th_flags & TH_SYN)
+#define TCP_ISSET_FLAG_RST(p)  ((p)->l4.hdrs.tcph->th_flags & TH_RST)
+#define TCP_ISSET_FLAG_PUSH(p) ((p)->l4.hdrs.tcph->th_flags & TH_PUSH)
+#define TCP_ISSET_FLAG_ACK(p)  ((p)->l4.hdrs.tcph->th_flags & TH_ACK)
+#define TCP_ISSET_FLAG_URG(p)  ((p)->l4.hdrs.tcph->th_flags & TH_URG)
+#define TCP_ISSET_FLAG_RES2(p) ((p)->l4.hdrs.tcph->th_flags & TH_RES2)
+#define TCP_ISSET_FLAG_RES1(p) ((p)->l4.hdrs.tcph->th_flags & TH_RES1)
 
 typedef struct TCPOpt_ {
     uint8_t type;
@@ -148,32 +157,31 @@ typedef struct TCPHdr_
     uint16_t th_win;    /**< pkt window */
     uint16_t th_sum;    /**< checksum */
     uint16_t th_urp;    /**< urgent pointer */
-} __attribute__((__packed__)) TCPHdr;
+} TCPHdr;
 
 typedef struct TCPVars_
 {
     /* commonly used and needed opts */
-    bool ts_set;
+    uint8_t md5_option_present : 1;
+    uint8_t ao_option_present : 1;
+    uint8_t ts_set : 1;
+    uint8_t sack_ok : 1;
+    uint8_t mss_set : 1;
+    uint8_t tfo_set : 1;
+    uint8_t wscale_set : 1;
+    uint8_t sack_set : 1;
+    uint8_t wscale;
+    uint8_t sack_cnt; /**< number of sack records */
+    uint16_t mss;     /**< MSS value in host byte order */
+    uint16_t stream_pkt_flags;
     uint32_t ts_val;    /* host-order */
     uint32_t ts_ecr;    /* host-order */
-    TCPOpt sack;
-    TCPOpt sackok;
-    TCPOpt ws;
-    TCPOpt mss;
-    TCPOpt tfo;         /* tcp fast open */
+    uint16_t sack_offset; /**< offset relative to tcp header start */
 } TCPVars;
-
-#define CLEAR_TCP_PACKET(p) {   \
-    (p)->level4_comp_csum = -1; \
-    PACKET_CLEAR_L4VARS((p));   \
-    (p)->tcph = NULL;           \
-}
 
 void DecodeTCPRegisterTests(void);
 
 /** -------- Inline functions ------- */
-static inline uint16_t TCPChecksum(uint16_t *, uint16_t *, uint16_t, uint16_t);
-static inline uint16_t TCPV6Checksum(uint16_t *, uint16_t *, uint16_t, uint16_t);
 
 /**
  * \brief Calculate or validate the checksum for the TCP packet
@@ -187,8 +195,8 @@ static inline uint16_t TCPV6Checksum(uint16_t *, uint16_t *, uint16_t, uint16_t)
  * \retval csum For validation 0 will be returned for success, for calculation
  *    this will be the checksum.
  */
-static inline uint16_t TCPChecksum(uint16_t *shdr, uint16_t *pkt,
-                                   uint16_t tlen, uint16_t init)
+static inline uint16_t TCPChecksum(
+        const uint16_t *shdr, const uint16_t *pkt, uint16_t tlen, uint16_t init)
 {
     uint16_t pad = 0;
     uint32_t csum = init;
@@ -252,8 +260,8 @@ static inline uint16_t TCPChecksum(uint16_t *shdr, uint16_t *pkt,
  * \retval csum For validation 0 will be returned for success, for calculation
  *    this will be the checksum.
  */
-static inline uint16_t TCPV6Checksum(uint16_t *shdr, uint16_t *pkt,
-                                     uint16_t tlen, uint16_t init)
+static inline uint16_t TCPV6Checksum(
+        const uint16_t *shdr, const uint16_t *pkt, uint16_t tlen, uint16_t init)
 {
     uint16_t pad = 0;
     uint32_t csum = init;
@@ -305,6 +313,4 @@ static inline uint16_t TCPV6Checksum(uint16_t *shdr, uint16_t *pkt,
     return (uint16_t)~csum;
 }
 
-
-#endif /* __DECODE_TCP_H__ */
-
+#endif /* SURICATA_DECODE_TCP_H */

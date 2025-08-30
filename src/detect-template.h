@@ -21,11 +21,11 @@
  * \author XXX Yourname <youremail@yourdomain>
  */
 
-#ifndef __DETECT_TEMPLATE_H__
-#define __DETECT_TEMPLATE_H__
+#ifndef SURICATA_DETECT_TEMPLATE_H
+#define SURICATA_DETECT_TEMPLATE_H
 
 /** Per keyword data. This is set up by the DetectTemplateSetup() function.
- *  Each signature will have an instance of DetectTemplateData per occurence
+ *  Each signature will have an instance of DetectTemplateData per occurrence
  *  of the keyword.
  *  The structure should be considered static/readonly after initialization.
  */
@@ -38,4 +38,4 @@ typedef struct DetectTemplateData_ {
  *         detect.c::SigTableSetup() */
 void DetectTemplateRegister(void);
 
-#endif /* __DETECT_TEMPLATE_H__ */
+#endif /* SURICATA_DETECT_TEMPLATE_H */

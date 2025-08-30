@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_CONTENT_H__
-#define __DETECT_CONTENT_H__
+#ifndef SURICATA_DETECT_CONTENT_H
+#define SURICATA_DETECT_CONTENT_H
 
 /* Flags affecting this content */
 
@@ -59,6 +59,8 @@
 #define DETECT_CONTENT_STARTS_WITH      BIT_U32(19)
 /** MPM pattern selected by the engine or forced by fast_pattern keyword */
 #define DETECT_CONTENT_MPM              BIT_U32(20)
+#define DETECT_CONTENT_WITHIN2DEPTH     BIT_U32(21)
+#define DETECT_CONTENT_DISTANCE2OFFSET  BIT_U32(22)
 
 /** a relative match to this content is next, used in matching phase */
 #define DETECT_CONTENT_RELATIVE_NEXT    (DETECT_CONTENT_WITHIN_NEXT|DETECT_CONTENT_DISTANCE_NEXT)
@@ -80,6 +82,11 @@
                                        ((c)->flags & DETECT_CONTENT_OFFSET)   || \
                                        ((c)->flags & DETECT_CONTENT_FAST_PATTERN_CHOP))
 
+/*
+ * Values for distance, and within must be less than or equal
+ * to this value (absolute value where required).
+ */
+#define DETECT_CONTENT_VALUE_MAX 1024 * 1024
 
 #include "util-spm.h"
 
@@ -107,8 +114,7 @@ typedef struct DetectContentData_ {
 } DetectContentData;
 
 /* prototypes */
-void DetectContentRegister (void);
-uint32_t DetectContentMaxId(DetectEngineCtx *);
+void DetectContentRegister(void);
 DetectContentData *DetectContentParse(SpmGlobalThreadCtx *spm_global_thread_ctx,
                                       const char *contentstr);
 int DetectContentDataParse(const char *keyword, const char *contentstr,
@@ -123,4 +129,9 @@ void DetectContentFree(DetectEngineCtx *, void *);
 bool DetectContentPMATCHValidateCallback(const Signature *s);
 void DetectContentPropagateLimits(Signature *s);
 
-#endif /* __DETECT_CONTENT_H__ */
+void DetectContentPatternPrettyPrint(const DetectContentData *cd, char *str, size_t str_len);
+void SigParseRequiredContentSize(
+        const Signature *s, const uint64_t max, const SigMatch *sm, int *len, int *offset);
+int DetectContentConvertToNocase(DetectEngineCtx *de_ctx, DetectContentData *cd);
+
+#endif /* SURICATA_DETECT_CONTENT_H */

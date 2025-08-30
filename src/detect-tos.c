@@ -96,12 +96,14 @@ static int DetectTosMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
     const DetectTosData *tosd = (const DetectTosData *)ctx;
     int result = 0;
 
-    if (!PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p)) {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+    if (!PacketIsIPv4(p)) {
         return 0;
     }
 
-    if (tosd->tos == IPV4_GET_IPTOS(p)) {
-        SCLogDebug("tos match found for %d\n", tosd->tos);
+    const IPV4Hdr *ip4h = PacketGetIPv4(p);
+    if (tosd->tos == IPV4_GET_RAW_IPTOS(ip4h)) {
+        SCLogDebug("tos match found for %d", tosd->tos);
         result = 1;
     }
 
@@ -111,23 +113,24 @@ static int DetectTosMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
 static DetectTosData *DetectTosParse(const char *arg, bool negate)
 {
     DetectTosData *tosd = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2len;
 
-    ret = DetectParsePcreExec(&parse_regex, arg, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, arg, 0, 0);
     if (ret != 2) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid tos option - %s. "
+        SCLogError("invalid tos option - %s. "
                    "The tos option value must be in the range "
-                   "%u - %u", arg, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
+                   "%u - %u",
+                arg, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
         goto error;
     }
 
     /* For TOS value */
     char tosbytes_str[64] = "";
-    res = pcre_copy_substring((char *)arg, ov, MAX_SUBSTRINGS, 1,
-                             tosbytes_str, sizeof(tosbytes_str));
+    pcre2len = sizeof(tosbytes_str);
+    int res = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)tosbytes_str, &pcre2len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
+        SCLogError("pcre2_substring_copy_bynumber failed");
         goto error;
     }
 
@@ -144,9 +147,10 @@ static DetectTosData *DetectTosParse(const char *arg, bool negate)
     }
 
     if (!(tos >= DETECT_IPTOS_MIN && tos <= DETECT_IPTOS_MAX)) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid tos argument - "
+        SCLogError("Invalid tos argument - "
                    "%s.  The tos option value must be in the range "
-                   "%u - %u", tosbytes_str, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
+                   "%u - %u",
+                tosbytes_str, DETECT_IPTOS_MIN, DETECT_IPTOS_MAX);
         goto error;
     }
 
@@ -156,9 +160,13 @@ static DetectTosData *DetectTosParse(const char *arg, bool negate)
     tosd->tos = (uint8_t)tos;
     tosd->negated = negate;
 
+    pcre2_match_data_free(match);
     return tosd;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     return NULL;
 }
 
@@ -179,16 +187,11 @@ static int DetectTosSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg
     if (tosd == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TOS, (SigMatchCtx *)tosd, DETECT_SM_LIST_MATCH) == NULL) {
         DetectTosFree(de_ctx, tosd);
         return -1;
     }
-
-    sm->type = DETECT_TOS;
-    sm->ctx = (SigMatchCtx *)tosd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
     return 0;
 }
@@ -327,7 +330,7 @@ static int DetectTosTest12(void)
     if (p == NULL)
         goto end;
 
-    IPV4_SET_RAW_IPTOS(p->ip4h, 10);
+    p->l3.hdrs.ip4h->ip_tos = 10;
 
     const char *sigs[4];
     sigs[0]= "alert ip any any -> any any (msg:\"Testing id 1\"; tos: 10 ; sid:1;)";
@@ -362,6 +365,5 @@ void DetectTosRegisterTests(void)
     UtRegisterTest("DetectTosTest09", DetectTosTest09);
     UtRegisterTest("DetectTosTest10", DetectTosTest10);
     UtRegisterTest("DetectTosTest12", DetectTosTest12);
-    return;
 }
 #endif

@@ -1,729 +1,866 @@
 HTTP Keywords
 =============
+
+.. role:: example-rule-action
+.. role:: example-rule-header
+.. role:: example-rule-options
 .. role:: example-rule-emphasis
 
-There are additional content modifiers that can provide protocol-specific
-capabilities at the application layer. More information can be found at
-:doc:`payload-keywords` These keywords make sure the signature checks only
-specific parts of the network traffic. For instance, to check specifically on
-the request URI, cookies, or the HTTP request or response body, etc.
-
-All HTTP keywords are modifiers. Note the difference between content modifiers
-and sticky buffers. See :ref:`rules-modifiers` for more information. As a
-refresher:
-
-* **'sticky buffers'** are placed first and all keywords following it apply to that buffer, for instance::
-
-      alert http any any -> any any (http.response_line; content:"403 Forbidden"; sid:1;)
-
-* **'content modifiers'** look back in the rule, e.g.::
-
-      alert http any any -> any any (content:"index.php"; http_uri; sid:1;)
-
-The following **request** keywords are available:
-
-============================== ======================== ==================
-Keyword                        Sticky or Modifier       Direction
-============================== ======================== ==================
-http.uri                       Sticky Buffer            Request
-http.uri.raw                   Sticky Buffer            Request
-http.method                    Sticky Buffer            Request
-http.request_line              Sticky Buffer            Request
-http.request_body              Sticky Buffer            Request
-http.header                    Sticky Buffer            Both
-http.header.raw                Sticky Buffer            Both
-http.cookie                    Sticky Buffer            Both
-http.user_agent                Sticky Buffer            Request
-http.host                      Sticky Buffer            Request
-http.host.raw                  Sticky Buffer            Request
-http.accept                    Sticky Buffer            Request
-http.accept_lang               Sticky Buffer            Request
-http.accept_enc                Sticky Buffer            Request
-http.referer                   Sticky Buffer            Request
-http.connection                Sticky Buffer            Request
-http.content_type              Sticky Buffer            Both
-http.content_len               Sticky Buffer            Both
-http.start                     Sticky Buffer            Both
-http.protocol                  Sticky Buffer            Both
-http.header_names              Sticky Buffer            Both
-============================== ======================== ==================
-
-The following **response** keywords are available:
-
-============================== ======================== ==================
-Keyword                        Sticky or Modifier       Direction
-============================== ======================== ==================
-http.stat_msg                  Sticky Buffer            Response
-http.stat_code                 Sticky Buffer            Response
-http.response_line             Sticky Buffer            Response
-http.header                    Sticky Buffer            Both
-http.header.raw                Sticky Buffer            Both
-http.cookie                    Sticky Buffer            Both
-http.response_body             Sticky Buffer            Response
-http.server                    Sticky Buffer            Response
-http.location                  Sticky Buffer            Response
-file_data                      Sticky Buffer            Response
-http.content_type              Sticky Buffer            Both
-http.content_len               Sticky Buffer            Both
-http.start                     Sticky Buffer            Both
-http.protocol                  Sticky Buffer            Both
-http.header_names              Sticky Buffer            Both
-============================== ======================== ==================
+Using the HTTP specific sticky buffers (see :ref:`rules-modifiers`) provides a
+way to efficiently inspect the specific fields of HTTP protocol communications.
+After specifying a sticky buffer in a rule it should be followed by one or
+more :doc:`payload-keywords` or using :ref:`pcre`.
 
 HTTP Primer
 -----------
-It is important to understand the structure of HTTP requests and
-responses. A simple example of a HTTP request and response follows:
+HTTP is considered a client-server or request-response protocol. A client
+requests resources from a server and a server responds to the request.
 
-**HTTP request**
+In versions of HTTP prior to version 2 a client request could look like:
 
-::
+Example HTTP Request::
 
-   GET /index.html HTTP/1.0\r\n
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
 
-GET is a request **method**.  Examples of methods are: GET, POST, PUT,
-HEAD, etc. The URI path is ``/index.html`` and the HTTP version is
-``HTTP/1.0``. Several HTTP versions have been used over the years; of
-the versions 0.9, 1.0 and 1.1, 1.0 and 1.1 are the most commonly used
-today.
-
-**HTTP response**
-
-::
-
-   HTTP/1.0 200 OK\r\n
-   <html>
-   <title> some page </title>
-   </HTML>
-
-In this example, HTTP/1.0 is the HTTP version, 200 the response status
-code and OK the response status message.
-
-Another more detailed example:
-
-Request:
-
-.. image:: http-keywords/request.png
-
-Response:
-
-.. image:: http-keywords/response1.png
-
-Request:
-
-.. image:: http-keywords/request2.png
-
-Although cookies are sent in an HTTP header, you can not match on them
-with the ``http.header`` keyword. Cookies are matched with their own
-keyword, namely ``http.cookie``.
-
-Each part of the table belongs to a so-called *buffer*. The HTTP
-method belongs to the method buffer, HTTP headers to the header buffer
-etc. A buffer is a specific portion of the request or response that
-Suricata extracts in memory for inspection.
-
-All previous described keywords can be used in combination with a
-buffer in a signature. The keywords ``distance`` and ``within`` are
-relative modifiers, so they may only be used within the same
-buffer. You can not relate content matches against different buffers
-with relative modifiers.
-
-http.method
------------
-
-With the ``http.method`` content modifier, it is possible to match
-specifically and only on the HTTP method buffer. The keyword can be
-used in combination with all previously mentioned content modifiers
-such as: ``depth``, ``distance``, ``offset``, ``nocase`` and ``within``.
-
-Examples of methods are: **GET**, **POST**, **PUT**, **HEAD**,
-**DELETE**, **TRACE**, **OPTIONS**, **CONNECT** and **PATCH**.
-
-Example of a method in a HTTP request:
-
-.. image:: http-keywords/method2.png
-
-Example of the purpose of method:
-
-.. image:: http-keywords/method.png
-
-.. image:: http-keywords/Legenda_rules.png
-
-.. image:: http-keywords/method1.png
-
-.. _rules-http-uri-normalization:
-
-http.uri and http.uri.raw
--------------------------
-
-With the ``http.uri`` and the ``http.uri.raw`` content modifiers, it
-is possible to match specifically and only on the request URI
-buffer. The keyword can be used in combination with all previously
-mentioned content modifiers like ``depth``, ``distance``, ``offset``,
-``nocase`` and ``within``.
-
-The uri has two appearances in Suricata: the uri.raw and the
-normalized uri. The space for example can be indicated with the
-heximal notation %20. To convert this notation in a space, means
-normalizing it. It is possible though to match specific on the
-characters %20 in a uri. This means matching on the uri.raw. The
-uri.raw and the normalized uri are separate buffers. So, the uri.raw
-inspects the uri.raw buffer and can not inspect the normalized buffer.
-
-Example of the URI in a HTTP request:
-
-.. image:: http-keywords/uri1.png
-
-Example of the purpose of ``http.uri``:
-
-.. image:: http-keywords/uri.png
-
-uricontent
-----------
-
-The ``uricontent`` keyword has the exact same effect as the
-``http.uri`` content modifier. ``uricontent`` is a deprecated
-(although still supported) way to match specifically and only on the
-request URI buffer.
-
-Example of ``uricontent``:
+Example signature that would alert on the above request.
 
 .. container:: example-rule
 
-    alert tcp $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"ET TROJAN Possible Vundo Trojan Variant reporting to Controller"; flow:established,to_server; content:"POST "; depth:5; :example-rule-emphasis:`uricontent:"/frame.html?";` urilen: > 80; classtype:trojan-activity; reference:url,doc.emergingthreats.net/2009173; reference:url,www.emergingthreats.net/cgi-bin/cvsweb.cgi/sigs/VIRUS/TROJAN_Vundo; sid:2009173; rev:2;)
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request Example"; \
+  flow:established,to_server; :example-rule-options:`http.method; \
+  content:"GET"; http.uri; content:"/index.html"; bsize:11; http.protocol; \
+  content:"HTTP/1.1"; bsize:8; http.user_agent; content:"Mozilla/5.0"; bsize:11; \
+  http.host; content:"suricata.io"; bsize:11;` classtype:bad-unknown; sid:25; rev:1;)
 
-The difference between ``http.uri`` and ``uricontent`` is the syntax:
+In versions of HTTP prior to version 2 a server response could look like:
 
-.. image:: http-keywords/uricontent1.png
+Example HTTP Response::
 
-.. image:: http-keywords/http_uri.png
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Content-Length: 258
+  Date: Thu, 14 Dec 2023 20:22:41 GMT
+  Server: nginx/0.8.54
+  Connection: Close
 
-When authoring new rules, it is recommended that the ``http.uri``
-content sticky buffer be used rather than the deprecated ``uricontent``
-keyword.
-
-urilen
-------
-
-The ``urilen`` keyword is used to match on the length of the request
-URI. It is possible to use the ``<`` and ``>`` operators, which
-indicate respectively *smaller than* and *larger than*.
-
-The format of ``urilen`` is::
-
-  urilen:3;
-
-Other possibilities are::
-
-  urilen:1;
-  urilen:>1;
-  urilen:<10;
-  urilen:10<>20;	(bigger than 10, smaller than 20)
-
-Example:
-
-.. image:: http-keywords/urilen.png
-
-Example of ``urilen`` in a signature:
+Example signature that would alert on the above response.
 
 .. container:: example-rule
 
-    alert tcp $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"ET TROJAN Possible Vundo Trojan Variant reporting to Controller"; flow:established,to_server; content:"POST "; depth:5; uricontent:"/frame.html?"; :example-rule-emphasis:`urilen: > 80;` classtype:trojan-activity; reference:url,doc.emergingthreats.net/2009173; reference:url,www.emergingthreats.net/cgi-bin/cvsweb.cgi/sigs/VIRUS/TROJAN_Vundo; sid:2009173; rev:2;)
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Stat Code Example"; \
+  flow:established,to_client; :example-rule-options:`http.stat_code; \
+  content:"200"; bsize:8; http.content_type; content:"text/html"; bsize:9;` \
+  classtype:bad-unknown; sid:30; rev:1;)
 
-You can also append ``norm`` or ``raw`` to define what sort of buffer you want
-to use (normalized or raw buffer).
+Request Keywords:
+ * :ref:`file.name`
+ * :ref:`http.accept`
+ * :ref:`http.accept_enc`
+ * :ref:`http.accept_lang`
+ * :ref:`http.host`
+ * :ref:`http.host.raw`
+ * :ref:`http.method`
+ * :ref:`http.referer`
+ * :ref:`http.request_body`
+ * :ref:`http.request_header`
+ * :ref:`http.request_line`
+ * :ref:`http.uri`
+ * :ref:`http.uri.raw` 
+ * :ref:`http.user_agent`
+ * :ref:`urilen`
 
-http.protocol
+Response Keywords:
+ * :ref:`http.location`
+ * :ref:`http.response_body`
+ * :ref:`http.response_header`
+ * :ref:`http.response_line`
+ * :ref:`http.server`
+ * :ref:`http.stat_code`
+ * :ref:`http.stat_msg`
+
+Request or Response Keywords:
+ * :ref:`file.data`
+ * :ref:`http.connection`
+ * :ref:`http.content_len`
+ * :ref:`http.content_type`
+ * :ref:`http.cookie`
+ * :ref:`http.header`
+ * :ref:`http.header.raw`
+ * :ref:`http.header_names`
+ * :ref:`http.protocol`
+ * :ref:`http.start`
+
+.. _http.normalization:
+
+Normalization
 -------------
 
-The ``http.protocol`` inspects the protocol field from the HTTP request or
-response line. If the request line is 'GET / HTTP/1.0\r\n', then this buffer
-will contain 'HTTP/1.0'.
+There are times when Suricata performs formatting/normalization changes to
+traffic that is seen.
 
-Example::
+Duplicate Header Names
+~~~~~~~~~~~~~~~~~~~~~~
 
-    alert http any any -> any any (flow:to_server; http.protocol; content:"HTTP/1.0"; sid:1;)
+If there are multiple values for the same header name, they are concatenated
+with a comma and space (", ") between each value. More information can be
+found in RFC 2616 `<https://www.rfc-editor.org/rfc/rfc2616.html#section-4.2>`_
 
-``http.protocol`` replaces the previous keyword name: ```http_protocol``. You may continue
-+to use the previous name, but it's recommended that rules be converted to use
-+the new name.
+In the example below, notice that the User-Agent header, regardless of the 
+letter casing is evaluated as the same header. The normalized header evaluation
+leads to the concatenated header values as described in the RFC above.
 
-Example::
+Example Duplicate HTTP Header::
 
-    alert http any any -> any any (flow:to_server; http.protocol; content:"HTTP/1.0"; sid:1;)
+  GET / HTTP/1.1
+  Host: suricata.io
+  User-Agent: Mozilla/5.0
+  User-agent: Chrome/121.0.0
 
+.. container:: example-rule
 
-http.request_line
------------------
+  alert http $HOME_NET -> $EXTERNAL_NET (msg:"Example Duplicate Header"; \
+  flow:established,to_server; :example-rule-options:`http.user_agent; \
+  content:"Mozilla/5.0, Chrome/121.0.0";` classtype:bad-unknown; sid:103; \
+  rev:1;)
 
-The ``http.request_line`` forces the whole HTTP request line to be inspected.
+.. _file.name:
 
-Example::
+file.name
+---------
 
-    alert http any any -> any any (http.request_line; content:"GET / HTTP/1.0"; sid:1;)
+The ``file.name`` keyword can be used with HTTP requests.
 
-http.header and http.header.raw
--------------------------------
+It is possible to use any of the :doc:`payload-keywords` with the
+``file.name`` keyword.
 
-With the ``http.header`` content modifier, it is possible to match
-specifically and only on the HTTP header buffer. This contains all of
-the extracted headers in a single buffer, except for those indicated
-in the documentation that are not able to match by this buffer and
-have their own content modifier (e.g. ``http.cookie``). The modifier
-can be used in combination with all previously mentioned content
-modifiers, like ``depth``, ``distance``, ``offset``, ``nocase`` and
-``within``.
+Example HTTP Request::
 
-    **Note**: the header buffer is *normalized*. Any trailing
-    whitespace and tab characters are removed. See:
-    https://lists.openinfosecfoundation.org/pipermail/oisf-users/2011-October/000935.html.
-    To avoid that, use the ``http.header.raw`` keyword.
+  GET /picture.jpg HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
 
-Example of a header in a HTTP request:
+.. container:: example-rule
 
-.. image:: http-keywords/header.png
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP file.name Example"; \
+  flow:established,to_client; :example-rule-options:`file.name; \
+  content:"picture.jpg";` classtype:bad-unknown; sid:129; rev:1;)
 
-Example of the purpose of ``http.header``:
+.. note:: Additional information can be found at :doc:`file-keywords`
 
-.. image:: http-keywords/header1.png
-
-http.cookie
------------
-
-With the ``http.cookie`` content modifier, it is possible to match
-specifically and only on the cookie buffer. The keyword can be used in
-combination with all previously mentioned content modifiers like
-``depth``, ``distance``, ``offset``, ``nocase`` and ``within``.
-
-Note that cookies are passed in HTTP headers, but are extracted to a
-dedicated buffer and matched using their own specific content
-modifier.
-
-Example of a cookie in a HTTP request:
-
-.. image:: http-keywords/cookie.png
-
-Example of the purpose of ``http.cookie``:
-
-.. image:: http-keywords/cookie1.png
-
-http.user_agent
----------------
-
-The ``http.user_agent`` content modifier is part of the HTTP request
-header. It makes it possible to match specifically on the value of the
-User-Agent header. It is normalized in the sense that it does not
-include the _"User-Agent: "_ header name and separator, nor does it
-contain the trailing carriage return and line feed (CRLF). The keyword
-can be used in combination with all previously mentioned content
-modifiers like ``depth``, ``distance``, ``offset``, ``nocase`` and
-``within``. Note that the ``pcre`` keyword can also inspect this
-buffer when using the ``/V`` modifier.
-
-Normalization: leading spaces **are not** part of this buffer. So
-"User-Agent: \r\n" will result in an empty ``http.user_agent`` buffer.
-
-Example of the User-Agent header in a HTTP request:
-
-.. image:: http-keywords/user_agent.png
-
-Example of the purpose of ``http.user_agent``:
-
-.. image:: http-keywords/user_agent_match.png
-
-Notes
-~~~~~
-
--  The ``http.user_agent`` buffer will NOT include the header name,
-   colon, or leading whitespace.  i.e. it will not include
-   "User-Agent: ".
-
--  The ``http.user_agent`` buffer does not include a CRLF (0x0D
-   0x0A) at the end.  If you want to match the end of the buffer, use a
-   relative ``isdataat`` or a PCRE (although PCRE will be worse on
-   performance).
-
--  If a request contains multiple "User-Agent" headers, the values will
-   be concatenated in the ``http.user_agent`` buffer, in the order
-   seen from top to bottom, with a comma and space (", ") between each
-   of them.
-
-   Example request::
-
-          GET /test.html HTTP/1.1
-          User-Agent: SuriTester/0.8
-          User-Agent: GGGG
-
-   ``http.user_agent`` buffer contents::
-
-          SuriTester/0.8, GGGG
-
--  Corresponding PCRE modifier: ``V``
-
--  Using the ``http.user_agent`` buffer is more efficient when it
-   comes to performance than using the ``http.header`` buffer (~10%
-   better).
-
--  `https://blog.inliniac.net/2012/07/09/suricata-http\_user\_agent-vs-http\_header/ <https://blog.inliniac.net/2012/07/09/suricata-http_user_agent-vs-http_header/>`_
+.. _http.accept:
 
 http.accept
 -----------
 
-Sticky buffer to match on the HTTP Accept header. Only contains the header
-value. The \\r\\n after the header are not part of the buffer.
+The ``http.accept`` keyword is used to match on the Accept field that
+can be present in HTTP request headers.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.accept`` keyword.
 
-    alert http any any -> any any (http.accept; content:"image/gif"; sid:1;)
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Accept: */*
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Accept Example"; \
+  flow:established,to_server; :example-rule-options:`http.accept; \
+  content:"*/*";` bsize:3; classtype:bad-unknown; sid:91; rev:1;)
+
+.. note:: ``http.accept`` does not include the leading space or trailing \\r\\n
+
+.. note:: ``http.accept`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
+
+.. _http.accept_enc:
 
 http.accept_enc
 ---------------
 
-Sticky buffer to match on the HTTP Accept-Encoding header. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+The ``http.accept_enc`` keyword is used to match on the Accept-Encoding field
+that can be present in HTTP request headers.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.accept_enc`` keyword.
 
-    alert http any any -> any any (http.accept_enc; content:"gzip"; sid:1;)
+Example HTTP Request::
 
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Accept-Encoding: gzip, deflate
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Accept-Encoding Example"; \
+  flow:established,to_server; :example-rule-options:`http.accept_enc; \
+  content:"gzip, deflate";` bsize:13; classtype:bad-unknown; sid:92; rev:1;)
+
+.. note:: ``http.accept_enc`` does not include the leading space or trailing
+   \\r\\n
+
+.. note:: ``http.accept_enc`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
+
+.. _http.accept_lang:
 
 http.accept_lang
 ----------------
 
-Sticky buffer to match on the HTTP Accept-Language header. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+The ``http.accept_lang`` keyword is used to match on the Accept-Language field
+that can be present in HTTP request headers.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.accept_lang`` keyword.
 
-    alert http any any -> any any (http.accept_lang; content:"en-us"; sid:1;)
+Example HTTP Request::
 
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Accept-Language: en-US
+  Host: suricata.io
 
-http.connection
----------------
+.. container:: example-rule
 
-Sticky buffer to match on the HTTP Connection header. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Accept-Encoding Example"; \
+  flow:established,to_server; :example-rule-options:`http.accept_lang; \
+  content:"en-US";` bsize:5; classtype:bad-unknown; sid:93; rev:1;)
 
-Example::
+.. note:: ``http.accept_lang`` does not include the leading space or
+  trailing \\r\\n
 
-    alert http any any -> any any (http.connection; content:"keep-alive"; sid:1;)
+.. note:: ``http.accept_lang`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
 
+.. _http.host:
 
-http.content_type
------------------
+http.host
+---------
 
-Sticky buffer to match on the HTTP Content-Type headers. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+Matching on the HTTP host name has two options in Suricata, the ``http.host``
+and the ``http.host.raw`` sticky buffers.
 
-Use flow:to_server or flow:to_client to force inspection of request or response.
+It is possible to use any of the :doc:`payload-keywords` with both ``http.host``
+keywords.
 
-Examples::
+.. note:: The ``http.host`` keyword normalizes the host header contents. If a
+  host name has uppercase characters, those would be changed to lowercase.
 
-    alert http any any -> any any (flow:to_server; \
-            http.content_type; content:"x-www-form-urlencoded"; sid:1;)
+Normalization Example::
 
-    alert http any any -> any any (flow:to_client; \
-            http.content_type; content:"text/javascript"; sid:2;)
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: SuRiCaTa.Io
 
+In the above example the host buffer would contain `suricata.io`.
 
-http.content_len
-----------------
+.. container:: example-rule
 
-Sticky buffer to match on the HTTP Content-Length headers. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Host Example"; \
+  flow:established,to_server; :example-rule-options:`http.host; \
+  content:"suricata.io";` bsize:11; classtype:bad-unknown; sid:123; rev:1;)
 
-Use flow:to_server or flow:to_client to force inspection of request or response.
+.. note:: The ``nocase`` keyword is no longer allowed since the host names
+  are normalized to contain only lowercase letters.
 
-Examples::
+.. note:: ``http.host`` does not contain the port associated with the host
+  (i.e. suricata.io:1234). To match on the host and port or negate a host
+  and port use :ref:`http.host.raw`.
 
-    alert http any any -> any any (flow:to_server; \
-            http.content_len; content:"666"; sid:1;)
+.. note:: ``http.host`` does not include the leading space or trailing \\r\\n
 
-    alert http any any -> any any (flow:to_client; \
-            http.content_len; content:"555"; sid:2;)
+.. note:: The ``http.host`` and ``http.host.raw`` buffers are populated
+  from either the URI (if the full URI is present in the request like
+  in a proxy request) or the HTTP Host header. If both are present, the
+  URI is used.
 
-To do a numeric inspection of the content length, ``byte_test`` can be used.
+.. note:: ``http.host`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
 
-Example, match if C-L is equal to or bigger than 8079::
+.. _http.host.raw:
 
-    alert http any any -> any any (flow:to_client; \
-            http.content_len; byte_test:0,>=,8079,0,string,dec; sid:3;)
+http.host.raw
+-------------
+
+The ``http.host.raw`` buffer matches on HTTP host content but does not have
+any normalization performed on the buffer contents (see :ref:`http.host`)
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: SuRiCaTa.Io:8445
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Host Raw Example"; \
+  flow:established,to_server; :example-rule-options:`http.host.raw; \
+  content:"SuRiCaTa.Io|3a|8445";` bsize:16; classtype:bad-unknown; sid:124; rev:1;)
+
+.. note:: ``http.host.raw`` does not include the leading space or trailing \\r\\n
+
+.. note:: The ``http.host`` and ``http.host.raw`` buffers are populated
+  from either the URI (if the full URI is present in the request like
+  in a proxy request) or the HTTP Host header. If both are present, the
+  URI is used.
+
+.. note:: ``http.host.raw`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
+
+.. _http.method:
+
+http.method
+-----------
+
+The ``http.method`` keyword matches on the method/verb used in an HTTP request.
+HTTP request methods can be any of the following:
+
+* GET
+* POST
+* HEAD
+* OPTIONS
+* PUT
+* DELETE
+* TRACE
+* CONNECT
+* PATCH
+
+It is possible to use any of the :doc:`payload-keywords` with the ``http.method`` keyword.
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request Example"; \
+  flow:established,to_server; :example-rule-options:`http.method; \
+  content:"GET";` classtype:bad-unknown; sid:2; rev:1;)
+
+.. _http.referer:
 
 http.referer
----------------
+------------
 
-Sticky buffer to match on the HTTP Referer header. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+The ``http.referer`` keyword is used to match on the Referer field that
+can be present in HTTP request headers.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.referer`` keyword.
 
-    alert http any any -> any any (http.referer; content:".php"; sid:1;)
+Example HTTP Request::
 
-http.start
-----------
+  GET / HTTP/1.1
+  Host: suricata.io
+  Referer: https://suricata.io
 
-Inspect the start of a HTTP request or response. This will contain the
-request/response line plus the request/response headers. Use flow:to_server
-or flow:to_client to force inspection of request or response.
+.. container:: example-rule
 
-Example::
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Referer Example"; \
+  flow:established,to_server; :example-rule-options:`http.referer; \
+  content:"http|3a 2f 2f|suricata.io";` bsize:19; classtype:bad-unknown; \
+  sid:200; rev:1;)
 
-    alert http any any -> any any (http.start; content:"HTTP/1.1|0d 0a|User-Agent"; sid:1;)
+.. note:: ``http.referer`` does not include the leading space or trailing
+   \\r\\n
 
-The buffer contains the normalized headers and is terminated by an extra
-\\r\\n to indicate the end of the headers.
+.. note:: ``http.referer`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
 
-http.header_names
------------------
-
-Inspect a buffer only containing the names of the HTTP headers. Useful
-for making sure a header is not present or testing for a certain order
-of headers.
-
-Buffer starts with a \\r\\n and ends with an extra \\r\\n.
-
-Example buffer::
-
-    \\r\\nHost\\r\\n\\r\\n
-
-Example rule::
-
-    alert http any any -> any any (http.header_names; content:"|0d 0a|Host|0d 0a|"; sid:1;)
-
-Example to make sure *only* Host is present::
-
-    alert http any any -> any any (http.header_names; \
-            content:"|0d 0a|Host|0d 0a 0d 0a|"; sid:1;)
-
-Example to make sure *User-Agent* is directly after *Host*::
-
-    alert http any any -> any any (http.header_names; \
-            content:"|0d 0a|Host|0d 0a|User-Agent|0d 0a|"; sid:1;)
-
-Example to make sure *User-Agent* is after *Host*, but not necessarily directly after::
-
-    alert http any any -> any any (http.header_names; \
-            content:"|0d 0a|Host|0d 0a|"; content:"|0a 0d|User-Agent|0d 0a|"; \
-            distance:-2; sid:1;)
+.. _http.request_body:
 
 http.request_body
 -----------------
 
-With the ``http.request_body`` content modifier, it is possible to
-match specifically and only on the HTTP request body. The keyword can
-be used in combination with all previously mentioned content modifiers
-like ``distance``, ``offset``, ``nocase``, ``within``, etc.
+The ``http.request_body`` keyword is used to match on the HTTP request body
+that can be present in an HTTP request.
 
-Example of ``http.request_body`` in a HTTP request:
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.request_body`` keyword.
 
-.. image:: http-keywords/client_body.png
+Example HTTP Request::
 
-Example of the purpose of ``http.client_body``:
+  POST /suricata.php HTTP/1.1
+  Content-Type: application/x-www-form-urlencoded
+  Host: suricata.io
+  Content-Length: 23
+  Connection: Keep-Alive
 
-.. image:: http-keywords/client_body1.png
+  Suricata request body
 
-Note: how much of the request/client body is inspected is controlled
-in the :ref:`libhtp configuration section
-<suricata-yaml-configure-libhtp>` via the ``request-body-limit``
-setting.
+.. container:: example-rule
 
-``http.request_body`` replaces the previous keyword name: ```http_client_body``. You may continue
-+to use the previous name, but it's recommended that rules be converted to use
-+the new name.
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request Body Example"; \
+  flow:established,to_server; :example-rule-options:`http.request_body; \
+  content:"Suricata request body";` classtype:bad-unknown; sid:115; rev:1;)
 
-http.stat_code
---------------
+.. note:: How much of the request/client body is inspected is controlled
+  in the :ref:`libhtp configuration section
+  <suricata-yaml-configure-libhtp>` via the ``request-body-limit``
+  setting.
 
-With the ``http.stat_code`` content modifier, it is possible to match
-specifically and only on the HTTP status code buffer. The keyword can
-be used in combination with all previously mentioned content modifiers
-like ``distance``, ``offset``, ``nocase``, ``within``, etc.
+.. note:: ``http.request_body`` replaces the previous keyword name,
+  ``http_client_body``. ``http_client_body`` can still be used but it is
+  recommended that rules be converted to use ``http.request_body``.
 
-Example of ``http.stat_code`` in a HTTP response:
+.. _http.request_header:
 
-.. image:: http-keywords/stat_code.png
+http.request_header
+-------------------
 
-Example of the purpose of ``http.stat_code``:
+The ``http.request_header`` keyword is used to match on the name and value
+of a HTTP/1 or HTTP/2 request.
 
-.. image:: http-keywords/stat-code1.png
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.request_header`` keyword.
 
-http.stat_msg
--------------
+For HTTP/2, the header name and value get concatenated by ": " (colon and space).
+The colon and space are commonly noted with the hexadecimal format `|3a 20|`
+within signatures.
 
-With the ``http.stat_msg`` content modifier, it is possible to match
-specifically and only on the HTTP status message buffer. The keyword
-can be used in combination with all previously mentioned content
-modifiers like ``depth``, ``distance``, ``offset``, ``nocase`` and
-``within``.
+To detect if an HTTP/2 header name contains a ":" (colon), the keyword
+:ref:`http2.header_name` can be used.
 
-Example of ``http.stat_msg`` in a HTTP response:
+Example HTTP/1 Request::
 
-.. image:: http-keywords/stat_msg.png
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
 
-Example of the purpose of ``http.stat_msg``:
+.. container:: example-rule
 
-.. image:: http-keywords/stat_msg_1.png
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request Example"; \
+  flow:established,to_server; :example-rule-options:`http.request_header; \
+  content:"Host|3a 20|suricata.io";` classtype:bad-unknown; sid:126; rev:1;)
 
-http.response_line
-------------------
+.. note:: ``http.request_header`` does not include the trailing \\r\\n
 
-The ``http.response_line`` forces the whole HTTP response line to be inspected.
+.. _http.request_line:
 
-Example::
+http.request_line
+-----------------
 
-    alert http any any -> any any (http.response_line; content:"HTTP/1.0 200 OK"; sid:1;)
+The ``http.request_line`` keyword is used to match on the entire contents of
+the HTTP request line.
 
-http.response_body
-------------------
+Example HTTP Request::
 
-With the ``http.response_body`` content modifier, it is possible to
-match specifically and only on the HTTP response body. The keyword can
-be used in combination with all previously mentioned content modifiers
-like ``distance``, ``offset``, ``nocase``, ``within``, etc.
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
 
-Note: how much of the response/server body is inspected is controlled
-in your :ref:`libhtp configuration section
-<suricata-yaml-configure-libhtp>` via the ``response-body-limit``
-setting.
+.. container:: example-rule
 
-Notes
-~~~~~
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request Example"; \
+  flow:established,to_server; :example-rule-options:`http.request_line; \
+  content:"GET /index.html HTTP/1.1";` bsize:24; classtype:bad-unknown; \
+  sid:60; rev:1;)
 
--  Using ``http.response_body`` is similar to having content matches
-   that come after ``file_data`` except that it doesn't permanently
-   (unless reset) set the detection pointer to the beginning of the
-   server response body. i.e. it is not a sticky buffer.
+.. note:: ``http.request_line`` does not include the trailing \\r\\n
 
--  ``http.response_body`` will match on gzip decoded data just like
-   ``file_data`` does.
+.. _rules-http-uri-normalization:
 
--  Since ``http.response_body`` matches on a server response, it
-   can't be used with the ``to_server`` or ``from_client`` flow
-   directives.
+.. _http.uri:
 
--  Corresponding PCRE modifier: ``Q``
+http.uri
+--------
 
--  further notes at the ``file_data`` section below.
+Matching on the HTTP URI buffer has two options in Suricata, the ``http.uri``
+and the ``http.uri.raw`` sticky buffers.
 
-``http.response_body`` replaces the previous keyword name: ```http_server_body``. You may continue
-+to use the previous name, but it's recommended that rules be converted to use
-+the new name.
+It is possible to use any of the :doc:`payload-keywords` with both ``http.uri``
+keywords.
 
-http.server
------------
+The ``http.uri`` keyword normalizes the URI buffer. For example, if a URI has two
+leading ``//``, Suricata will normalize the URI to a single leading ``/``.
 
-Sticky buffer to match on the HTTP Server headers. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+Normalization Example::
 
-Example::
+  GET //index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
 
-    alert http any any -> any any (flow:to_client; \
-            http.server; content:"Microsoft-IIS/6.0"; sid:1;)
+In this case :example-rule-emphasis:`//index.html` would be normalized to
+:example-rule-emphasis:`/index.html`.
+
+Normalized HTTP Request Example::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP URI Example"; \
+  flow:established,to_server; :example-rule-options:`http.uri; \
+  content:"/index.html";` bsize:11; classtype:bad-unknown; sid:3; rev:1;)
+
+.. _http.uri.raw:
+
+http.uri.raw
+------------
+
+The ``http.uri.raw`` buffer matches on HTTP URI content but does not
+have any normalization performed on the buffer contents.
+(see :ref:`rules-http-uri-normalization`)
+
+Abnormal HTTP Request Example::
+
+  GET //index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP URI Raw Example"; \
+  flow:established,to_server; :example-rule-options:`http.uri.raw; \
+  content:"//index.html";` bsize:12; classtype:bad-unknown; sid:4; rev:1;)
+
+.. note:: The ``http.uri.raw`` keyword/buffer does not allow for spaces.
+
+Example Request::
+
+  GET /example spaces HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+``http.uri.raw`` would be populated with :example-rule-header:`/example`
+
+:ref:`http.protocol` would be populated with :example-rule-header:`spaces HTTP/1.1`
+
+Reference: `https://redmine.openinfosecfoundation.org/issues/2881 <https://redmine.openinfosecfoundation.org/issues/2881>`_
+
+.. _http.user_agent:
+
+http.user_agent
+---------------
+
+The ``http.user_agent`` keyword is used to match on the User-Agent field that
+can be present in HTTP request headers.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.user_agent`` keyword.
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Cookie: PHPSESSION=123
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP User-Agent Example"; \
+  flow:established,to_server; :example-rule-options:`http.user_agent; \
+  content:"Mozilla/5.0";` bsize:11; classtype:bad-unknown; sid:90; rev:1;)
+
+.. note:: ``http.user_agent`` does not include the leading space or trailing
+   \\r\\n
+
+.. note:: Using the ``http.user_agent`` generally provides better performance
+   than using :ref:`http.header`.
+
+.. note:: ``http.user_agent`` can have additional formatting/normalization
+  applied to buffer contents, see :ref:`http.normalization` for additional
+  details.
+
+.. _urilen:
+
+urilen
+------
+
+The ``urilen`` keyword is used to match on the length of the normalized request
+URI. It is possible to use the ``<`` and ``>`` operators, which
+indicate respectively *less than* and *larger than*.
+
+urilen uses an :ref:`unsigned 64-bit integer <rules-integer-keywords>`.
+
+The ``urilen`` keyword does not require a content match on the :ref:`http.uri`
+buffer or the :ref:`http.uri.raw` buffer.
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Request"; \
+  flow:established,to_server; :example-rule-options:`urilen:11;` \
+  http.method; content:"GET"; classtype:bad-unknown; sid:40; rev:1;)
+
+The above signature would match on any HTTP GET request that has a URI
+length of 11, regardless of the content or structure of the URI.
+
+The following signatures would all alert on the example request above as well
+and show the different ``urilen`` options.
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"urilen greater than 10"; \
+  flow:established,to_server; :example-rule-options:`urilen:>10;` \
+  classtype:bad-unknown; sid:41; rev:1;)
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"urilen less than 12"; \
+  flow:established,to_server; :example-rule-options:`urilen:<12;` \
+  classtype:bad-unknown; sid:42; rev:1;)
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"urilen greater/less than \
+  example"; flow:established,to_server; :example-rule-options:`urilen:10<>12;` \
+  classtype:bad-unknown; sid:43; rev:1;)
+
+.. _http.location:
 
 http.location
 -------------
 
-Sticky buffer to match on the HTTP Location headers. Only contains the
-header value. The \\r\\n after the header are not part of the buffer.
+The ``http.location`` keyword is used to match on the HTTP response location
+header contents.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.location`` keyword.
 
-    alert http any any -> any any (flow:to_client; \
-            http.location; content:"http://www.google.com"; sid:1;)
+Example HTTP Response::
 
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+  Location: suricata.io
 
-http.host and http.host.raw
----------------------------
+.. container:: example-rule
 
-With the ``http.host`` content modifier, it is possible to
-match specifically and only the normalized hostname.
-The ``http.host.raw`` inspects the raw hostname.
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Location Example"; \
+  flow:established,to_client; :example-rule-options:`http.location; \
+  content:"suricata.io";` bsize:11; classtype:bad-unknown; sid:122; rev:1;)
 
-The keyword can be used in combination with most of the content modifiers
-like ``distance``, ``offset``, ``within``, etc.
+.. note:: ``http.location`` does not include the leading space or trailing \\r\\n
 
-The ``nocase`` keyword is not allowed anymore. Keep in mind that you need
-to specify a lowercase pattern.
+.. note:: ``http.location`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
 
-Notes
-~~~~~
+.. _http.response_body:
 
--  The ``http.host`` and ``http.host.raw`` buffers are populated
-   from either the URI (if the full URI is present in the request like
-   in a proxy request) or the HTTP Host header. If both are present, the
-   URI is used.
+http.response_body
+------------------
 
--  The ``http.host`` and ``http.host.raw`` buffers will NOT
-   include the header name, colon, or leading whitespace if populated
-   from the Host header.  i.e. they will not include "Host: ".
+The ``http.response_body`` keyword is used to match on the HTTP response body.
 
--  The ``http.host`` and ``http.host.raw`` buffers do not
-   include a CRLF (0x0D 0x0A) at the end.  If you want to match the end
-   of the buffer, use a relative 'isdataat' or a PCRE (although PCRE
-   will be worse on performance).
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.response_body`` keyword.
 
--  The ``http.host`` buffer is normalized to be all lower case.
+Example HTTP Response::
 
--  The content match that ``http.host`` applies to must be all lower
-   case or have the ``nocase`` flag set.
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
 
--  ``http.host.raw`` matches the unnormalized buffer so matching
-   will be case-sensitive (unless ``nocase`` is set).
+  Server response body
 
--  If a request contains multiple "Host" headers, the values will be
-   concatenated in the ``http.host`` and ``http.host.raw``
-   buffers, in the order seen from top to bottom, with a comma and space
-   (", ") between each of them.
+.. container:: example-rule
 
-   Example request::
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Response Body \
+  Example"; flow:established,to_client; :example-rule-options:`http.response_body; \
+  content:"Server response body";` classtype:bad-unknown; sid:120; rev:1;)
 
-          GET /test.html HTTP/1.1
-          Host: ABC.com
-          Accept: */*
-          Host: efg.net
+.. note:: ``http.response_body`` will match on gzip decoded data just like
+  :ref:`file.data` does.
 
-   ``http.host`` buffer contents::
+.. note:: How much of the response/server body is inspected is controlled
+  in your :ref:`libhtp configuration section
+  <suricata-yaml-configure-libhtp>` via the ``response-body-limit``
+  setting.
 
-          abc.com, efg.net
+.. note:: ``http.response_body`` replaces the previous keyword name,
+  ``http_server_body``. ``http_server_body`` can still be used but it is
+  recommended that rules be converted to use ``http.response_body``.
 
-   ``http.host.raw`` buffer contents::
+.. _http.response_header:
 
-          ABC.com, efg.net
+http.response_header
+--------------------
 
--  Corresponding PCRE modifier (``http_host``): ``W``
--  Corresponding PCRE modifier (``http_raw_host``): ``Z``
+The ``http.response_header`` keyword is used to match on the name and value
+of an HTTP/1 or HTTP/2 request.
 
-file_data
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.response_header`` keyword.
+
+For HTTP/2, the header name and value get concatenated by ": " (colon and space).
+The colon and space are commonly noted with the hexadecimal format `|3a 20|`
+within signatures.
+
+To detect if an HTTP/2 header name contains a ":" (colon), the keyword
+:ref:`http2.header_name` can be used.
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+  Location: suricata.io
+
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Response Example"; \
+  flow:established,to_client; :example-rule-options:`http.response_header; \
+  content:"Location|3a 20|suricata.io";` classtype:bad-unknown; sid:127; rev:1;)
+
+.. _http.response_line:
+
+http.response_line
+------------------
+
+The ``http.response_line`` keyword is used to match on the entire HTTP
+response line.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.response_line`` keyword.
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Response Line \
+  Example"; flow:established,to_client; :example-rule-options:`http.response_line; \
+  content:"HTTP/1.1 200 OK";` classtype:bad-unknown; sid:119; rev:1;)
+
+.. note:: ``http.response_line`` does not include the trailing \\r\\n
+
+.. _http.server:
+
+http.server
+-----------
+
+The ``http.server`` keyword is used to match on the HTTP response server
+header contents.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.server`` keyword.
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Server Example"; flow:established,to_client; :example-rule-options:`http.server; \
+  content:"nginx/0.8.54";` bsize:12; classtype:bad-unknown; sid:121; rev:1;)
+
+.. note:: ``http.server`` does not include the leading space or trailing \\r\\n
+
+.. note:: ``http.server`` can have additional formatting/normalization
+  applied to buffer contents, see :ref:`http.normalization` for additional
+  details.
+
+.. _http.stat_code:
+
+http.stat_code
+--------------
+
+The ``http.stat_code`` keyword is used to match on the HTTP status code
+that can be present in an HTTP response.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.stat_code`` keyword.
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Stat Code Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.stat_code; \
+  content:"200";` classtype:bad-unknown; sid:117; rev:1;)
+
+.. note:: ``http.stat_code`` does not include the leading or trailing space
+
+.. _http.stat_msg:
+
+http.stat_msg
+-------------
+
+The ``http.stat_msg`` keyword is used to match on the HTTP status message
+that can be present in an HTTP response.
+
+For HTTP/2, an empty buffer is returned by Suricata.
+See rfc 7540 section 8.1.2.4. about Response Pseudo-Header Fields.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.stat_msg`` keyword.
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Stat Message Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.stat_msg; \
+  content:"OK";` classtype:bad-unknown; sid:118; rev:1;)
+
+.. note:: ``http.stat_msg`` does not include the leading space or trailing \\r\\n
+
+.. note:: ``http.stat_msg`` will always be empty when used with HTTP/2
+
+.. _file.data:
+
+file.data
 ---------
 
-With ``file_data``, the HTTP response body is inspected, just like
-with ``http.response_body``. The ``file_data`` keyword is a sticky buffer.
+With ``file.data``, the HTTP response body is inspected, just like
+with ``http.response_body``. ``file.data`` also works for HTTP request
+body and can be used in protocols other than HTTP.
 
-Example::
+It is possible to use any of the :doc:`payload-keywords` with the
+``file.data`` keyword.
 
-  alert http any any -> any any (file_data; content:"abc"; content:"xyz";)
+Example HTTP Response::
 
-.. image:: http-keywords/file_data.png
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
 
-The ``file_data`` keyword affects all following content matches, until
-the ``pkt_data`` keyword is encountered or it reaches the end of the
-rule. This makes it a useful shortcut for applying many content
-matches to the HTTP response body, eliminating the need to modify each
-content match individually.
+  Server response body
 
-As the body of a HTTP response can be very large, it is inspected in
-smaller chunks.
+.. container:: example-rule
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP file.data Example"; \
+  flow:established,to_client; :example-rule-options:`file.data; \
+  content:"Server response body";` classtype:bad-unknown; sid:128; rev:1;)
+
+The body of an HTTP response can be very large, therefore the response body is
+inspected in definable chunks.
 
 How much of the response/server body is inspected is controlled
-in your :ref:`libhtp configuration section
+in the :ref:`libhtp configuration section
 <suricata-yaml-configure-libhtp>` via the ``response-body-limit``
 setting.
 
-If the HTTP body is a flash file compressed with 'deflate' or 'lzma',
-it can be decompressed and ``file_data`` can match on the decompress data.
-Flash decompression must be enabled under ``libhtp`` configuration:
+.. note:: If the HTTP body is a flash file compressed with 'deflate' or 'lzma',
+  it can be decompressed and ``file.data`` can match on the decompressed data.
+  Flash decompression must be enabled under 'libhtp' configuration:
 
-::
+  ::
 
     # Decompress SWF files.
     # 2 types: 'deflate', 'lzma', 'both' will decompress deflate and lzma
@@ -739,18 +876,412 @@ Flash decompression must be enabled under ``libhtp`` configuration:
       compress-depth: 0
       decompress-depth: 0
 
-Notes
-~~~~~
+.. note:: ``file.data`` replaces the previous keyword name, ``file_data``.
+  ``file_data`` can still be used but it is recommended that rules be converted
+  to use ``file.data``.
 
--  If a HTTP body is using gzip or deflate, ``file_data`` will match
-   on the decompressed data.
+.. note:: If an HTTP body is using gzip or deflate, ``file.data`` will match on
+  the decompressed data.
 
--  Negated matching is affected by the chunked inspection. E.g.
+.. note:: Negated matching is affected by the chunked inspection. E.g.
    'content:!"<html";' could not match on the first chunk, but would
    then possibly match on the 2nd. To avoid this, use a depth setting.
-   The depth setting takes the body size into account.
-   Assuming that the ``response-body-minimal-inspect-size`` is bigger
-   than 1k, 'content:!"<html"; depth:1024;' can only match if the
-   pattern '<html' is absent from the first inspected chunk.
+   The depth setting takes the body size into account. Assuming that
+   the ``response-body-minimal-inspect-size`` is bigger than 1k,
+   'content:!"<html"; depth:1024;' can only match if the pattern '<html'
+   is absent from the first inspected chunk.
 
--  ``file_data`` can also be used with SMTP
+.. note:: Additional information can be found at :doc:`file-keywords`
+
+.. note:: ``file.data`` supports multiple buffer matching, see
+  :doc:`multi-buffer-matching`.
+
+.. _http.connection:
+
+http.connection
+---------------
+
+The ``http.connection`` keyword is used to match on the Connection field that
+can be present in HTTP request or response headers.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.connection`` keyword.
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Accept-Language: en-US
+  Host: suricata.io
+  Connection: Keep-Alive
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Connection Example"; \
+  flow:established,to_server; :example-rule-options:`http.connection; \
+  content:"Keep-Alive";` bsize:10; classtype:bad-unknown; sid:94; rev:1;)
+
+.. note:: ``http.connection`` does not include the leading space or trailing
+   \\r\\n
+
+.. note:: ``http.connection`` can have additional formatting/normalization
+  applied to buffer contents, see :ref:`http.normalization` for additional
+  details.
+
+.. _http.content_len:
+
+http.content_len
+----------------
+
+The ``http.content_len`` keyword is used to match on the Content-Length field that
+can be present in HTTP request or response headers. Use ``flow:to_server`` or
+``flow:to_client`` to force inspection of the request or response respectively.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.content_len`` keyword.
+
+Example HTTP Request::
+
+  POST /suricata.php HTTP/1.1
+  Content-Type: multipart/form-data; boundary=---------------123
+  Host: suricata.io
+  Content-Length: 100
+  Connection: Keep-Alive
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+  Connection: Close
+  Content-Length: 20
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Content-Length Request \
+  Example"; flow:established,to_server; :example-rule-options:`http.content_len; \
+  content:"100";` bsize:3; classtype:bad-unknown; sid:97; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Content-Length Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.content_len; \
+  content:"20";` bsize:2; classtype:bad-unknown; sid:98; rev:1;)
+
+To do numeric evaluation of the content length, :ref:`byte_test` can be used.
+
+If we want to match on an HTTP request content length equal to and greater
+than 100 we could use the following signature.
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Content-Length Request \
+  Byte Test Example"; flow:established,to_server; \
+  :example-rule-options:`http.content_len; byte_test:0,>=,100,0,string,dec;` \
+  classtype:bad-unknown; sid:99; rev:1;)
+
+.. note:: ``http.content_len`` does not include the leading space or trailing
+   \\r\\n
+
+.. _http.content_type:
+
+http.content_type
+-----------------
+
+The ``http.content_type`` keyword is used to match on the Content-Type field that
+can be present in HTTP request or response headers. Use ``flow:to_server`` or
+``flow:to_client`` to force inspection of the request or response respectively.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.content_type`` keyword.
+
+Example HTTP Request::
+
+  POST /suricata.php HTTP/1.1
+  Content-Type: multipart/form-data; boundary=---------------123
+  Host: suricata.io
+  Content-Length: 100
+  Connection: Keep-Alive
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+  Connection: Close
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Content-Type Request \
+  Example"; flow:established,to_server; :example-rule-options:`http.content_type; \
+  content:"multipart/form-data|3b 20|";` startswith; classtype:bad-unknown; \
+  sid:95; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Content-Type Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.content_type; \
+  content:"text/html";` bsize:9; classtype:bad-unknown; sid:96; rev:1;)
+
+.. note:: ``http.content_type`` does not include the leading space or trailing
+   \\r\\n
+
+.. note:: ``http.content_type`` can have additional formatting/normalization
+  applied to buffer contents, see :ref:`http.normalization` for additional
+  details.
+
+.. _http.cookie:
+
+http.cookie
+-----------
+
+The ``http.cookie`` keyword is used to match on the cookie field that can be
+present in HTTP request (Cookie) or HTTP response (Set-Cookie) headers.
+
+It is possible to use any of the :doc:`payload-keywords` with both ``http.header``
+keywords.
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Cookie: PHPSESSION=123
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Cookie Example"; \
+  flow:established,to_server; :example-rule-emphasis:`http.cookie; \
+  content:"PHPSESSIONID=123";` bsize:14; classtype:bad-unknown; sid:80; rev:1;)
+
+.. note:: Cookies are passed in HTTP headers but Suricata extracts the cookie
+  data to ``http.cookie`` and will not match cookie content put in the
+  :ref:`http.header` sticky buffer.
+
+.. note:: ``http.cookie`` does not include the leading space or trailing \\r\\n
+
+.. note:: ``http.cookie`` can have additional formatting/normalization
+  applied to buffer contents, see :ref:`http.normalization` for additional
+  details.
+
+.. _http.header:
+
+http.header
+-----------
+
+Matching on HTTP headers has two options in Suricata, the ``http.header``
+and the ``http.header.raw``.
+
+It is possible to use any of the :doc:`payload-keywords` with both
+``http.header`` keywords.
+
+The ``http.header`` keyword normalizes the header contents. For example if
+header contents contain trailing white-space or tab characters, those would be
+removed.
+
+To match on non-normalized header data, use the :ref:`http.header.raw` keyword.
+
+Normalization Example::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0     \r\n
+  Host: suricata.io
+
+Would be normalized to :example-rule-emphasis:`Mozilla/5.0\\r\\n`
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Example 1"; \
+  flow:established,to_server; :example-rule-options:`http.header; \
+  content:"User-Agent|3a 20|Mozilla/5.0|0d 0a|";` classtype:bad-unknown; \
+  sid:70; rev:1;)
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Example 2"; \
+  flow:established,to_server; :example-rule-options:`http.header; \
+  content:"Host|3a 20|suricata.io|0d 0a|";` classtype:bad-unknown; \
+  sid:71; rev:1;)
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Example 3"; \
+  flow:established,to_server; :example-rule-options:`http.header; \
+  content:"User-Agent|3a 20|Mozilla/5.0|0d 0a|"; startswith; \
+  content:"Host|3a 20|suricata.io|0d 0a|";` classtype:bad-unknown; \
+  sid:72; rev:1;)
+
+.. note:: There are headers that will not be included in the ``http.header``
+  buffer, specifically the :ref:`http.cookie` buffer.
+
+.. note:: ``http.header`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
+
+.. _http.header.raw:
+
+http.header.raw
+---------------
+
+The ``http.header.raw`` buffer matches on HTTP header content but does not have
+any normalization performed on the buffer contents (see :ref:`http.header`)
+
+Abnormal HTTP Header Example::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  User-Agent: Chrome
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Raw Example"; \
+  flow:established,to_server; :example-rule-options:`http.header.raw; \
+  content:"User-Agent|3a 20|Mozilla/5.0|0d 0a|"; \
+  content:"User-Agent|3a 20|Chrome|0d 0a|";` classtype:bad-unknown; sid:73; rev:1;)
+
+.. note:: ``http.header.raw`` can have additional formatting applied to buffer
+  contents, see :ref:`http.normalization` for additional details.
+
+.. _http.header_names:
+
+http.header_names
+-----------------
+
+The ``http.header_names`` keyword is used to match on the names of the headers
+in an HTTP request or response. This is useful for checking for a header's
+presence, absence and/or header order. Use ``flow:to_server`` or
+``flow:to_client`` to force inspection of the request or response respectively.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.header_names`` keyword.
+
+Example HTTP Request::
+
+  GET / HTTP/1.1
+  Host: suricata.io
+  Connection: Keep-Alive
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+Examples to match exactly on header order:
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Names Request \
+  Example"; flow:established,to_server; :example-rule-options:`http.header_names; \
+  content:"|0d 0a|Host|0d 0a|Connection|0d 0a 0d 0a|";` bsize:22; \
+  classtype:bad-unknown; sid:110; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Header Names Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.header_names; \
+  content:"|0d 0a|Content-Type|0d 0a|Server|0d 0a 0d a0|";` bsize:26; \
+  classtype:bad-unknown; sid:111; rev:1;)
+
+Examples to match on header existence:
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Names Request \
+  Example 2"; flow:established,to_server; :example-rule-options:`http.header_names; \
+  content:"|0d 0a|Host|0d 0a|";` classtype:bad-unknown; sid:112; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Header Names Response \
+  Example 2"; flow:established,to_client; :example-rule-options:`http.header_names; \
+  content:"|0d 0a|Content-Type|0d 0a|";` classtype:bad-unknown; sid:113; rev:1;)
+
+Examples to match on header absence:
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Names Request \
+  Example 3"; flow:established,to_server; :example-rule-options:`http.header_names; \
+  content:!"|0d 0a|User-Agent|0d 0a|";` classtype:bad-unknown; sid:114; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Header Names Response \
+  Example 3"; flow:established,to_client; :example-rule-options:`http.header_names; \
+  content:!"|0d 0a|Date|0d 0a|";` classtype:bad-unknown; sid:115; rev:1;)
+
+Example to check for the ``User-Agent`` header and that the ``Host`` header is
+after ``User-Agent`` but not necessarily directly after.
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Header Names Request \
+  Example 4"; flow:established,to_server; :example-rule-options:`http.header_names; \
+  content:"|0d 0a|Host|0d 0a|";` content:"User-Agent|0d 0a|"; distance:-2; \
+  classtype:bad-unknown; sid:114; rev:1;)
+
+.. note:: ``http.header_names`` starts with a \\r\\n and ends with an extra \\r\\n.
+
+.. note:: ``http.header_names`` can have additional formatting/normalization applied
+  to buffer contents, see :ref:`http.normalization` for additional details.
+
+.. _http.protocol:
+
+http.protocol
+-------------
+
+The ``http.protocol`` keyword is used to match on the protocol field that is
+contained in HTTP requests and responses.
+
+For HTTP/2, the constant string "HTTP/2" is used.
+See rfc 7540 section 8.1.2.4. about Response Pseudo-Header Fields.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.protocol`` keyword.
+
+.. note:: ``http.protocol`` does not include the leading space or trailing \\r\\n
+
+Example HTTP Request::
+
+  GET /index.html HTTP/1.1
+  User-Agent: Mozilla/5.0
+  Host: suricata.io
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Protocol Example"; \
+  flow:established,to_server; :example-rule-options:`http.protocol; \
+  content:"HTTP/1.1";` bsize:9; classtype:bad-unknown; sid:50; rev:1;)
+
+.. _http.start:
+
+http.start
+----------
+
+The ``http.start`` keyword is used to match on the start of an HTTP request
+or response. This will contain the request/response line plus the request/response
+headers. Use ``flow:to_server`` or ``flow:to_client`` to force inspection of the
+request or response respectively.
+
+It is possible to use any of the :doc:`payload-keywords` with the
+``http.start`` keyword.
+
+Example HTTP Request::
+
+  GET / HTTP/1.1
+  Host: suricata.io
+  Connection: Keep-Alive
+
+Example HTTP Response::
+
+  HTTP/1.1 200 OK
+  Content-Type: text/html
+  Server: nginx/0.8.54
+
+.. container:: example-rule
+
+  alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP Start Request \
+  Example"; flow:established,to_server; :example-rule-options:`http.start; \
+  content:"POST / HTTP/1.1|0d 0a|Host|0d 0a|Connection|0d 0a 0d 0a|";` \
+  classtype:bad-unknown; sid:101; rev:1;)
+
+  alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"HTTP Start Response \
+  Example"; flow:established,to_client; :example-rule-options:`http.start; \
+  content:"HTTP/1.1 200 OK|0d 0a|Content-Type|0d 0a|Server|0d 0a 0d a0|";` \
+  classtype:bad-unknown; sid:102; rev:1;)
+
+.. note:: ``http.start`` contains the normalized headers and is terminated by
+  an extra \\r\\n to indicate the end of the headers.

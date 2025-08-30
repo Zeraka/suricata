@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -33,6 +33,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-build.h"
 #include "detect-engine-address.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-siggroup.h"
@@ -47,6 +48,7 @@
 
 #include "util-error.h"
 #include "util-debug.h"
+#include "util-validate.h"
 #include "util-cidr.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
@@ -57,8 +59,12 @@ int SigGroupHeadClearSigs(SigGroupHead *);
 
 void SigGroupHeadInitDataFree(SigGroupHeadInitData *sghid)
 {
+    if (sghid->match_array != NULL) {
+        SCFree(sghid->match_array);
+        sghid->match_array = NULL;
+    }
     if (sghid->sig_array != NULL) {
-        SCFree(sghid->sig_array);
+        SCFreeAligned(sghid->sig_array);
         sghid->sig_array = NULL;
     }
     if (sghid->app_mpms != NULL) {
@@ -67,28 +73,32 @@ void SigGroupHeadInitDataFree(SigGroupHeadInitData *sghid)
     if (sghid->pkt_mpms != NULL) {
         SCFree(sghid->pkt_mpms);
     }
+    if (sghid->frame_mpms != NULL) {
+        SCFree(sghid->frame_mpms);
+    }
 
     PrefilterFreeEnginesList(sghid->tx_engines);
     PrefilterFreeEnginesList(sghid->pkt_engines);
     PrefilterFreeEnginesList(sghid->payload_engines);
+    PrefilterFreeEnginesList(sghid->frame_engines);
+    PrefilterFreeEnginesList(sghid->post_rule_match_engines);
 
     SCFree(sghid);
 }
 
 static SigGroupHeadInitData *SigGroupHeadInitDataAlloc(uint32_t size)
 {
-    SigGroupHeadInitData *sghid = SCMalloc(sizeof(SigGroupHeadInitData));
+    SigGroupHeadInitData *sghid = SCCalloc(1, sizeof(SigGroupHeadInitData));
     if (unlikely(sghid == NULL))
         return NULL;
 
-    memset(sghid, 0x00, sizeof(SigGroupHeadInitData));
-
     /* initialize the signature bitarray */
-    sghid->sig_size = size;
-    if ( (sghid->sig_array = SCMalloc(sghid->sig_size)) == NULL)
+    size = sghid->sig_size = size + 16 - (size % 16);
+    void *ptr = SCMallocAligned(sghid->sig_size, 16);
+    if (ptr == NULL)
         goto error;
-
-    memset(sghid->sig_array, 0, sghid->sig_size);
+    memset(ptr, 0, size);
+    sghid->sig_array = ptr;
 
     return sghid;
 error:
@@ -130,10 +140,9 @@ void SigGroupHeadStore(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
  */
 static SigGroupHead *SigGroupHeadAlloc(const DetectEngineCtx *de_ctx, uint32_t size)
 {
-    SigGroupHead *sgh = SCMalloc(sizeof(SigGroupHead));
+    SigGroupHead *sgh = SCCalloc(1, sizeof(SigGroupHead));
     if (unlikely(sgh == NULL))
         return NULL;
-    memset(sgh, 0, sizeof(SigGroupHead));
 
     sgh->init = SigGroupHeadInitDataAlloc(size);
     if (sgh->init == NULL)
@@ -158,25 +167,6 @@ void SigGroupHeadFree(const DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 
     SCLogDebug("sgh %p", sgh);
 
-    if (sgh->match_array != NULL) {
-        SCFree(sgh->match_array);
-        sgh->match_array = NULL;
-    }
-
-    if (sgh->non_pf_other_store_array != NULL) {
-        SCFree(sgh->non_pf_other_store_array);
-        sgh->non_pf_other_store_array = NULL;
-        sgh->non_pf_other_store_cnt = 0;
-    }
-
-    if (sgh->non_pf_syn_store_array != NULL) {
-        SCFree(sgh->non_pf_syn_store_array);
-        sgh->non_pf_syn_store_array = NULL;
-        sgh->non_pf_syn_store_cnt = 0;
-    }
-
-    sgh->sig_cnt = 0;
-
     if (sgh->init != NULL) {
         SigGroupHeadInitDataFree(sgh->init);
         sgh->init = NULL;
@@ -184,8 +174,6 @@ void SigGroupHeadFree(const DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 
     PrefilterCleanupRuleGroup(de_ctx, sgh);
     SCFree(sgh);
-
-    return;
 }
 
 /**
@@ -282,11 +270,6 @@ int SigGroupHeadHashAdd(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
     return ret;
 }
 
-int SigGroupHeadHashRemove(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    return HashListTableRemove(de_ctx->sgh_hash_table, (void *)sgh, 0);
-}
-
 /**
  * \brief Used to lookup a SigGroupHead hash from the detection engine context
  *        SigGroupHead hash table.
@@ -320,8 +303,6 @@ void SigGroupHeadHashFree(DetectEngineCtx *de_ctx)
 
     HashListTableFree(de_ctx->sgh_hash_table);
     de_ctx->sgh_hash_table = NULL;
-
-    return;
 }
 
 /**
@@ -349,8 +330,8 @@ int SigGroupHeadAppendSig(const DetectEngineCtx *de_ctx, SigGroupHead **sgh,
     }
 
     /* enable the sig in the bitarray */
-    (*sgh)->init->sig_array[s->num / 8] |= 1 << (s->num % 8);
-
+    (*sgh)->init->sig_array[s->iid / 8] |= 1 << (s->iid % 8);
+    (*sgh)->init->max_sig_id = MAX(s->iid, (*sgh)->init->max_sig_id);
     return 0;
 
 error:
@@ -372,10 +353,28 @@ int SigGroupHeadClearSigs(SigGroupHead *sgh)
     if (sgh->init->sig_array != NULL)
         memset(sgh->init->sig_array, 0, sgh->init->sig_size);
 
-    sgh->sig_cnt = 0;
+    sgh->init->sig_cnt = 0;
 
     return 0;
 }
+
+#ifdef __SSE2__
+#include <emmintrin.h>
+static void MergeBitarrays(const uint8_t *src, uint8_t *dst, const uint32_t size)
+{
+#define BYTES 16
+    const uint8_t *srcptr = src;
+    uint8_t *dstptr = dst;
+    for (uint32_t i = 0; i < size; i += 16) {
+        __m128i s = _mm_load_si128((const __m128i *)srcptr);
+        __m128i d = _mm_load_si128((const __m128i *)dstptr);
+        d = _mm_or_si128(s, d);
+        _mm_store_si128((__m128i *)dstptr, d);
+        srcptr += BYTES;
+        dstptr += BYTES;
+    }
+}
+#endif
 
 /**
  * \brief Copies the bitarray holding the sids from the source SigGroupHead to
@@ -390,8 +389,6 @@ int SigGroupHeadClearSigs(SigGroupHead *sgh)
  */
 int SigGroupHeadCopySigs(DetectEngineCtx *de_ctx, SigGroupHead *src, SigGroupHead **dst)
 {
-    uint32_t idx = 0;
-
     if (src == NULL || de_ctx == NULL)
         return 0;
 
@@ -400,19 +397,43 @@ int SigGroupHeadCopySigs(DetectEngineCtx *de_ctx, SigGroupHead *src, SigGroupHea
         if (*dst == NULL)
             goto error;
     }
+    DEBUG_VALIDATE_BUG_ON(src->init->sig_size != (*dst)->init->sig_size);
 
+#ifdef __SSE2__
+    MergeBitarrays(src->init->sig_array, (*dst)->init->sig_array, src->init->sig_size);
+#else
     /* do the copy */
-    for (idx = 0; idx < src->init->sig_size; idx++)
+    for (uint32_t idx = 0; idx < src->init->sig_size; idx++)
         (*dst)->init->sig_array[idx] = (*dst)->init->sig_array[idx] | src->init->sig_array[idx];
+#endif
+    if (src->init->score)
+        (*dst)->init->score = MAX((*dst)->init->score, src->init->score);
 
-    if (src->init->whitelist)
-        (*dst)->init->whitelist = MAX((*dst)->init->whitelist, src->init->whitelist);
-
+    if (src->init->max_sig_id)
+        (*dst)->init->max_sig_id = MAX((*dst)->init->max_sig_id, src->init->max_sig_id);
     return 0;
 
 error:
     return -1;
 }
+
+#ifdef HAVE_POPCNT64
+#include <x86intrin.h>
+static uint32_t Popcnt(const uint8_t *array, const uint32_t size)
+{
+    /* input needs to be a multiple of 8 for u64 casts to work */
+    DEBUG_VALIDATE_BUG_ON(size < 8);
+    DEBUG_VALIDATE_BUG_ON(size % 8);
+
+    uint32_t cnt = 0;
+    uint64_t *ptr = (uint64_t *)array;
+    for (uint64_t idx = 0; idx < size; idx += 8) {
+        cnt += _popcnt64(*ptr);
+        ptr++;
+    }
+    return cnt;
+}
+#endif
 
 /**
  * \brief Updates the SigGroupHead->sig_cnt with the total count of all the
@@ -424,15 +445,42 @@ error:
  */
 void SigGroupHeadSetSigCnt(SigGroupHead *sgh, uint32_t max_idx)
 {
-    uint32_t sig;
-
-    sgh->sig_cnt = 0;
-    for (sig = 0; sig < max_idx + 1; sig++) {
+    sgh->init->max_sig_id = MAX(max_idx, sgh->init->max_sig_id);
+#ifdef HAVE_POPCNT64
+    sgh->init->sig_cnt = Popcnt(sgh->init->sig_array, sgh->init->sig_size);
+#else
+    uint32_t cnt = 0;
+    for (uint32_t sig = 0; sig < sgh->init->max_sig_id + 1; sig++) {
         if (sgh->init->sig_array[sig / 8] & (1 << (sig % 8)))
-            sgh->sig_cnt++;
+            cnt++;
     }
+    sgh->init->sig_cnt = cnt;
+#endif
+}
 
-    return;
+/**
+ * \brief Finds if two Signature Group Heads are the same.
+ *
+ * \param sgha First SGH to be compared
+ * \param sghb Secornd SGH to be compared
+ *
+ * \return true if they're a match, false otherwise
+ */
+bool SigGroupHeadEqual(const SigGroupHead *sgha, const SigGroupHead *sghb)
+{
+    if (sgha == NULL || sghb == NULL)
+        return false;
+
+    if (sgha->init->sig_size != sghb->init->sig_size)
+        return false;
+
+    if (sgha->init->max_sig_id != sghb->init->max_sig_id)
+        return false;
+
+    if (SCMemcmp(sgha->init->sig_array, sghb->init->sig_array, sgha->init->sig_size) != 0)
+        return false;
+
+    return true;
 }
 
 void SigGroupHeadSetProtoAndDirection(SigGroupHead *sgh,
@@ -466,7 +514,7 @@ void SigGroupHeadPrintSigs(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
     for (u = 0; u < (sgh->init->sig_size * 8); u++) {
         if (sgh->init->sig_array[u / 8] & (1 << (u % 8))) {
             SCLogDebug("%" PRIu32, u);
-            printf("s->num %"PRIu32" ", u);
+            printf("s->iid %" PRIu32 " ", u);
         }
     }
 
@@ -494,15 +542,14 @@ int SigGroupHeadBuildMatchArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
     if (sgh == NULL)
         return 0;
 
-    BUG_ON(sgh->match_array != NULL);
+    BUG_ON(sgh->init->match_array != NULL);
+    sgh->init->max_sig_id = MAX(sgh->init->max_sig_id, max_idx);
 
-    sgh->match_array = SCMalloc(sgh->sig_cnt * sizeof(Signature *));
-    if (sgh->match_array == NULL)
+    sgh->init->match_array = SCCalloc(sgh->init->sig_cnt, sizeof(Signature *));
+    if (sgh->init->match_array == NULL)
         return -1;
 
-    memset(sgh->match_array,0, sgh->sig_cnt * sizeof(Signature *));
-
-    for (sig = 0; sig < max_idx + 1; sig++) {
+    for (sig = 0; sig < sgh->init->max_sig_id + 1; sig++) {
         if (!(sgh->init->sig_array[(sig / 8)] & (1 << (sig % 8))) )
             continue;
 
@@ -510,7 +557,7 @@ int SigGroupHeadBuildMatchArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
         if (s == NULL)
             continue;
 
-        sgh->match_array[idx] = s;
+        sgh->init->match_array[idx] = s;
         idx++;
     }
 
@@ -518,206 +565,44 @@ int SigGroupHeadBuildMatchArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
 }
 
 /**
- *  \brief Set the need magic flag in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
- */
-void SigGroupHeadSetFilemagicFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-#ifdef HAVE_MAGIC
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
-        if (s == NULL)
-            continue;
-
-        if (SignatureIsFilemagicInspecting(s)) {
-            sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMAGIC;
-            break;
-        }
-    }
-#endif
-    return;
-}
-
-/**
- *  \brief Set the need size flag in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
- */
-void SigGroupHeadSetFilesizeFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
-        if (s == NULL)
-            continue;
-
-        if (SignatureIsFilesizeInspecting(s)) {
-            sgh->flags |= SIG_GROUP_HEAD_HAVEFILESIZE;
-            break;
-        }
-    }
-
-    return;
-}
-
-/**
  *  \brief Set the need hash flag in the sgh.
  *
  *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
+ *  \param sgh sig group head to update
  */
-void SigGroupHeadSetFileHashFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
+void SigGroupHeadSetupFiles(const DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
     if (sgh == NULL)
         return;
 
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
+    for (uint32_t sig = 0; sig < sgh->init->sig_cnt; sig++) {
+        const Signature *s = sgh->init->match_array[sig];
         if (s == NULL)
             continue;
 
         if (SignatureIsFileMd5Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMD5;
             SCLogDebug("sgh %p has filemd5", sgh);
-            break;
         }
-
         if (SignatureIsFileSha1Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILESHA1;
             SCLogDebug("sgh %p has filesha1", sgh);
-            break;
         }
-
         if (SignatureIsFileSha256Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILESHA256;
             SCLogDebug("sgh %p has filesha256", sgh);
-            break;
         }
-    }
-
-    return;
-}
-
-/**
- *  \brief Set the filestore_cnt in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the counter in
- */
-void SigGroupHeadSetFilestoreCount(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
-        if (s == NULL)
-            continue;
-
+#ifdef HAVE_MAGIC
+        if (SignatureIsFilemagicInspecting(s)) {
+            sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMAGIC;
+        }
+#endif
         if (SignatureIsFilestoring(s)) {
+            // should be insured by caller that we do not overflow
+            DEBUG_VALIDATE_BUG_ON(sgh->filestore_cnt == UINT16_MAX);
             sgh->filestore_cnt++;
         }
     }
-
-    return;
-}
-
-/** \brief build an array of rule id's for sigs with no prefilter
- *  Also updated de_ctx::non_pf_store_cnt_max to track the highest cnt
- */
-int SigGroupHeadBuildNonPrefilterArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-    uint32_t non_pf = 0;
-    uint32_t non_pf_syn = 0;
-
-    if (sgh == NULL)
-        return 0;
-
-    BUG_ON(sgh->non_pf_other_store_array != NULL);
-
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
-        if (s == NULL)
-            continue;
-
-        if (!(s->flags & SIG_FLAG_PREFILTER) || (s->flags & SIG_FLAG_MPM_NEG)) {
-            if (!(DetectFlagsSignatureNeedsSynPackets(s))) {
-                non_pf++;
-            }
-            non_pf_syn++;
-        }
-    }
-
-    if (non_pf == 0 && non_pf_syn == 0) {
-        sgh->non_pf_other_store_array = NULL;
-        sgh->non_pf_syn_store_array = NULL;
-        return 0;
-    }
-
-    if (non_pf > 0) {
-        sgh->non_pf_other_store_array = SCMalloc(non_pf * sizeof(SignatureNonPrefilterStore));
-        BUG_ON(sgh->non_pf_other_store_array == NULL);
-        memset(sgh->non_pf_other_store_array, 0, non_pf * sizeof(SignatureNonPrefilterStore));
-    }
-
-    if (non_pf_syn > 0) {
-        sgh->non_pf_syn_store_array = SCMalloc(non_pf_syn * sizeof(SignatureNonPrefilterStore));
-        BUG_ON(sgh->non_pf_syn_store_array == NULL);
-        memset(sgh->non_pf_syn_store_array, 0, non_pf_syn * sizeof(SignatureNonPrefilterStore));
-    }
-
-    for (sig = 0; sig < sgh->sig_cnt; sig++) {
-        s = sgh->match_array[sig];
-        if (s == NULL)
-            continue;
-
-        if (!(s->flags & SIG_FLAG_PREFILTER) || (s->flags & SIG_FLAG_MPM_NEG)) {
-            if (!(DetectFlagsSignatureNeedsSynPackets(s))) {
-                BUG_ON(sgh->non_pf_other_store_cnt >= non_pf);
-                BUG_ON(sgh->non_pf_other_store_array == NULL);
-                sgh->non_pf_other_store_array[sgh->non_pf_other_store_cnt].id = s->num;
-                sgh->non_pf_other_store_array[sgh->non_pf_other_store_cnt].mask = s->mask;
-                sgh->non_pf_other_store_array[sgh->non_pf_other_store_cnt].alproto = s->alproto;
-                sgh->non_pf_other_store_cnt++;
-            }
-
-            BUG_ON(sgh->non_pf_syn_store_cnt >= non_pf_syn);
-            BUG_ON(sgh->non_pf_syn_store_array == NULL);
-            sgh->non_pf_syn_store_array[sgh->non_pf_syn_store_cnt].id = s->num;
-            sgh->non_pf_syn_store_array[sgh->non_pf_syn_store_cnt].mask = s->mask;
-            sgh->non_pf_syn_store_array[sgh->non_pf_syn_store_cnt].alproto = s->alproto;
-            sgh->non_pf_syn_store_cnt++;
-        }
-    }
-
-    /* track highest cnt for any sgh in our de_ctx */
-    uint32_t max = MAX(sgh->non_pf_other_store_cnt, sgh->non_pf_syn_store_cnt);
-    if (max > de_ctx->non_pf_store_cnt_max)
-        de_ctx->non_pf_store_cnt_max = max;
-
-    return 0;
 }
 
 /**
@@ -754,7 +639,7 @@ int SigGroupHeadContainsSigId(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
         if ( !(sgh->init->sig_array[sig / 8] & (1 << (sig % 8))) )
             continue;
 
-        /* If we have reached here, we have an entry for sid in the SigGrouHead.
+        /* If we have reached here, we have an entry for sid in the SigGroupHead.
          * Retrieve the Signature from the detection engine context */
         s = de_ctx->sig_array[sig];
         if (s == NULL)
@@ -773,28 +658,24 @@ int SigGroupHeadContainsSigId(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
 
 #ifdef UNITTESTS
 
-int SigAddressPrepareStage1(DetectEngineCtx *);
+int SigPrepareStage1(DetectEngineCtx *);
 
 /**
  * \test Check if a SigGroupHead hash table is properly allocated and
  *       deallocated when calling SigGroupHeadHashInit() and
  *       SigGroupHeadHashFree() respectively.
  */
-static int SigGroupHeadTest03(void)
+static int SigGroupHeadTest01(void)
 {
-    int result = 1;
-
     DetectEngineCtx de_ctx;
 
     SigGroupHeadHashInit(&de_ctx);
-
-    result &= (de_ctx.sgh_hash_table != NULL);
+    FAIL_IF_NULL(de_ctx.sgh_hash_table);
 
     SigGroupHeadHashFree(&de_ctx);
+    FAIL_IF_NOT_NULL(de_ctx.sgh_hash_table);
 
-    result &= (de_ctx.sgh_hash_table == NULL);
-
-    return result;
+    PASS;
 }
 
 /**
@@ -802,62 +683,39 @@ static int SigGroupHeadTest03(void)
  *       SigGroupHead() and SigGroupHeadContainsSigId() correctly indicates
  *       the presence of a sid.
  */
-static int SigGroupHeadTest06(void)
+static int SigGroupHeadTest02(void)
 {
-    int result = 1;
     SigGroupHead *sh = NULL;
+
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    Signature *prev_sig = NULL;
+    FAIL_IF_NULL(de_ctx);
 
-    if (de_ctx == NULL)
-        return 0;
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                                 "content:\"test2\"; content:\"test3\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                               "content:\"test2\"; content:\"test3\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = de_ctx->sig_list;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:2;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:2;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:3;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:3;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:4;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:4;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:5;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:5;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
-
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);
@@ -865,19 +723,18 @@ static int SigGroupHeadTest06(void)
 
     SigGroupHeadSetSigCnt(sh, 4);
 
-    result &= (sh->sig_cnt == 3);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 1) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 3) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 5) == 1);
+    FAIL_IF_NOT(sh->init->sig_cnt == 3);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 1) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 3) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 5) == 1);
 
     SigGroupHeadFree(de_ctx, sh);
 
- end:
-    SigCleanSignatures(de_ctx);
     DetectEngineCtxFree(de_ctx);
-    return result;
+
+    PASS;
 }
 
 /**
@@ -886,62 +743,39 @@ static int SigGroupHeadTest06(void)
  *       the presence of a sid and SigGroupHeadClearSigs(), correctly clears
  *       the SigGroupHead->sig_array and SigGroupHead->sig_cnt.
  */
-static int SigGroupHeadTest07(void)
+static int SigGroupHeadTest03(void)
 {
-    int result = 1;
     SigGroupHead *sh = NULL;
+
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    Signature *prev_sig = NULL;
+    FAIL_IF_NULL(de_ctx);
 
-    if (de_ctx == NULL)
-        return 0;
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                                 "content:\"test2\"; content:\"test3\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                               "content:\"test2\"; content:\"test3\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = de_ctx->sig_list;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:2;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:2;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:3;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:3;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:4;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:4;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:5;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:5;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
-
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);
@@ -949,91 +783,67 @@ static int SigGroupHeadTest07(void)
 
     SigGroupHeadSetSigCnt(sh, 4);
 
-    result &= (sh->sig_cnt == 3);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 1) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 3) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 5) == 1);
+    FAIL_IF_NOT(sh->init->sig_cnt == 3);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 1) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 3) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 5) == 1);
 
     SigGroupHeadClearSigs(sh);
 
-    result &= (sh->sig_cnt == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 1) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 3) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, sh, 5) == 0);
+    FAIL_IF_NOT(sh->init->sig_cnt == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 1) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 2) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 3) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 4) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, sh, 5) == 0);
 
     SigGroupHeadFree(de_ctx, sh);
 
- end:
-    SigCleanSignatures(de_ctx);
     DetectEngineCtxFree(de_ctx);
-    return result;
+
+    PASS;
 }
 
 /**
  * \test Check if SigGroupHeadCopySigs(), correctly copies the sig_array from
  *       the source to the destination SigGroupHead.
  */
-static int SigGroupHeadTest08(void)
+static int SigGroupHeadTest04(void)
 {
-    int result = 1;
     SigGroupHead *src_sh = NULL;
     SigGroupHead *dst_sh = NULL;
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    Signature *prev_sig = NULL;
 
-    if (de_ctx == NULL)
-        return 0;
+    FAIL_IF_NULL(de_ctx);
 
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                               "content:\"test2\"; content:\"test3\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = de_ctx->sig_list;
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                                 "content:\"test2\"; content:\"test3\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:2;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:2;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:3;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:3;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:4;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:4;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:5;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:5;)");
+    FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &src_sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &src_sh, de_ctx->sig_list->next->next);
@@ -1041,93 +851,69 @@ static int SigGroupHeadTest08(void)
 
     SigGroupHeadSetSigCnt(src_sh, 4);
 
-    result &= (src_sh->sig_cnt == 3);
-    result &= (SigGroupHeadContainsSigId(de_ctx, src_sh, 1) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, src_sh, 2) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, src_sh, 3) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, src_sh, 4) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, src_sh, 5) == 1);
+    FAIL_IF_NOT(src_sh->init->sig_cnt == 3);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, src_sh, 1) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, src_sh, 2) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, src_sh, 3) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, src_sh, 4) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, src_sh, 5) == 1);
 
     SigGroupHeadCopySigs(de_ctx, src_sh, &dst_sh);
 
     SigGroupHeadSetSigCnt(dst_sh, 4);
 
-    result &= (dst_sh->sig_cnt == 3);
-    result &= (SigGroupHeadContainsSigId(de_ctx, dst_sh, 1) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, dst_sh, 2) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, dst_sh, 3) == 1);
-    result &= (SigGroupHeadContainsSigId(de_ctx, dst_sh, 4) == 0);
-    result &= (SigGroupHeadContainsSigId(de_ctx, dst_sh, 5) == 1);
+    FAIL_IF_NOT(dst_sh->init->sig_cnt == 3);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, dst_sh, 1) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, dst_sh, 2) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, dst_sh, 3) == 1);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, dst_sh, 4) == 0);
+    FAIL_IF_NOT(SigGroupHeadContainsSigId(de_ctx, dst_sh, 5) == 1);
 
     SigGroupHeadFree(de_ctx, src_sh);
     SigGroupHeadFree(de_ctx, dst_sh);
 
- end:
-    SigCleanSignatures(de_ctx);
     DetectEngineCtxFree(de_ctx);
-    return result;
+
+    PASS;
 }
 
 /**
  * \test Check if SigGroupHeadBuildMatchArray(), correctly updates the
  *       match array with the sids.
  */
-static int SigGroupHeadTest09(void)
+static int SigGroupHeadTest05(void)
 {
-    int result = 1;
     SigGroupHead *sh = NULL;
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    Signature *prev_sig = NULL;
 
-    if (de_ctx == NULL)
-        return 0;
+    FAIL_IF_NULL(de_ctx);
 
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                               "content:\"test2\"; content:\"test3\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = de_ctx->sig_list;
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                                 "content:\"test2\"; content:\"test3\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:2;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:2;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:3;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:3;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:4;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:4;)");
+    FAIL_IF_NULL(s);
 
-    prev_sig->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                             "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
-                             "content:\"test2\"; content:\"test3\"; sid:5;)");
-    if (prev_sig->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    prev_sig = prev_sig->next;
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"SigGroupHead tests\"; content:\"test1\"; "
+                                      "content:\"test2\"; content:\"test3\"; sid:5;)");
+    FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);
@@ -1136,52 +922,57 @@ static int SigGroupHeadTest09(void)
     SigGroupHeadSetSigCnt(sh, 4);
     SigGroupHeadBuildMatchArray(de_ctx, sh, 4);
 
-    result &= (sh->match_array[0] == de_ctx->sig_list);
-    result &= (sh->match_array[1] == de_ctx->sig_list->next->next);
-    result &= (sh->match_array[2] == de_ctx->sig_list->next->next->next->next);
+    /* matching an array to a queue structure (sig_list) constructed by SigInit()
+
+    FAIL_IF_NOT(sh->init->match_array[0] == de_ctx->sig_list);
+    FAIL_IF_NOT(sh->init->match_array[1] == de_ctx->sig_list->next->next);
+    FAIL_IF_NOT(sh->init->match_array[2] == de_ctx->sig_list->next->next->next->next);
+    */
+
+    // matching an array to a stack structure (sig_list) constructed by DetectEngineAppendSig()
+    FAIL_IF_NOT(sh->init->match_array[0] == de_ctx->sig_list->next->next->next->next);
+    FAIL_IF_NOT(sh->init->match_array[1] == de_ctx->sig_list->next->next);
+    FAIL_IF_NOT(sh->init->match_array[2] == de_ctx->sig_list);
 
     SigGroupHeadFree(de_ctx, sh);
 
- end:
-    SigCleanSignatures(de_ctx);
     DetectEngineCtxFree(de_ctx);
-    return result;
+
+    PASS;
 }
 
 /**
  * \test ICMP(?) sig grouping bug.
  */
-static int SigGroupHeadTest10(void)
+static int SigGroupHeadTest06(void)
 {
-    int result = 0;
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    Signature *s = NULL;
-    Packet *p = NULL;
     DetectEngineThreadCtx *det_ctx = NULL;
     ThreadVars th_v;
 
     memset(&th_v, 0, sizeof(ThreadVars));
 
-    p = UTHBuildPacketSrcDst(NULL, 0, IPPROTO_ICMP, "192.168.1.1", "1.2.3.4");
-    p->icmpv4h->type = 5;
-    p->icmpv4h->code = 1;
+    Packet *p = UTHBuildPacketSrcDst(NULL, 0, IPPROTO_ICMP, "192.168.1.1", "1.2.3.4");
+    FAIL_IF_NULL(p);
+    FAIL_IF_NOT(PacketIsICMPv4(p));
+
+    p->l4.hdrs.icmpv4h->type = 5;
+    p->l4.hdrs.icmpv4h->code = 1;
 
     /* originally ip's were
     p.src.addr_data32[0] = 0xe08102d3;
     p.dst.addr_data32[0] = 0x3001a8c0;
     */
 
-    if (de_ctx == NULL)
-        return 0;
+    FAIL_IF_NULL(de_ctx);
 
-    s = DetectEngineAppendSig(de_ctx, "alert icmp 192.168.0.0/16 any -> any any (icode:>1; itype:11; sid:1; rev:1;)");
-    if (s == NULL) {
-        goto end;
-    }
-    s = DetectEngineAppendSig(de_ctx, "alert icmp any any -> 192.168.0.0/16 any (icode:1; itype:5; sid:2; rev:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert icmp 192.168.0.0/16 any -> any any "
+                                                 "(icode:>1; itype:11; sid:1; rev:1;)");
+    FAIL_IF_NULL(s);
+
+    s = DetectEngineAppendSig(de_ctx, "alert icmp any any -> 192.168.0.0/16 any "
+                                      "(icode:1; itype:5; sid:2; rev:1;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
@@ -1189,27 +980,23 @@ static int SigGroupHeadTest10(void)
     AddressDebugPrint(&p->dst);
 
     const SigGroupHead *sgh = SigMatchSignaturesGetSgh(de_ctx, p);
-    if (sgh == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(sgh);
 
-    result = 1;
-end:
-    SigCleanSignatures(de_ctx);
     DetectEngineCtxFree(de_ctx);
     UTHFreePackets(&p, 1);
-    return result;
+
+    PASS;
 }
 #endif
 
 void SigGroupHeadRegisterTests(void)
 {
 #ifdef UNITTESTS
+    UtRegisterTest("SigGroupHeadTest01", SigGroupHeadTest01);
+    UtRegisterTest("SigGroupHeadTest02", SigGroupHeadTest02);
     UtRegisterTest("SigGroupHeadTest03", SigGroupHeadTest03);
+    UtRegisterTest("SigGroupHeadTest04", SigGroupHeadTest04);
+    UtRegisterTest("SigGroupHeadTest05", SigGroupHeadTest05);
     UtRegisterTest("SigGroupHeadTest06", SigGroupHeadTest06);
-    UtRegisterTest("SigGroupHeadTest07", SigGroupHeadTest07);
-    UtRegisterTest("SigGroupHeadTest08", SigGroupHeadTest08);
-    UtRegisterTest("SigGroupHeadTest09", SigGroupHeadTest09);
-    UtRegisterTest("SigGroupHeadTest10", SigGroupHeadTest10);
 #endif
 }

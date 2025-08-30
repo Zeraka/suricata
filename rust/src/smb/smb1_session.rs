@@ -15,8 +15,6 @@
  * 02110-1301, USA.
  */
 
-use crate::log::*;
-
 use crate::smb::smb_records::*;
 use crate::smb::smb1_records::*;
 use crate::smb::smb::*;
@@ -58,9 +56,9 @@ pub fn smb1_session_setup_request_host_info(r: &SmbRecord, blob: &[u8]) -> Sessi
 
         SCLogDebug!("name1 {:?} name2 {:?} name3 {:?}", native_os,native_lm,primary_domain);
         SessionSetupRequest {
-            native_os:native_os,
-            native_lm:native_lm,
-            primary_domain:primary_domain,
+            native_os,
+            native_lm,
+            primary_domain,
         }
     } else {
         let (native_os, native_lm, primary_domain) = match smb_get_ascii_string(blob) {
@@ -80,9 +78,9 @@ pub fn smb1_session_setup_request_host_info(r: &SmbRecord, blob: &[u8]) -> Sessi
 
         SCLogDebug!("session_setup_request_host_info: not unicode");
         SessionSetupRequest {
-            native_os: native_os,
-            native_lm: native_lm,
-            primary_domain: primary_domain,
+            native_os,
+            native_lm,
+            primary_domain,
         }
     }
 }
@@ -104,8 +102,8 @@ pub fn smb1_session_setup_response_host_info(r: &SmbRecord, blob: &[u8]) -> Sess
 
         SCLogDebug!("name1 {:?} name2 {:?}", native_os,native_lm);
         SessionSetupResponse {
-            native_os:native_os,
-            native_lm:native_lm,
+            native_os,
+            native_lm,
         }
     } else {
         SCLogDebug!("session_setup_response_host_info: not unicode");
@@ -119,16 +117,17 @@ pub fn smb1_session_setup_response_host_info(r: &SmbRecord, blob: &[u8]) -> Sess
             _ => { (Vec::new(), Vec::new()) },
         };
         SessionSetupResponse {
-            native_os: native_os,
-            native_lm: native_lm,
+            native_os,
+            native_lm,
         }
     }
 }
 
-pub fn smb1_session_setup_request(state: &mut SMBState, r: &SmbRecord)
+pub fn smb1_session_setup_request(state: &mut SMBState, r: &SmbRecord, andx_offset: usize)
 {
     SCLogDebug!("SMB1_COMMAND_SESSION_SETUP_ANDX user_id {}", r.user_id);
-    match parse_smb_setup_andx_record(r.data) {
+    #[allow(clippy::single_match)]
+    match parse_smb_setup_andx_record(&r.data[andx_offset-SMB1_HEADER_SIZE..]) {
         Ok((rem, setup)) => {
             let hdr = SMBCommonHdr::new(SMBHDR_TYPE_HEADER,
                     r.ssn_id as u64, 0, r.multiplex_id as u64);
@@ -136,14 +135,16 @@ pub fn smb1_session_setup_request(state: &mut SMBState, r: &SmbRecord)
             tx.vercmd.set_smb1_cmd(r.command);
 
             if let Some(SMBTransactionTypeData::SESSIONSETUP(ref mut td)) = tx.type_data {
-                match parse_secblob(setup.sec_blob) {
-                    Some(s) => {
-                        td.ntlmssp = s.ntlmssp;
-                        td.krb_ticket = s.krb;
-                    },
-                    None => { },
-                }
                 td.request_host = Some(smb1_session_setup_request_host_info(r, rem));
+                if let Some(s) = parse_secblob(setup.sec_blob) {
+                    td.ntlmssp = s.ntlmssp;
+                    td.krb_ticket = s.krb;
+                    if let Some(ntlm) = &td.ntlmssp {
+                        if ntlm.warning {
+                            tx.set_event(SMBEvent::UnusualNtlmsspOrder);
+                        }
+                    }
+                }
             }
         },
         _ => {
@@ -152,9 +153,9 @@ pub fn smb1_session_setup_request(state: &mut SMBState, r: &SmbRecord)
     }
 }
 
-fn smb1_session_setup_update_tx(tx: &mut SMBTransaction, r: &SmbRecord)
+fn smb1_session_setup_update_tx(tx: &mut SMBTransaction, r: &SmbRecord, andx_offset: usize)
 {
-    match parse_smb_response_setup_andx_record(r.data) {
+    match parse_smb_response_setup_andx_record(&r.data[andx_offset-SMB1_HEADER_SIZE..]) {
         Ok((rem, _setup)) => {
             if let Some(SMBTransactionTypeData::SESSIONSETUP(ref mut td)) = tx.type_data {
                 td.response_host = Some(smb1_session_setup_response_host_info(r, rem));
@@ -170,7 +171,7 @@ fn smb1_session_setup_update_tx(tx: &mut SMBTransaction, r: &SmbRecord)
     tx.response_done = true;
 }
 
-pub fn smb1_session_setup_response(state: &mut SMBState, r: &SmbRecord)
+pub fn smb1_session_setup_response(state: &mut SMBState, r: &SmbRecord, andx_offset: usize)
 {
     // try exact match with session id already set (e.g. NTLMSSP AUTH phase)
     let found = r.ssn_id != 0 && match state.get_sessionsetup_tx(
@@ -178,7 +179,7 @@ pub fn smb1_session_setup_response(state: &mut SMBState, r: &SmbRecord)
                     r.ssn_id as u64, 0, r.multiplex_id as u64))
     {
         Some(tx) => {
-            smb1_session_setup_update_tx(tx, r);
+            smb1_session_setup_update_tx(tx, r, andx_offset);
             SCLogDebug!("smb1_session_setup_response: tx {:?}", tx);
             true
         },
@@ -186,16 +187,13 @@ pub fn smb1_session_setup_response(state: &mut SMBState, r: &SmbRecord)
     };
     // otherwise try match with ssn id 0 (e.g. NTLMSSP_NEGOTIATE)
     if !found {
-        match state.get_sessionsetup_tx(
+        if let Some(tx) = state.get_sessionsetup_tx(
                 SMBCommonHdr::new(SMBHDR_TYPE_HEADER, 0, 0, r.multiplex_id as u64))
         {
-            Some(tx) => {
-                smb1_session_setup_update_tx(tx, r);
-                SCLogDebug!("smb1_session_setup_response: tx {:?}", tx);
-            },
-            None => {
-                SCLogDebug!("smb1_session_setup_response: tx not found for {:?}", r);
-            },
+            smb1_session_setup_update_tx(tx, r, andx_offset);
+            SCLogDebug!("smb1_session_setup_response: tx {:?}", tx);
+        } else {
+            SCLogDebug!("smb1_session_setup_response: tx not found for {:?}", r);
         }
     }
 }

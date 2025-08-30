@@ -21,26 +21,10 @@
  *  \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_IPREP_H__
-#define __DETECT_IPREP_H__
-
-#define DETECT_IPREP_CMD_ANY      0
-#define DETECT_IPREP_CMD_BOTH     1
-#define DETECT_IPREP_CMD_SRC      2
-#define DETECT_IPREP_CMD_DST      3
-
-#define DETECT_IPREP_OP_LT        0
-#define DETECT_IPREP_OP_GT        1
-#define DETECT_IPREP_OP_EQ        2
-
-typedef struct DetectIPRepData_ {
-    uint8_t cmd;
-    int8_t cat;
-    int8_t op;
-    uint8_t val;
-} DetectIPRepData;
+#ifndef SURICATA_DETECT_IPREP_H
+#define SURICATA_DETECT_IPREP_H
 
 /* prototypes */
 void DetectIPRepRegister (void);
 
-#endif /* __DETECT_IPREP_H__ */
+#endif /* SURICATA_DETECT_IPREP_H */

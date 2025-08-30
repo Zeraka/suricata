@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,25 +21,24 @@
  * \author Tom DeCanio <td@npulsetech.com>
  */
 
-#ifndef __OUTPUT_JSON_EMAIL_COMMON_H__
-#define __OUTPUT_JSON_EMAIL_COMMON_H__
+#ifndef SURICATA_OUTPUT_JSON_EMAIL_COMMON_H
+#define SURICATA_OUTPUT_JSON_EMAIL_COMMON_H
 
 typedef struct OutputJsonEmailCtx_ {
-    LogFileCtx *file_ctx;
     uint32_t flags; /** Store mode */
     uint64_t fields;/** Store fields */
-    OutputJsonCommonSettings cfg;
+    OutputJsonCtx *eve_ctx;
 } OutputJsonEmailCtx;
 
 typedef struct JsonEmailLogThread_ {
-    LogFileCtx *file_ctx;
     OutputJsonEmailCtx *emaillog_ctx;
-    MemBuffer *buffer;
+    OutputJsonThreadCtx *ctx;
 } JsonEmailLogThread;
 
-TmEcode EveEmailLogJson(JsonEmailLogThread *aft, JsonBuilder *js, const Packet *p, Flow *f, void *state, void *vtx, uint64_t tx_id);
-bool EveEmailAddMetadata(const Flow *f, uint32_t tx_id, JsonBuilder *js);
+TmEcode EveEmailLogJson(JsonEmailLogThread *aft, SCJsonBuilder *js, const Packet *p, Flow *f,
+        void *state, void *vtx, uint64_t tx_id);
+bool EveEmailAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *js);
 
-void OutputEmailInitConf(ConfNode *conf, OutputJsonEmailCtx *email_ctx);
+void OutputEmailInitConf(SCConfNode *conf, OutputJsonEmailCtx *email_ctx);
 
-#endif /* __OUTPUT_JSON_EMAIL_COMMON_H__ */
+#endif /* SURICATA_OUTPUT_JSON_EMAIL_COMMON_H */

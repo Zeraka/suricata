@@ -1,6 +1,11 @@
 Flow Keywords
 =============
 
+.. role:: example-rule-action
+.. role:: example-rule-header
+.. role:: example-rule-options
+.. role:: example-rule-emphasis
+
 flowbits
 --------
 
@@ -9,13 +14,13 @@ is going to perform, the second part is the name of the flowbit.
 
 There are multiple packets that belong to one flow. Suricata keeps
 those flows in memory. For more information see
-:ref:`suricata-yaml-flow-settings`.  Flowbits can make sure an alert
-will be generated when for example two different packets match.  An
-alert will only be generated when both packets match. So, when the
-second packet matches, Suricata has to know if the first packet was a
-match too. Flowbits marks the flow if a packet matches so Suricata
-'knows' it should generate an alert when the second packet matches as
-well.
+:ref:`suricata-yaml-flow-settings`.
+
+Flowbits can make sure an alert will be generated when for example two
+different packets match. An alert will only be generated when both packets
+match. So, when the second packet matches, Suricata has to know if the first
+packet was a match too. Flowbits mark the flow if a packet matches so Suricata
+'knows' it should generate an alert when the second packet matches as well.
 
 Flowbits have different actions. These are:
 
@@ -41,24 +46,33 @@ Example:
 
 When you take a look at the first rule you will notice it would
 generate an alert if it would match, if it were not for the 'flowbits:
-noalert' at the end of that rule. The purpose of this rule is to check
-for a match on 'userlogin' and mark that in the flow. So, there is no
-need for generating an alert.  The second rule has no effect without
-the first rule. If the first rule matches, the flowbits sets that
-specific condition to be present in the flow. Now with the second rule
-there can be checked whether or not the previous packet fulfills the
-first condition. If at that point the second rule matches, an alert
-will be generated.
+noalert' at the end of that rule.
 
-It is possible to use flowbits several times in a rule and combine the
-different functions.
+The purpose of this rule is to check for a match on 'userlogin' and mark that
+in the flow. So, there is no need to generate an alert. The second rule has no
+effect without the first rule. If the first rule matches, the flowbit sets that
+specific condition to be present in the flow. Now the second rule can be
+checked whether or not the previous packet fulfills the first condition.
+If the second rule matches now, an alert will be generated.
+
+.. note:: flowbit names are case-sensitive.
+
+.. note:: It is possible to use flowbits several times in a rule and combine
+  the different functions.
+
+.. note:: It is possible to perform an `OR` operation with flowbits using the `|` (pipe).
+
+.. container:: example-rule
+
+  alert http any any -> any any (msg:"User1 or User2 logged in"; \
+  content:"login"; :example-rule-options:`flowbits:isset,user1|user2;` sid:1;)
 
 flow
 ----
 
 The flow keyword can be used to match on direction of the flow, so to/from
 client or to/from server. It can also match if the flow is established or not.
-The flow keyword can also be use to say the signature has to match on stream
+The flow keyword can also be used to say the signature has to match on stream
 only (only_stream) or on packet only (no_stream).
 
 So with the flow keyword you can match on:
@@ -76,7 +90,8 @@ established
 not_established
   Match on packets that are not part of an established connection.
 stateless
-  Match on packets that are and are not part of an established connection.
+  Match on packets that are part of a flow, regardless of connection state.
+  (This means that packets that are not seen as part of a flow won't match).
 only_stream
   Match on packets that have been reassembled by the stream engine.
 no_stream
@@ -128,7 +143,7 @@ Define a var (not required), or check that one is set or not set.
 ::
 
     flowint: name, < +,-,=,>,<,>=,<=,==, != >, value;
-    flowint: name, (isset|isnotset);
+    flowint: name, (isset|notset|isnotset);
 
 Compare or alter a var. Add, subtract, compare greater than or less
 than, greater than or equal to, and less than or equal to are
@@ -278,3 +293,93 @@ Format
 Example of the stream-size keyword in a rule::
 
     alert tcp any any -> any any (stream_size:both, >, 5000; sid:1;)
+
+flow.age
+--------
+
+Flow age in seconds (integer)
+This keyword does not wait for the end of the flow, but will be checked at each packet.
+
+flow.age uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>`.
+
+Syntax::
+
+ flow.age: [op]<number>
+
+The time can be matched exactly, or compared using the _op_ setting::
+
+ flow.age:3    # exactly 3
+ flow.age:<3   # smaller than 3 seconds
+ flow.age:>=2  # greater or equal than 2 seconds
+
+Signature example::
+
+ alert tcp any any -> any any (msg:"Flow longer than one hour"; flow.age:>3600; flowbits: isnotset, onehourflow; flowbits: onehourflow, name; sid:1; rev:1;)
+
+In this example, we combine `flow.age` and `flowbits` to get an alert on the first packet after the flow's age is older than one hour.
+
+flow.pkts
+---------
+
+Flow number of packets (integer)
+This keyword does not wait for the end of the flow, but will be checked at each packet.
+
+flow.pkts uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>` and supports
+following directions:
+
+* toclient
+
+* toserver
+
+* either
+
+Syntax::
+
+ flow.pkts:<direction>,[op]<number>
+
+The number of packets can be matched exactly, or compared using the _op_ setting::
+
+ flow.pkts:toclient,3    # exactly 3
+ flow.pkts:toserver,<3   # smaller than 3
+ flow.pkts:either,>=2  # greater than or equal to 2
+
+Signature example::
+
+ alert ip any any -> any any (msg:"Flow has 20 packets in toclient dir"; flow.pkts:toclient,20; sid:1;)
+
+.. note:: Suricata also supports ``flow.pkts_toclient`` and ``flow.pkts_toserver``
+   keywords for ``flow.pkts:toclient`` and ``flow.pkts:toserver`` respectively but
+   that is not the preferred syntax.
+
+flow.bytes
+----------
+
+Flow number of bytes (integer)
+This keyword does not wait for the end of the flow, but will be checked at each packet.
+
+flow.bytes uses an :ref:`unsigned 64-bit integer <rules-integer-keywords>` and supports
+following directions:
+
+* toclient
+
+* toserver
+
+* either
+
+Syntax::
+
+ flow.bytes:<direction>,[op]<number>
+
+The number of bytes can be matched exactly, or compared using the _op_ setting::
+
+ flow.bytes:toclient,3    # exactly 3
+ flow.bytes:toserver,<3   # smaller than 3
+ flow.bytes:either,>=2  # greater than or equal to 2
+
+Signature example::
+
+ alert ip any any -> any any (msg:"Flow has less than 2000 bytes in toserver dir"; flow.bytes:toserver,<2000; sid:1;)
+
+.. note:: Suricata also supports ``flow.bytes_toclient`` and ``flow.bytes_toserver``
+   keywords for ``flow.bytes:toclient`` and ``flow.bytes:toserver`` respectively but
+   that is not the preferred syntax.

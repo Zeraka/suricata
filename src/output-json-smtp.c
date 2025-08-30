@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "detect.h"
 #include "pkt-var.h"
 #include "conf.h"
@@ -52,22 +51,22 @@
 #include "output-json-smtp.h"
 #include "output-json-email-common.h"
 
-static void EveSmtpDataLogger(const Flow *f, void *state, void *vtx, uint64_t tx_id, JsonBuilder *js)
+static void EveSmtpDataLogger(void *state, void *vtx, SCJsonBuilder *js)
 {
     SMTPTransaction *tx = vtx;
     SMTPString *rcptto_str;
     if (((SMTPState *)state)->helo) {
-        jb_set_string(js, "helo", (const char *)((SMTPState *)state)->helo);
+        SCJbSetString(js, "helo", (const char *)((SMTPState *)state)->helo);
     }
     if (tx->mail_from) {
-        jb_set_string(js, "mail_from", (const char *)tx->mail_from);
+        SCJbSetString(js, "mail_from", (const char *)tx->mail_from);
     }
     if (!TAILQ_EMPTY(&tx->rcpt_to_list)) {
-        jb_open_array(js, "rcpt_to");
+        SCJbOpenArray(js, "rcpt_to");
         TAILQ_FOREACH(rcptto_str, &tx->rcpt_to_list, next) {
-            jb_append_string(js, (char *)rcptto_str->str);
+            SCJbAppendString(js, (char *)rcptto_str->str);
         }
-        jb_close(js);
+        SCJbClose(js);
     }
 }
 
@@ -76,50 +75,36 @@ static int JsonSmtpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
     SCEnter();
     JsonEmailLogThread *jhl = (JsonEmailLogThread *)thread_data;
 
-    JsonBuilder *jb = CreateEveHeaderWithTxId(p, LOG_DIR_FLOW, "smtp", NULL, tx_id);
+    SCJsonBuilder *jb = CreateEveHeaderWithTxId(
+            p, LOG_DIR_FLOW, "smtp", NULL, tx_id, jhl->emaillog_ctx->eve_ctx);
     if (unlikely(jb == NULL))
         return TM_ECODE_OK;
-    EveAddCommonOptions(&jhl->emaillog_ctx->cfg, p, f, jb);
 
-    /* reset */
-    MemBufferReset(jhl->buffer);
+    SCJbOpenObject(jb, "smtp");
+    EveSmtpDataLogger(state, tx, jb);
+    SCJbClose(jb);
 
-    jb_open_object(jb, "smtp");
-    EveSmtpDataLogger(f, state, tx, tx_id, jb);
-    jb_close(jb);
+    EveEmailLogJson(jhl, jb, p, f, state, tx, tx_id);
+    OutputJsonBuilderBuffer(tv, p, p->flow, jb, jhl->ctx);
 
-    if (EveEmailLogJson(jhl, jb, p, f, state, tx, tx_id) == TM_ECODE_OK) {
-        OutputJsonBuilderBuffer(jb, jhl->file_ctx, &jhl->buffer);
-    }
-
-    jb_free(jb);
+    SCJbFree(jb);
 
     SCReturnInt(TM_ECODE_OK);
 
 }
 
-bool EveSMTPAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
+bool EveSMTPAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *js)
 {
     SMTPState *smtp_state = (SMTPState *)FlowGetAppState(f);
     if (smtp_state) {
         SMTPTransaction *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_SMTP, smtp_state, tx_id);
         if (tx) {
-            EveSmtpDataLogger(f, smtp_state, tx, tx_id, js);
+            EveSmtpDataLogger(smtp_state, tx, js);
             return true;
         }
     }
 
     return false;
-}
-
-static void OutputSmtpLogDeInitCtx(OutputCtx *output_ctx)
-{
-    OutputJsonEmailCtx *email_ctx = output_ctx->data;
-    if (email_ctx != NULL) {
-        LogFileFreeCtx(email_ctx->file_ctx);
-        SCFree(email_ctx);
-    }
-    SCFree(output_ctx);
 }
 
 static void OutputSmtpLogDeInitCtxSub(OutputCtx *output_ctx)
@@ -132,53 +117,12 @@ static void OutputSmtpLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-#define DEFAULT_LOG_FILENAME "smtp.json"
-static OutputInitResult OutputSmtpLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_SMTP_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputJsonEmailCtx *email_ctx = SCMalloc(sizeof(OutputJsonEmailCtx));
-    if (unlikely(email_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(email_ctx);
-        return result;
-    }
-
-    email_ctx->file_ctx = file_ctx;
-
-    output_ctx->data = email_ctx;
-    output_ctx->DeInit = OutputSmtpLogDeInitCtx;
-
-    /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
-static OutputInitResult OutputSmtpLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputSmtpLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ojc = parent_ctx->data;
 
-    OutputJsonEmailCtx *email_ctx = SCMalloc(sizeof(OutputJsonEmailCtx));
+    OutputJsonEmailCtx *email_ctx = SCCalloc(1, sizeof(OutputJsonEmailCtx));
     if (unlikely(email_ctx == NULL))
         return result;
 
@@ -188,8 +132,7 @@ static OutputInitResult OutputSmtpLogInitSub(ConfNode *conf, OutputCtx *parent_c
         return result;
     }
 
-    email_ctx->file_ctx = ojc->file_ctx;
-    email_ctx->cfg = ojc->cfg;
+    email_ctx->eve_ctx = ojc;
 
     OutputEmailInitConf(conf, email_ctx);
 
@@ -197,7 +140,7 @@ static OutputInitResult OutputSmtpLogInitSub(ConfNode *conf, OutputCtx *parent_c
     output_ctx->DeInit = OutputSmtpLogDeInitCtxSub;
 
     /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
+    SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
 
     result.ctx = output_ctx;
     result.ok = true;
@@ -218,22 +161,15 @@ static TmEcode JsonSmtpLogThreadInit(ThreadVars *t, const void *initdata, void *
     /* Use the Output Context (file pointer and mutex) */
     aft->emaillog_ctx = ((OutputCtx *)initdata)->data;
 
-    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
+    aft->ctx = CreateEveThreadCtx(t, aft->emaillog_ctx->eve_ctx);
+    if (aft->ctx == NULL) {
         goto error_exit;
     }
 
-    aft->file_ctx = LogFileEnsureExists(aft->emaillog_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
-        goto error_exit;
-    }
     *data = (void *)aft;
     return TM_ECODE_OK;
 
 error_exit:
-    if (aft->buffer != NULL) {
-        MemBufferFree(aft->buffer);
-    }
     SCFree(aft);
     return TM_ECODE_FAILED;
 }
@@ -244,8 +180,8 @@ static TmEcode JsonSmtpLogThreadDeinit(ThreadVars *t, void *data)
     if (aft == NULL) {
         return TM_ECODE_OK;
     }
+    FreeEveThreadCtx(aft->ctx);
 
-    MemBufferFree(aft->buffer);
     /* clear memory */
     memset(aft, 0, sizeof(JsonEmailLogThread));
 
@@ -254,13 +190,8 @@ static TmEcode JsonSmtpLogThreadDeinit(ThreadVars *t, void *data)
 }
 
 void JsonSmtpLogRegister (void) {
-    /* register as separate module */
-    OutputRegisterTxModule(LOGGER_JSON_SMTP, "JsonSmtpLog", "smtp-json-log",
-        OutputSmtpLogInit, ALPROTO_SMTP, JsonSmtpLogger, JsonSmtpLogThreadInit,
-        JsonSmtpLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
-    OutputRegisterTxSubModule(LOGGER_JSON_SMTP, "eve-log", "JsonSmtpLog",
-        "eve-log.smtp", OutputSmtpLogInitSub, ALPROTO_SMTP, JsonSmtpLogger,
-        JsonSmtpLogThreadInit, JsonSmtpLogThreadDeinit, NULL);
+    /* register as child of eve-log */
+    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonSmtpLog", "eve-log.smtp",
+            OutputSmtpLogInitSub, ALPROTO_SMTP, JsonSmtpLogger, JsonSmtpLogThreadInit,
+            JsonSmtpLogThreadDeinit);
 }

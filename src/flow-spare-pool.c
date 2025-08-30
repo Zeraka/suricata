@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,7 +25,6 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "flow-private.h"
 #include "flow-queue.h"
 #include "flow-util.h"
@@ -41,7 +40,6 @@ typedef struct FlowSparePool {
 } FlowSparePool;
 
 static uint32_t flow_spare_pool_flow_cnt = 0;
-static uint32_t flow_spare_pool_block_size = 100;
 static FlowSparePool *flow_spare_pool = NULL;
 static SCMutex flow_spare_pool_m = SCMUTEX_INITIALIZER;
 
@@ -66,8 +64,7 @@ static bool FlowSparePoolUpdateBlock(FlowSparePool *p)
 {
     DEBUG_VALIDATE_BUG_ON(p == NULL);
 
-    for (uint32_t i = p->queue.len; i < flow_spare_pool_block_size; i++)
-    {
+    for (uint32_t i = p->queue.len; i < FLOW_SPARE_POOL_BLOCK_SIZE; i++) {
         Flow *f = FlowAlloc();
         if (f == NULL)
             return false;
@@ -85,8 +82,8 @@ static void Validate(FlowSparePool *top, const uint32_t target)
     }
 
     assert(top->queue.len >= 1);
-    //if (top->next != NULL)
-    //    assert(top->next->queue.len == flow_spare_pool_block_size);
+    // if (top->next != NULL)
+    //     assert(top->next->queue.len == FLOW_SPARE_POOL_BLOCK_SIZE);
 
     uint32_t cnt = 0;
     for (FlowSparePool *p = top; p != NULL; p = p->next)
@@ -107,7 +104,7 @@ void FlowSparePoolReturnFlow(Flow *f)
     DEBUG_VALIDATE_BUG_ON(flow_spare_pool == NULL);
 
     /* if the top is full, get a new block */
-    if (flow_spare_pool->queue.len >= flow_spare_pool_block_size) {
+    if (flow_spare_pool->queue.len >= FLOW_SPARE_POOL_BLOCK_SIZE) {
         FlowSparePool *p = FlowSpareGetPool();
         DEBUG_VALIDATE_BUG_ON(p == NULL);
         p->next = flow_spare_pool;
@@ -122,7 +119,55 @@ void FlowSparePoolReturnFlow(Flow *f)
 
 void FlowSparePoolReturnFlows(FlowQueuePrivate *fqp)
 {
+    FlowSparePool *p = FlowSpareGetPool();
+    DEBUG_VALIDATE_BUG_ON(p == NULL);
+    p->queue = *fqp;
 
+    SCMutexLock(&flow_spare_pool_m);
+    flow_spare_pool_flow_cnt += fqp->len;
+    if (flow_spare_pool != NULL) {
+        if (p->queue.len == FLOW_SPARE_POOL_BLOCK_SIZE) {
+            /* full block insert */
+
+            if (flow_spare_pool->queue.len < FLOW_SPARE_POOL_BLOCK_SIZE) {
+                p->next = flow_spare_pool->next;
+                flow_spare_pool->next = p;
+                p = NULL;
+            } else {
+                p->next = flow_spare_pool;
+                flow_spare_pool = p;
+                p = NULL;
+            }
+        } else {
+            /* incomplete block insert */
+
+            if (p->queue.len + flow_spare_pool->queue.len <= FLOW_SPARE_POOL_BLOCK_SIZE) {
+                FlowQueuePrivateAppendPrivate(&flow_spare_pool->queue, &p->queue);
+                /* free 'p' outside of lock below */
+            } else {
+                // put smallest first
+                if (p->queue.len < flow_spare_pool->queue.len) {
+                    p->next = flow_spare_pool;
+                    flow_spare_pool = p;
+                } else {
+                    p->next = flow_spare_pool->next;
+                    flow_spare_pool->next = p;
+                }
+                p = NULL;
+            }
+        }
+    } else {
+        p->next = flow_spare_pool;
+        flow_spare_pool = p;
+        p = NULL;
+    }
+    SCMutexUnlock(&flow_spare_pool_m);
+
+    FlowQueuePrivate empty = { NULL, NULL, 0 };
+    *fqp = empty;
+
+    if (p != NULL)
+        SCFree(p);
 }
 
 FlowQueuePrivate FlowSpareGetFromPool(void)
@@ -135,7 +180,7 @@ FlowQueuePrivate FlowSpareGetFromPool(void)
     }
 
     /* top if full or its the only block we have */
-    if (flow_spare_pool->queue.len >= flow_spare_pool_block_size || flow_spare_pool->next == NULL) {
+    if (flow_spare_pool->queue.len >= FLOW_SPARE_POOL_BLOCK_SIZE || flow_spare_pool->next == NULL) {
         FlowSparePool *p = flow_spare_pool;
         flow_spare_pool = p->next;
         DEBUG_VALIDATE_BUG_ON(flow_spare_pool_flow_cnt < p->queue.len);
@@ -173,32 +218,33 @@ void FlowSparePoolUpdate(uint32_t size)
 {
     const int64_t todo = (int64_t)flow_config.prealloc - (int64_t)size;
     if (todo < 0) {
-        /* remove one block at most at a time */
         uint32_t to_remove = (uint32_t)(todo * -1) / 10;
-        if (to_remove < flow_spare_pool_block_size)
-            return;
+        while (to_remove) {
+            if (to_remove < FLOW_SPARE_POOL_BLOCK_SIZE)
+                return;
 
-        FlowSparePool *p = NULL;
-        SCMutexLock(&flow_spare_pool_m);
-        p = flow_spare_pool;
-        if (p != NULL) {
-            flow_spare_pool = p->next;
-            flow_spare_pool_flow_cnt -= p->queue.len;
-        }
-        SCMutexUnlock(&flow_spare_pool_m);
-
-        if (p != NULL) {
-            Flow *f;
-            while ((f = FlowQueuePrivateGetFromTop(&p->queue))) {
-                FlowFree(f);
+            FlowSparePool *p = NULL;
+            SCMutexLock(&flow_spare_pool_m);
+            p = flow_spare_pool;
+            if (p != NULL) {
+                flow_spare_pool = p->next;
+                flow_spare_pool_flow_cnt -= p->queue.len;
+                to_remove -= p->queue.len;
             }
-            SCFree(p);
-        }
+            SCMutexUnlock(&flow_spare_pool_m);
 
+            if (p != NULL) {
+                Flow *f;
+                while ((f = FlowQueuePrivateGetFromTop(&p->queue))) {
+                    FlowFree(f);
+                }
+                SCFree(p);
+            }
+        }
     } else if (todo > 0) {
         FlowSparePool *head = NULL, *tail = NULL;
 
-        uint32_t blocks = ((uint32_t)todo / flow_spare_pool_block_size) + 1;
+        uint32_t blocks = ((uint32_t)todo / FLOW_SPARE_POOL_BLOCK_SIZE) + 1;
 
         uint32_t flow_cnt = 0;
         for (uint32_t cnt = 0; cnt < blocks; cnt++) {
@@ -248,7 +294,7 @@ void FlowSparePoolInit(void)
     for (uint32_t cnt = 0; cnt < flow_config.prealloc; ) {
         FlowSparePool *p = FlowSpareGetPool();
         if (p == NULL) {
-            FatalError(SC_ERR_FLOW_INIT, "failed to initialize flow pool");
+            FatalError("failed to initialize flow pool");
         }
         FlowSparePoolUpdateBlock(p);
         cnt += p->queue.len;

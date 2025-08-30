@@ -24,10 +24,10 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-parse.h"
 #include "app-layer.h"
 
@@ -36,7 +36,9 @@
 
 #include "detect-isdataat.h"
 #include "detect-content.h"
+#include "detect-bytetest.h"
 #include "detect-uricontent.h"
+#include "detect-engine-build.h"
 
 #include "flow.h"
 #include "flow-var.h"
@@ -56,10 +58,98 @@ static DetectParseRegex parse_regex;
 int DetectIsdataatSetup (DetectEngineCtx *, Signature *, const char *);
 #ifdef UNITTESTS
 static void DetectIsdataatRegisterTests(void);
+static void DetectAbsentRegisterTests(void);
 #endif
 void DetectIsdataatFree(DetectEngineCtx *, void *);
 
 static int DetectEndsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const char *nullstr);
+
+static void DetectAbsentFree(DetectEngineCtx *de_ctx, void *ptr)
+{
+    SCFree(ptr);
+}
+
+static int DetectAbsentSetup(DetectEngineCtx *de_ctx, Signature *s, const char *optstr)
+{
+    if (s->init_data->list == DETECT_SM_LIST_NOTSET) {
+        SCLogError("no buffer for absent keyword");
+        return -1;
+    }
+
+    if (DetectBufferGetActiveList(de_ctx, s) == -1)
+        return -1;
+
+    bool or_else;
+    if (optstr == NULL) {
+        or_else = false;
+    } else if (strcmp(optstr, "or_else") == 0) {
+        or_else = true;
+    } else {
+        SCLogError("unhandled value for absent keyword: %s", optstr);
+        return -1;
+    }
+    if (s->init_data->curbuf == NULL || s->init_data->list != (int)s->init_data->curbuf->id) {
+        SCLogError("unspected buffer for absent keyword");
+        return -1;
+    }
+    const DetectBufferType *b = DetectEngineBufferTypeGetById(de_ctx, s->init_data->list);
+    if (!b || b->frame) {
+        SCLogError("absent does not work with frames");
+        return -1;
+    }
+    if (s->init_data->curbuf->tail != NULL) {
+        SCLogError("absent must come first right after buffer");
+        return -1;
+    }
+    DetectAbsentData *dad = SCMalloc(sizeof(DetectAbsentData));
+    if (unlikely(dad == NULL))
+        return -1;
+
+    dad->or_else = or_else;
+
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ABSENT, (SigMatchCtx *)dad, s->init_data->list) == NULL) {
+        DetectAbsentFree(de_ctx, dad);
+        return -1;
+    }
+    return 0;
+}
+
+bool DetectAbsentValidateContentCallback(const Signature *s, const SignatureInitDataBuffer *b)
+{
+    bool has_other = false;
+    bool only_absent = false;
+    bool has_absent = false;
+    for (const SigMatch *sm = b->head; sm != NULL; sm = sm->next) {
+        if (sm->type == DETECT_ABSENT) {
+            has_absent = true;
+            const DetectAbsentData *dad = (const DetectAbsentData *)sm->ctx;
+            if (!dad->or_else) {
+                only_absent = true;
+            }
+        } else {
+            has_other = true;
+            if (sm->type == DETECT_CONTENT) {
+                const DetectContentData *cd = (DetectContentData *)sm->ctx;
+                if (has_absent && (cd->flags & DETECT_CONTENT_FAST_PATTERN)) {
+                    SCLogError("signature can't have absent and fast_pattern on the same buffer");
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (only_absent && has_other) {
+        SCLogError("signature can't have a buffer tested absent and tested with other keywords "
+                   "such as content");
+        return false;
+    } else if (has_absent && !only_absent && !has_other) {
+        SCLogError(
+                "signature with absent: or_else expects other keywords to test on such as content");
+        return false;
+    }
+    return true;
+}
 
 /**
  * \brief Registration function for isdataat: keyword
@@ -82,6 +172,16 @@ void DetectIsdataatRegister(void)
     sigmatch_table[DETECT_ENDS_WITH].Setup = DetectEndsWithSetup;
     sigmatch_table[DETECT_ENDS_WITH].flags = SIGMATCH_NOOPT;
 
+    sigmatch_table[DETECT_ABSENT].name = "absent";
+    sigmatch_table[DETECT_ABSENT].desc = "test if the buffer is absent";
+    sigmatch_table[DETECT_ABSENT].url = "/rules/payload-keywords.html#absent";
+    sigmatch_table[DETECT_ABSENT].Setup = DetectAbsentSetup;
+    sigmatch_table[DETECT_ABSENT].Free = DetectAbsentFree;
+    sigmatch_table[DETECT_ABSENT].flags = SIGMATCH_OPTIONAL_OPT;
+#ifdef UNITTESTS
+    sigmatch_table[DETECT_ABSENT].RegisterTests = DetectAbsentRegisterTests;
+#endif
+
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
 
@@ -98,38 +198,39 @@ static DetectIsdataatData *DetectIsdataatParse (DetectEngineCtx *de_ctx, const c
 {
     DetectIsdataatData *idad = NULL;
     char *args[3] = {NULL,NULL,NULL};
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2_len;
     int i=0;
 
-    ret = DetectParsePcreExec(&parse_regex, isdataatstr, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, isdataatstr, 0, 0);
     if (ret < 1 || ret > 4) {
-        SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, isdataatstr);
+        SCLogError("pcre_exec parse error, ret %" PRId32 ", string %s", ret, isdataatstr);
         goto error;
     }
 
     if (ret > 1) {
         const char *str_ptr;
-        res = pcre_get_substring((char *)isdataatstr, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+        res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
         args[0] = (char *)str_ptr;
 
 
         if (ret > 2) {
-            res = pcre_get_substring((char *)isdataatstr, ov, MAX_SUBSTRINGS, 2, &str_ptr);
+            res = pcre2_substring_get_bynumber(match, 2, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
             if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError("pcre2_substring_get_bynumber failed");
                 goto error;
             }
             args[1] = (char *)str_ptr;
         }
         if (ret > 3) {
-            res = pcre_get_substring((char *)isdataatstr, ov, MAX_SUBSTRINGS, 3, &str_ptr);
+            res = pcre2_substring_get_bynumber(match, 3, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
             if (res < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError("pcre2_substring_get_bynumber failed");
                 goto error;
             }
             args[2] = (char *)str_ptr;
@@ -144,7 +245,7 @@ static DetectIsdataatData *DetectIsdataatParse (DetectEngineCtx *de_ctx, const c
 
         if (args[0][0] != '-' && isalpha((unsigned char)args[0][0])) {
             if (offset == NULL) {
-                SCLogError(SC_ERR_INVALID_ARGUMENT, "isdataat supplied with "
+                SCLogError("isdataat supplied with "
                            "var name for offset.  \"offset\" argument supplied to "
                            "this function has to be non-NULL");
                 goto error;
@@ -155,7 +256,7 @@ static DetectIsdataatData *DetectIsdataatParse (DetectEngineCtx *de_ctx, const c
         } else {
             if (StringParseUint16(&idad->dataat, 10,
                                         strlen(args[0]), args[0]) < 0 ) {
-                SCLogError(SC_ERR_INVALID_VALUE, "isdataat out of range");
+                SCLogError("isdataat out of range");
                 SCFree(idad);
                 idad = NULL;
                 goto error;
@@ -175,17 +276,21 @@ static DetectIsdataatData *DetectIsdataatParse (DetectEngineCtx *de_ctx, const c
 
         for (i = 0; i < (ret -1); i++) {
             if (args[i] != NULL)
-                SCFree(args[i]);
+                pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
         }
 
+        pcre2_match_data_free(match);
         return idad;
 
     }
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     for (i = 0; i < (ret -1) && i < 3; i++){
         if (args[i] != NULL)
-            SCFree(args[i]);
+            pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
     }
 
     if (idad != NULL)
@@ -206,7 +311,6 @@ error:
  */
 int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isdataatstr)
 {
-    SigMatch *sm = NULL;
     SigMatch *prev_pm = NULL;
     DetectIsdataatData *idad = NULL;
     char *offset = NULL;
@@ -243,9 +347,10 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
 
     if (offset != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(offset, s, &index)) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "Unknown byte_extract var "
-                       "seen in isdataat - %s\n", offset);
+        if (!DetectByteRetrieveSMVar(offset, s, -1, &index)) {
+            SCLogError("Unknown byte_extract var "
+                       "seen in isdataat - %s\n",
+                    offset);
             goto end;
         }
         idad->dataat = index;
@@ -267,12 +372,10 @@ int DetectIsdataatSetup (DetectEngineCtx *de_ctx, Signature *s, const char *isda
         goto end;
     }
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_ISDATAAT, (SigMatchCtx *)idad, sm_list) ==
+            NULL) {
         goto end;
-    sm->type = DETECT_ISDATAAT;
-    sm->ctx = (SigMatchCtx *)idad;
-    SigMatchAppendSMToList(s, sm, sm_list);
+    }
 
     if (!(idad->flags & ISDATAAT_RELATIVE)) {
         ret = 0;
@@ -321,7 +424,7 @@ static int DetectEndsWithSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
     /* retrieve the sm to apply the depth against */
     pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
     if (pm == NULL) {
-        SCLogError(SC_ERR_DEPTH_MISSING_CONTENT, "endswith needs a "
+        SCLogError("endswith needs a "
                    "preceding content option");
         goto end;
     }
@@ -396,134 +499,27 @@ static int DetectIsdataatTestParse03 (void)
 static int DetectIsdataatTestParse04(void)
 {
     Signature *s = SigAlloc();
-    int result = 1;
+    FAIL_IF_NULL(s);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0) {
-        SigFree(NULL, s);
-        return 0;
-    }
+    FAIL_IF(SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
 
-    result &= (DetectIsdataatSetup(NULL, s, "30") == 0);
-    result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
+    FAIL_IF_NOT(DetectIsdataatSetup(NULL, s, "30") == 0);
+    SigMatch *sm = DetectBufferGetFirstSigMatch(s, g_dce_stub_data_buffer_id);
+    FAIL_IF_NOT_NULL(sm);
+    FAIL_IF_NULL(s->init_data->smlists[DETECT_SM_LIST_PMATCH]);
     SigFree(NULL, s);
 
     s = SigAlloc();
-    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0) {
-        SigFree(NULL, s);
-        return 0;
-    }
-    /* failure since we have no preceding content/pcre/bytejump */
-    result &= (DetectIsdataatSetup(NULL, s, "30,relative") == 0);
-    result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
+    FAIL_IF_NULL(s);
+    FAIL_IF(SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
+    /* relative w/o preceeding match defaults to "pmatch" */
+    FAIL_IF_NOT(DetectIsdataatSetup(NULL, s, "30,relative") == 0);
+    sm = DetectBufferGetFirstSigMatch(s, g_dce_stub_data_buffer_id);
+    FAIL_IF_NOT_NULL(sm);
+    FAIL_IF_NULL(s->init_data->smlists[DETECT_SM_LIST_PMATCH]);
 
     SigFree(NULL, s);
-
-    return result;
-}
-
-/**
- * \test Test isdataat option for dce sig.
- */
-static int DetectIsdataatTestParse05(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 1;
-    Signature *s = NULL;
-    DetectIsdataatData *data = NULL;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"Testing bytejump_body\"; "
-                               "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                               "dce_stub_data; "
-                               "content:\"one\"; distance:0; "
-                               "isdataat:4,relative; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = de_ctx->sig_list;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_ISDATAAT);
-    data = (DetectIsdataatData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if ( !(data->flags & ISDATAAT_RELATIVE) ||
-         (data->flags & ISDATAAT_RAWBYTES) ) {
-        result = 0;
-        goto end;
-    }
-
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing bytejump_body\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; distance:0; "
-                      "isdataat:4,relative; sid:1;)");
-    if (s->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_ISDATAAT);
-    data = (DetectIsdataatData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if ( !(data->flags & ISDATAAT_RELATIVE) ||
-         (data->flags & ISDATAAT_RAWBYTES) ) {
-        result = 0;
-        goto end;
-    }
-
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing bytejump_body\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; distance:0; "
-                      "isdataat:4,relative,rawbytes; sid:1;)");
-    if (s->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_ISDATAAT);
-    data = (DetectIsdataatData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if ( !(data->flags & ISDATAAT_RELATIVE) ||
-         !(data->flags & ISDATAAT_RAWBYTES) ) {
-        result = 0;
-        goto end;
-    }
-
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing bytejump_body\"; "
-                      "content:\"one\"; isdataat:4,relative,rawbytes; sid:1;)");
-    if (s->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] != NULL) {
-        result = 0;
-        goto end;
-    }
-
- end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
+    PASS;
 }
 
 static int DetectIsdataatTestParse06(void)
@@ -538,10 +534,11 @@ static int DetectIsdataatTestParse06(void)
                                "isdataat:!4,relative; sid:1;)");
     FAIL_IF(s == NULL);
 
-    FAIL_IF(s->sm_lists_tail[DETECT_SM_LIST_PMATCH] == NULL);
+    FAIL_IF(s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH] == NULL);
 
-    FAIL_IF_NOT(s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_ISDATAAT);
-    DetectIsdataatData *data = (DetectIsdataatData *)s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->ctx;
+    FAIL_IF_NOT(s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_ISDATAAT);
+    DetectIsdataatData *data =
+            (DetectIsdataatData *)s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->ctx;
 
     FAIL_IF_NOT(data->flags & ISDATAAT_RELATIVE);
     FAIL_IF(data->flags & ISDATAAT_RAWBYTES);
@@ -553,10 +550,10 @@ static int DetectIsdataatTestParse06(void)
                                "isdataat: !4,relative; sid:2;)");
     FAIL_IF(s == NULL);
 
-    FAIL_IF(s->sm_lists_tail[DETECT_SM_LIST_PMATCH] == NULL);
+    FAIL_IF(s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH] == NULL);
 
-    FAIL_IF_NOT(s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_ISDATAAT);
-    data = (DetectIsdataatData *)s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->ctx;
+    FAIL_IF_NOT(s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_ISDATAAT);
+    data = (DetectIsdataatData *)s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->ctx;
 
     FAIL_IF_NOT(data->flags & ISDATAAT_RELATIVE);
     FAIL_IF(data->flags & ISDATAAT_RAWBYTES);
@@ -682,11 +679,47 @@ void DetectIsdataatRegisterTests(void)
     UtRegisterTest("DetectIsdataatTestParse02", DetectIsdataatTestParse02);
     UtRegisterTest("DetectIsdataatTestParse03", DetectIsdataatTestParse03);
     UtRegisterTest("DetectIsdataatTestParse04", DetectIsdataatTestParse04);
-    UtRegisterTest("DetectIsdataatTestParse05", DetectIsdataatTestParse05);
     UtRegisterTest("DetectIsdataatTestParse06", DetectIsdataatTestParse06);
 
     UtRegisterTest("DetectIsdataatTestPacket01", DetectIsdataatTestPacket01);
     UtRegisterTest("DetectIsdataatTestPacket02", DetectIsdataatTestPacket02);
     UtRegisterTest("DetectIsdataatTestPacket03", DetectIsdataatTestPacket03);
+}
+
+static int DetectAbsentTestParse01(void)
+{
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF(de_ctx == NULL);
+    de_ctx->flags |= DE_QUIET;
+
+    Signature *s = DetectEngineAppendSig(de_ctx,
+            "alert http any any -> any any "
+            "(msg:\"invalid absent only with negated content\"; http.user_agent; "
+            "absent; content:!\"one\"; sid:2;)");
+    FAIL_IF(s != NULL);
+    s = DetectEngineAppendSig(de_ctx, "alert http any any -> any any "
+                                      "(msg:\"invalid absent\"; http.user_agent; "
+                                      "content:!\"one\"; absent; sid:2;)");
+    FAIL_IF(s != NULL);
+    s = DetectEngineAppendSig(de_ctx, "alert http any any -> any any "
+                                      "(msg:\"invalid absent\"; http.user_agent; "
+                                      "content:\"one\"; absent: or_else; sid:2;)");
+    FAIL_IF(s != NULL);
+    s = DetectEngineAppendSig(de_ctx, "alert http any any -> any any "
+                                      "(msg:\"absent without sticky buffer\"; "
+                                      "content:!\"one\"; absent: or_else; sid:2;)");
+    FAIL_IF(s != NULL);
+    s = DetectEngineAppendSig(de_ctx,
+            "alert websocket any any -> any any "
+            "(msg:\"absent with frame\"; "
+            "frame: websocket.pdu; absent: or_else; content:!\"one\"; sid:2;)");
+    FAIL_IF(s != NULL);
+    DetectEngineCtxFree(de_ctx);
+    PASS;
+}
+
+void DetectAbsentRegisterTests(void)
+{
+    UtRegisterTest("DetectAbsentTestParse01", DetectAbsentTestParse01);
 }
 #endif

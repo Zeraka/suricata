@@ -27,12 +27,15 @@
 #include "util-time.h"
 #include "util-cpu.h"
 #include "util-affinity.h"
+#include "util-var-name.h"
+#include "util-path.h"
 #include "unix-manager.h"
 
 #include "detect-engine.h"
 
 #include "flow-manager.h"
 #include "flow-timeout.h"
+#include "flow-hash.h"
 #include "stream-tcp.h"
 #include "stream-tcp-reassemble.h"
 #include "source-pcap-file-directory-helper.h"
@@ -41,7 +44,9 @@
 #include "defrag-hash.h"
 #include "ippair.h"
 #include "app-layer.h"
+#include "app-layer-ftp.h"
 #include "app-layer-htp-mem.h"
+#include "app-layer-htp-range.h"
 #include "host-bit.h"
 
 #include "util-misc.h"
@@ -50,13 +55,15 @@
 #include "conf-yaml-loader.h"
 
 #include "datasets.h"
+#include "datasets-context-json.h"
+#include "runmode-unix-socket.h"
 
 int unix_socket_mode_is_running = 0;
 
 typedef struct PcapFiles_ {
     char *filename;
     char *output_dir;
-    int tenant_id;
+    uint32_t tenant_id;
     time_t delay;
     time_t poll_interval;
     bool continuous;
@@ -82,53 +89,42 @@ const char *RunModeUnixSocketGetDefaultMode(void)
     return "autofp";
 }
 
-#ifdef BUILD_UNIX_SOCKET
-
-#define MEMCAPS_MAX 7
-static MemcapCommand memcaps[MEMCAPS_MAX] = {
+static MemcapCommand memcaps[] = {
     {
-        "stream",
-        StreamTcpSetMemcap,
-        StreamTcpGetMemcap,
-        StreamTcpMemuseCounter,
+            "stream",
+            StreamTcpSetMemcap,
+            StreamTcpGetMemcap,
+            StreamTcpMemuseCounter,
     },
-    {
-        "stream-reassembly",
-        StreamTcpReassembleSetMemcap,
-        StreamTcpReassembleGetMemcap,
-        StreamTcpReassembleMemuseGlobalCounter
-    },
-    {
-        "flow",
-        FlowSetMemcap,
-        FlowGetMemcap,
-        FlowGetMemuse
-    },
-    {
-        "applayer-proto-http",
-        HTPSetMemcap,
-        HTPGetMemcap,
-        HTPMemuseGlobalCounter
-    },
-    {
-        "defrag",
-        DefragTrackerSetMemcap,
-        DefragTrackerGetMemcap,
-        DefragTrackerGetMemuse
-    },
-    {
-        "ippair",
-        IPPairSetMemcap,
-        IPPairGetMemcap,
-        IPPairGetMemuse
-    },
-    {
-        "host",
-        HostSetMemcap,
-        HostGetMemcap,
-        HostGetMemuse
-    },
+    { "stream-reassembly", StreamTcpReassembleSetMemcap, StreamTcpReassembleGetMemcap,
+            StreamTcpReassembleMemuseGlobalCounter },
+    { "flow", FlowSetMemcap, FlowGetMemcap, FlowGetMemuse },
+    { "applayer-proto-http", HTPSetMemcap, HTPGetMemcap, HTPMemuseGlobalCounter },
+    { "applayer-proto-http-byterange", HTPByteRangeSetMemcap, HTPByteRangeMemcapGlobalCounter,
+            HTPByteRangeMemuseGlobalCounter },
+    { "defrag", DefragTrackerSetMemcap, DefragTrackerGetMemcap, DefragTrackerGetMemuse },
+    { "ippair", IPPairSetMemcap, IPPairGetMemcap, IPPairGetMemuse },
+    { "host", HostSetMemcap, HostGetMemcap, HostGetMemuse },
+    { "ftp", FTPSetMemcap, FTPMemcapGlobalCounter, FTPMemuseGlobalCounter },
 };
+
+float MemcapsGetPressure(void)
+{
+    float percent = 0.0;
+    for (int i = 0; i < 4; i++) { // only flow, streams, http
+        uint64_t memcap = memcaps[i].GetFunc();
+        if (memcap) {
+            uint64_t memuse = memcaps[i].GetMemuseFunc();
+            float p = (float)((double)memuse / (double)memcap);
+            // SCLogNotice("%s: memuse %"PRIu64", memcap %"PRIu64" => %f%%",
+            //    memcaps[i].name, memuse, memcap, (p * 100));
+            percent = MAX(p, percent);
+        }
+    }
+    return percent;
+}
+
+#ifdef BUILD_UNIX_SOCKET
 
 static int RunModeUnixSocketMaster(void);
 static int unix_manager_pcap_task_running = 0;
@@ -246,31 +242,22 @@ static void PcapFilesFree(PcapFiles *cfile)
  *
  * \retval 0 in case of error, 1 in case of success
  */
-static TmEcode UnixListAddFile(
-    PcapCommand *this,
-    const char *filename,
-    const char *output_dir,
-    int tenant_id,
-    bool continuous,
-    bool should_delete,
-    time_t delay,
-    time_t poll_interval
-)
+static TmEcode UnixListAddFile(PcapCommand *this, const char *filename, const char *output_dir,
+        uint32_t tenant_id, bool continuous, bool should_delete, time_t delay, time_t poll_interval)
 {
     PcapFiles *cfile = NULL;
     if (filename == NULL || this == NULL)
         return TM_ECODE_FAILED;
-    cfile = SCMalloc(sizeof(PcapFiles));
+    cfile = SCCalloc(1, sizeof(PcapFiles));
     if (unlikely(cfile == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to allocate new file");
+        SCLogError("Unable to allocate new file");
         return TM_ECODE_FAILED;
     }
-    memset(cfile, 0, sizeof(PcapFiles));
 
     cfile->filename = SCStrdup(filename);
     if (unlikely(cfile->filename == NULL)) {
         SCFree(cfile);
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to dup filename");
+        SCLogError("Unable to dup filename");
         return TM_ECODE_FAILED;
     }
 
@@ -279,7 +266,7 @@ static TmEcode UnixListAddFile(
         if (unlikely(cfile->output_dir == NULL)) {
             SCFree(cfile->filename);
             SCFree(cfile);
-            SCLogError(SC_ERR_MEM_ALLOC, "Unable to dup output_dir");
+            SCLogError("Unable to dup output_dir");
             return TM_ECODE_FAILED;
         }
     }
@@ -308,29 +295,21 @@ static TmEcode UnixSocketAddPcapFileImpl(json_t *cmd, json_t* answer, void *data
     PcapCommand *this = (PcapCommand *) data;
     const char *filename;
     const char *output_dir;
-    int tenant_id = 0;
+    uint32_t tenant_id = 0;
     bool should_delete = false;
     time_t delay = 30;
     time_t poll_interval = 5;
-#ifdef OS_WIN32
-    struct _stat st;
-#else
-    struct stat st;
-#endif /* OS_WIN32 */
+    SCStat st;
 
     json_t *jarg = json_object_get(cmd, "filename");
     if (!json_is_string(jarg)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "filename is not a string");
+        SCLogError("filename is not a string");
         json_object_set_new(answer, "message",
                             json_string("filename is not a string"));
         return TM_ECODE_FAILED;
     }
     filename = json_string_value(jarg);
-#ifdef OS_WIN32
-    if (_stat(filename, &st) != 0) {
-#else
-    if (stat(filename, &st) != 0) {
-#endif /* OS_WIN32 */
+    if (SCStatFn(filename, &st) != 0) {
         json_object_set_new(answer, "message",
                             json_string("filename does not exist"));
         return TM_ECODE_FAILED;
@@ -339,7 +318,7 @@ static TmEcode UnixSocketAddPcapFileImpl(json_t *cmd, json_t* answer, void *data
     json_t *oarg = json_object_get(cmd, "output-dir");
     if (oarg != NULL) {
         if (!json_is_string(oarg)) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT, "output-dir is not a string");
+            SCLogError("output-dir is not a string");
 
             json_object_set_new(answer, "message",
                                 json_string("output-dir is not a string"));
@@ -347,18 +326,14 @@ static TmEcode UnixSocketAddPcapFileImpl(json_t *cmd, json_t* answer, void *data
         }
         output_dir = json_string_value(oarg);
     } else {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "can't get output-dir");
+        SCLogError("can't get output-dir");
 
         json_object_set_new(answer, "message",
                             json_string("output-dir param is mandatory"));
         return TM_ECODE_FAILED;
     }
 
-#ifdef OS_WIN32
-    if (_stat(output_dir, &st) != 0) {
-#else
-    if (stat(output_dir, &st) != 0) {
-#endif /* OS_WIN32 */
+    if (SCStatFn(output_dir, &st) != 0) {
         json_object_set_new(answer, "message",
                             json_string("output-dir does not exist"));
         return TM_ECODE_FAILED;
@@ -382,7 +357,7 @@ static TmEcode UnixSocketAddPcapFileImpl(json_t *cmd, json_t* answer, void *data
     json_t *delay_arg = json_object_get(cmd, "delay");
     if (delay_arg != NULL) {
         if (!json_is_integer(delay_arg)) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT, "delay is not a integer");
+            SCLogError("delay is not a integer");
             json_object_set_new(answer, "message",
                                 json_string("delay is not a integer"));
             return TM_ECODE_FAILED;
@@ -393,7 +368,7 @@ static TmEcode UnixSocketAddPcapFileImpl(json_t *cmd, json_t* answer, void *data
     json_t *interval_arg = json_object_get(cmd, "poll-interval");
     if (interval_arg != NULL) {
         if (!json_is_integer(interval_arg)) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT, "poll-interval is not a integer");
+            SCLogError("poll-interval is not a integer");
 
             json_object_set_new(answer, "message",
                                 json_string("poll-interval is not a integer"));
@@ -495,31 +470,30 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
     unix_manager_pcap_task_running = 1;
     this->running = 1;
 
-    if (ConfSetFinal("pcap-file.file", cfile->filename) != 1) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Can not set working file to '%s'",
-                   cfile->filename);
+    if (SCConfSetFinal("pcap-file.file", cfile->filename) != 1) {
+        SCLogError("Can not set working file to '%s'", cfile->filename);
         PcapFilesFree(cfile);
         return TM_ECODE_FAILED;
     }
 
     int set_res = 0;
     if (cfile->continuous) {
-        set_res = ConfSetFinal("pcap-file.continuous", "true");
+        set_res = SCConfSetFinal("pcap-file.continuous", "true");
     } else {
-        set_res = ConfSetFinal("pcap-file.continuous", "false");
+        set_res = SCConfSetFinal("pcap-file.continuous", "false");
     }
     if (set_res != 1) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Can not set continuous mode for pcap processing");
+        SCLogError("Can not set continuous mode for pcap processing");
         PcapFilesFree(cfile);
         return TM_ECODE_FAILED;
     }
     if (cfile->should_delete) {
-        set_res = ConfSetFinal("pcap-file.delete-when-done", "true");
+        set_res = SCConfSetFinal("pcap-file.delete-when-done", "true");
     } else {
-        set_res = ConfSetFinal("pcap-file.delete-when-done", "false");
+        set_res = SCConfSetFinal("pcap-file.delete-when-done", "false");
     }
     if (set_res != 1) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Can not set delete mode for pcap processing");
+        SCLogError("Can not set delete mode for pcap processing");
         PcapFilesFree(cfile);
         return TM_ECODE_FAILED;
     }
@@ -527,8 +501,8 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
     if (cfile->delay > 0) {
         char tstr[32];
         snprintf(tstr, sizeof(tstr), "%" PRIuMAX, (uintmax_t)cfile->delay);
-        if (ConfSetFinal("pcap-file.delay", tstr) != 1) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT, "Can not set delay to '%s'", tstr);
+        if (SCConfSetFinal("pcap-file.delay", tstr) != 1) {
+            SCLogError("Can not set delay to '%s'", tstr);
             PcapFilesFree(cfile);
             return TM_ECODE_FAILED;
         }
@@ -537,9 +511,8 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
     if (cfile->poll_interval > 0) {
         char tstr[32];
         snprintf(tstr, sizeof(tstr), "%" PRIuMAX, (uintmax_t)cfile->poll_interval);
-        if (ConfSetFinal("pcap-file.poll-interval", tstr) != 1) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT,
-                       "Can not set poll-interval to '%s'", tstr);
+        if (SCConfSetFinal("pcap-file.poll-interval", tstr) != 1) {
+            SCLogError("Can not set poll-interval to '%s'", tstr);
             PcapFilesFree(cfile);
             return TM_ECODE_FAILED;
         }
@@ -547,10 +520,9 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
 
     if (cfile->tenant_id > 0) {
         char tstr[16];
-        snprintf(tstr, sizeof(tstr), "%d", cfile->tenant_id);
-        if (ConfSetFinal("pcap-file.tenant-id", tstr) != 1) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT,
-                       "Can not set working tenant-id to '%s'", tstr);
+        snprintf(tstr, sizeof(tstr), "%u", cfile->tenant_id);
+        if (SCConfSetFinal("pcap-file.tenant-id", tstr) != 1) {
+            SCLogError("Can not set working tenant-id to '%s'", tstr);
             PcapFilesFree(cfile);
             return TM_ECODE_FAILED;
         }
@@ -559,9 +531,8 @@ static TmEcode UnixSocketPcapFilesCheck(void *data)
     }
 
     if (cfile->output_dir) {
-        if (ConfSetFinal("default-log-dir", cfile->output_dir) != 1) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT,
-                       "Can not set output dir to '%s'", cfile->output_dir);
+        if (SCConfSetFinal("default-log-dir", cfile->output_dir) != 1) {
+            SCLogError("Can not set output dir to '%s'", cfile->output_dir);
             PcapFilesFree(cfile);
             return TM_ECODE_FAILED;
         }
@@ -588,12 +559,10 @@ void RunModeUnixSocketRegister(void)
 {
 #ifdef BUILD_UNIX_SOCKET
     /* a bit of a hack, but register twice to --list-runmodes shows both */
-    RunModeRegisterNewRunMode(RUNMODE_UNIX_SOCKET, "single",
-                              "Unix socket mode",
-                              RunModeUnixSocketMaster);
-    RunModeRegisterNewRunMode(RUNMODE_UNIX_SOCKET, "autofp",
-                              "Unix socket mode",
-                              RunModeUnixSocketMaster);
+    RunModeRegisterNewRunMode(
+            RUNMODE_UNIX_SOCKET, "single", "Unix socket mode", RunModeUnixSocketMaster, NULL);
+    RunModeRegisterNewRunMode(
+            RUNMODE_UNIX_SOCKET, "autofp", "Unix socket mode", RunModeUnixSocketMaster, NULL);
 #endif
 }
 
@@ -744,6 +713,178 @@ TmEcode UnixSocketDatasetRemove(json_t *cmd, json_t* answer, void *data)
     }
 }
 
+TmEcode UnixSocketDatasetDump(json_t *cmd, json_t *answer, void *data)
+{
+    SCEnter();
+    SCLogDebug("Going to dump datasets");
+    DatasetsSave();
+    json_object_set_new(answer, "message", json_string("datasets dump done"));
+    SCReturnInt(TM_ECODE_OK);
+}
+
+TmEcode UnixSocketDatasetClear(json_t *cmd, json_t *answer, void *data)
+{
+    /* 1 get dataset name */
+    json_t *narg = json_object_get(cmd, "setname");
+    if (!json_is_string(narg)) {
+        json_object_set_new(answer, "message", json_string("setname is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *set_name = json_string_value(narg);
+
+    /* 2 get the data type */
+    json_t *targ = json_object_get(cmd, "settype");
+    if (!json_is_string(targ)) {
+        json_object_set_new(answer, "message", json_string("settype is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *type = json_string_value(targ);
+
+    enum DatasetTypes t = DatasetGetTypeFromString(type);
+    if (t == DATASET_TYPE_NOTSET) {
+        json_object_set_new(answer, "message", json_string("unknown settype"));
+        return TM_ECODE_FAILED;
+    }
+
+    Dataset *set = DatasetFind(set_name, t);
+    if (set == NULL) {
+        json_object_set_new(answer, "message", json_string("set not found or wrong type"));
+        return TM_ECODE_FAILED;
+    }
+
+    THashCleanup(set->hash);
+
+    json_object_set_new(answer, "message", json_string("dataset cleared"));
+    return TM_ECODE_OK;
+}
+
+TmEcode UnixSocketDatasetLookup(json_t *cmd, json_t *answer, void *data)
+{
+    /* 1 get dataset name */
+    json_t *narg = json_object_get(cmd, "setname");
+    if (!json_is_string(narg)) {
+        json_object_set_new(answer, "message", json_string("setname is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *set_name = json_string_value(narg);
+
+    /* 2 get the data type */
+    json_t *targ = json_object_get(cmd, "settype");
+    if (!json_is_string(targ)) {
+        json_object_set_new(answer, "message", json_string("settype is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *type = json_string_value(targ);
+
+    /* 3 get value */
+    json_t *varg = json_object_get(cmd, "datavalue");
+    if (!json_is_string(varg)) {
+        json_object_set_new(answer, "message", json_string("datavalue is not string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *value = json_string_value(varg);
+
+    SCLogDebug("dataset-exist: %s type %s value %s", set_name, type, value);
+
+    enum DatasetTypes t = DatasetGetTypeFromString(type);
+    if (t == DATASET_TYPE_NOTSET) {
+        json_object_set_new(answer, "message", json_string("unknown settype"));
+        return TM_ECODE_FAILED;
+    }
+
+    Dataset *set = DatasetFind(set_name, t);
+    if (set == NULL) {
+        json_object_set_new(answer, "message", json_string("set not found or wrong type"));
+        return TM_ECODE_FAILED;
+    }
+
+    if (DatasetLookupSerialized(set, value) > 0) {
+        json_object_set_new(answer, "message", json_string("item found in set"));
+        return TM_ECODE_OK;
+    } else {
+        json_object_set_new(answer, "message", json_string("item not found in set"));
+        return TM_ECODE_FAILED;
+    }
+}
+
+/**
+ * \brief Command to add data to a datajson
+ *
+ * \param cmd the content of command Arguments as a json_t object
+ * \param answer the json_t object that has to be used to answer
+ * \param data pointer to data defining the context here a PcapCommand::
+ */
+TmEcode UnixSocketDatajsonAdd(json_t *cmd, json_t *answer, void *data)
+{
+    /* 1 get dataset name */
+    json_t *narg = json_object_get(cmd, "setname");
+    if (!json_is_string(narg)) {
+        json_object_set_new(answer, "message", json_string("setname is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *set_name = json_string_value(narg);
+
+    /* 2 get the data type */
+    json_t *targ = json_object_get(cmd, "settype");
+    if (!json_is_string(targ)) {
+        json_object_set_new(answer, "message", json_string("settype is not a string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *type = json_string_value(targ);
+
+    /* 3 get value */
+    json_t *varg = json_object_get(cmd, "datavalue");
+    if (!json_is_string(varg)) {
+        json_object_set_new(answer, "message", json_string("datavalue is not string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *value = json_string_value(varg);
+
+    /* 4 get json */
+    json_t *jarg = json_object_get(cmd, "datajson");
+    if (!json_is_string(varg)) {
+        json_object_set_new(answer, "message", json_string("datajson is not string"));
+        return TM_ECODE_FAILED;
+    }
+    const char *json = json_string_value(jarg);
+
+    SCLogDebug("datajson-add: %s type %s value %s json %s", set_name, type, value, json);
+
+    enum DatasetTypes t = DatasetGetTypeFromString(type);
+    if (t == DATASET_TYPE_NOTSET) {
+        json_object_set_new(answer, "message", json_string("unknown settype"));
+        return TM_ECODE_FAILED;
+    }
+
+    Dataset *set = DatasetFind(set_name, t);
+    if (set == NULL) {
+        json_object_set_new(answer, "message", json_string("set not found or wrong type"));
+        return TM_ECODE_FAILED;
+    }
+
+    int r = DatajsonAddSerialized(set, value, json);
+    if (r == 1) {
+        json_object_set_new(answer, "message", json_string("data added"));
+        return TM_ECODE_OK;
+    } else if (r == 0) {
+        json_object_set_new(answer, "message", json_string("data already in set"));
+        return TM_ECODE_OK;
+    } else {
+        json_object_set_new(answer, "message", json_string("failed to add data"));
+        return TM_ECODE_FAILED;
+    }
+}
+
+static bool JsonU32Value(json_t *jarg, uint32_t *ret)
+{
+    int64_t r = json_integer_value(jarg);
+    if (r < 0 || r > UINT32_MAX) {
+        return false;
+    }
+    *ret = (uint32_t)r;
+    return true;
+}
+
 /**
  * \brief Command to add a tenant handler
  *
@@ -769,7 +910,12 @@ TmEcode UnixSocketRegisterTenantHandler(json_t *cmd, json_t* answer, void *data)
         json_object_set_new(answer, "message", json_string("id is not an integer"));
         return TM_ECODE_FAILED;
     }
-    int tenant_id = json_integer_value(jarg);
+    uint32_t tenant_id;
+    if (!JsonU32Value(jarg, &tenant_id)) {
+        SCLogInfo("tenant_id is not a uint32");
+        json_object_set_new(answer, "message", json_string("tenant_id is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     /* 2 get tenant handler type */
     jarg = json_object_get(cmd, "htype");
@@ -796,7 +942,7 @@ TmEcode UnixSocketRegisterTenantHandler(json_t *cmd, json_t* answer, void *data)
     /* 4 add to system */
     int r = -1;
     if (strcmp(htype, "pcap") == 0) {
-        r = DetectEngineTentantRegisterPcapFile(tenant_id);
+        r = DetectEngineTenantRegisterPcapFile(tenant_id);
     } else if (strcmp(htype, "vlan") == 0) {
         if (traffic_id < 0) {
             json_object_set_new(answer, "message", json_string("vlan requires argument"));
@@ -808,7 +954,7 @@ TmEcode UnixSocketRegisterTenantHandler(json_t *cmd, json_t* answer, void *data)
         }
 
         SCLogInfo("VLAN handler: id %u maps to tenant %u", (uint32_t)traffic_id, tenant_id);
-        r = DetectEngineTentantRegisterVlanId(tenant_id, (uint32_t)traffic_id);
+        r = DetectEngineTenantRegisterVlanId(tenant_id, (uint16_t)traffic_id);
     }
     if (r != 0) {
         json_object_set_new(answer, "message", json_string("handler setup failure"));
@@ -850,7 +996,12 @@ TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *dat
         json_object_set_new(answer, "message", json_string("id is not an integer"));
         return TM_ECODE_FAILED;
     }
-    int tenant_id = json_integer_value(jarg);
+    uint32_t tenant_id;
+    if (!JsonU32Value(jarg, &tenant_id)) {
+        SCLogInfo("tenant_id is not a uint32");
+        json_object_set_new(answer, "message", json_string("tenant_id is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     /* 2 get tenant handler type */
     jarg = json_object_get(cmd, "htype");
@@ -877,7 +1028,7 @@ TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *dat
     /* 4 add to system */
     int r = -1;
     if (strcmp(htype, "pcap") == 0) {
-        r = DetectEngineTentantUnregisterPcapFile(tenant_id);
+        r = DetectEngineTenantUnregisterPcapFile(tenant_id);
     } else if (strcmp(htype, "vlan") == 0) {
         if (traffic_id < 0) {
             json_object_set_new(answer, "message", json_string("vlan requires argument"));
@@ -889,7 +1040,7 @@ TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *dat
         }
 
         SCLogInfo("VLAN handler: removing mapping of %u to tenant %u", (uint32_t)traffic_id, tenant_id);
-        r = DetectEngineTentantUnregisterVlanId(tenant_id, (uint32_t)traffic_id);
+        r = DetectEngineTenantUnregisterVlanId(tenant_id, (uint16_t)traffic_id);
     }
     if (r != 0) {
         json_object_set_new(answer, "message", json_string("handler unregister failure"));
@@ -917,11 +1068,7 @@ TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *dat
 TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data)
 {
     const char *filename;
-#ifdef OS_WIN32
-    struct _stat st;
-#else
-    struct stat st;
-#endif /* OS_WIN32 */
+    SCStat st;
 
     if (!(DetectEngineMultiTenantEnabled())) {
         SCLogInfo("error: multi-tenant support not enabled");
@@ -935,7 +1082,12 @@ TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data)
         json_object_set_new(answer, "message", json_string("id is not an integer"));
         return TM_ECODE_FAILED;
     }
-    int tenant_id = json_integer_value(jarg);
+    uint32_t tenant_id;
+    if (!JsonU32Value(jarg, &tenant_id)) {
+        SCLogInfo("tenant_id is not a uint32");
+        json_object_set_new(answer, "message", json_string("tenant_id is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     /* 2 get tenant yaml */
     jarg = json_object_get(cmd, "filename");
@@ -944,11 +1096,7 @@ TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data)
         return TM_ECODE_FAILED;
     }
     filename = json_string_value(jarg);
-#ifdef OS_WIN32
-    if (_stat(filename, &st) != 0) {
-#else
-    if (stat(filename, &st) != 0) {
-#endif /* OS_WIN32 */
+    if (SCStatFn(filename, &st) != 0) {
         json_object_set_new(answer, "message", json_string("file does not exist"));
         return TM_ECODE_FAILED;
     }
@@ -956,11 +1104,11 @@ TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data)
     SCLogDebug("add-tenant: %d %s", tenant_id, filename);
 
     /* setup the yaml in this loop so that it's not done by the loader
-     * threads. ConfYamlLoadFileWithPrefix is not thread safe. */
+     * threads. SCConfYamlLoadFileWithPrefix is not thread safe. */
     char prefix[64];
-    snprintf(prefix, sizeof(prefix), "multi-detect.%d", tenant_id);
-    if (ConfYamlLoadFileWithPrefix(filename, prefix) != 0) {
-        SCLogError(SC_ERR_CONF_YAML_ERROR, "failed to load yaml %s", filename);
+    snprintf(prefix, sizeof(prefix), "multi-detect.%u", tenant_id);
+    if (SCConfYamlLoadFileWithPrefix(filename, prefix) != 0) {
+        SCLogError("failed to load yaml %s", filename);
         json_object_set_new(answer, "message", json_string("failed to load yaml"));
         return TM_ECODE_FAILED;
     }
@@ -992,12 +1140,8 @@ static int reload_cnt = 1;
  */
 TmEcode UnixSocketReloadTenant(json_t *cmd, json_t* answer, void *data)
 {
-    const char *filename;
-#ifdef OS_WIN32
-    struct _stat st;
-#else
-    struct stat st;
-#endif /* OS_WIN32 */
+    const char *filename = NULL;
+    SCStat st;
 
     if (!(DetectEngineMultiTenantEnabled())) {
         SCLogInfo("error: multi-tenant support not enabled");
@@ -1011,34 +1155,28 @@ TmEcode UnixSocketReloadTenant(json_t *cmd, json_t* answer, void *data)
         json_object_set_new(answer, "message", json_string("id is not an integer"));
         return TM_ECODE_FAILED;
     }
-    int tenant_id = json_integer_value(jarg);
+    uint32_t tenant_id;
+    if (!JsonU32Value(jarg, &tenant_id)) {
+        SCLogInfo("tenant_id is not a uint32");
+        json_object_set_new(answer, "message", json_string("tenant_id is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     /* 2 get tenant yaml */
     jarg = json_object_get(cmd, "filename");
-    if (!json_is_string(jarg)) {
-        json_object_set_new(answer, "message", json_string("command is not a string"));
-        return TM_ECODE_FAILED;
-    }
-    filename = json_string_value(jarg);
-#ifdef OS_WIN32
-    if (_stat(filename, &st) != 0) {
-#else
-    if (stat(filename, &st) != 0) {
-#endif /* OS_WIN32 */
-        json_object_set_new(answer, "message", json_string("file does not exist"));
-        return TM_ECODE_FAILED;
+    if (jarg) {
+        if (!json_is_string(jarg)) {
+            json_object_set_new(answer, "message", json_string("command is not a string"));
+            return TM_ECODE_FAILED;
+        }
+        filename = json_string_value(jarg);
+        if (SCStatFn(filename, &st) != 0) {
+            json_object_set_new(answer, "message", json_string("file does not exist"));
+            return TM_ECODE_FAILED;
+        }
     }
 
     SCLogDebug("reload-tenant: %d %s", tenant_id, filename);
-
-    char prefix[64];
-    snprintf(prefix, sizeof(prefix), "multi-detect.%d.reload.%d", tenant_id, reload_cnt);
-    SCLogInfo("prefix %s", prefix);
-
-    if (ConfYamlLoadFileWithPrefix(filename, prefix) != 0) {
-        json_object_set_new(answer, "message", json_string("failed to load yaml"));
-        return TM_ECODE_FAILED;
-    }
 
     /* 3 load into the system */
     if (DetectEngineReloadTenantBlocking(tenant_id, filename, reload_cnt) != 0) {
@@ -1056,6 +1194,41 @@ TmEcode UnixSocketReloadTenant(json_t *cmd, json_t* answer, void *data)
     }
 
     json_object_set_new(answer, "message", json_string("reloading tenant succeeded"));
+    return TM_ECODE_OK;
+}
+
+/**
+ * \brief Command to reload all tenants
+ *
+ * \param cmd the content of command Arguments as a json_t object
+ * \param answer the json_t object that has to be used to answer
+ * \param data pointer to data defining the context here a PcapCommand::
+ */
+TmEcode UnixSocketReloadTenants(json_t *cmd, json_t *answer, void *data)
+{
+    if (!(DetectEngineMultiTenantEnabled())) {
+        SCLogInfo("error: multi-tenant support not enabled");
+        json_object_set_new(answer, "message", json_string("multi-tenant support not enabled"));
+        return TM_ECODE_FAILED;
+    }
+
+    if (DetectEngineReloadTenantsBlocking(reload_cnt) != 0) {
+        json_object_set_new(answer, "message", json_string("reload tenants failed"));
+        return TM_ECODE_FAILED;
+    }
+
+    reload_cnt++;
+
+    /*  apply to the running system */
+    if (DetectEngineMTApply() < 0) {
+        json_object_set_new(answer, "message", json_string("couldn't apply settings"));
+        // TODO cleanup
+        return TM_ECODE_FAILED;
+    }
+
+    SCLogNotice("reload-tenants complete");
+
+    json_object_set_new(answer, "message", json_string("reloading tenants succeeded"));
     return TM_ECODE_OK;
 }
 
@@ -1081,13 +1254,18 @@ TmEcode UnixSocketUnregisterTenant(json_t *cmd, json_t* answer, void *data)
         json_object_set_new(answer, "message", json_string("id is not an integer"));
         return TM_ECODE_FAILED;
     }
-    int tenant_id = json_integer_value(jarg);
+    uint32_t tenant_id;
+    if (!JsonU32Value(jarg, &tenant_id)) {
+        SCLogInfo("tenant_id is not a uint32");
+        json_object_set_new(answer, "message", json_string("tenant_id is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     SCLogInfo("remove-tenant: removing tenant %d", tenant_id);
 
     /* 2 remove it from the system */
     char prefix[64];
-    snprintf(prefix, sizeof(prefix), "multi-detect.%d", tenant_id);
+    snprintf(prefix, sizeof(prefix), "multi-detect.%u", tenant_id);
 
     DetectEngineCtx *de_ctx = DetectEngineGetByTenantId(tenant_id);
     if (de_ctx == NULL) {
@@ -1172,16 +1350,25 @@ TmEcode UnixSocketHostbitAdd(json_t *cmd, json_t* answer, void *data_usused)
         json_object_set_new(answer, "message", json_string("expire is not an integer"));
         return TM_ECODE_FAILED;
     }
-    uint32_t expire = json_integer_value(jarg);
+    uint32_t expire;
+    if (!JsonU32Value(jarg, &expire)) {
+        SCLogInfo("expire is not a uint32");
+        json_object_set_new(answer, "message", json_string("expire is not a uint32"));
+        return TM_ECODE_FAILED;
+    }
 
     SCLogInfo("add-hostbit: ip %s hostbit %s expire %us", ipaddress, hostbit, expire);
 
-    struct timeval current_time;
-    TimeGet(&current_time);
+    SCTime_t current_time = TimeGet();
     Host *host = HostGetHostFromHash(&a);
     if (host) {
-        HostBitSet(host, idx, current_time.tv_sec + expire);
-        HostUnlock(host);
+        if (SCTIME_SECS(current_time) + expire > UINT32_MAX) {
+            json_object_set_new(answer, "message", json_string("couldn't set host expire"));
+            HostRelease(host);
+            return TM_ECODE_FAILED;
+        }
+        HostBitSet(host, idx, SCTIME_ADD_SECS(current_time, expire));
+        HostRelease(host);
 
         json_object_set_new(answer, "message", json_string("hostbit added"));
         return TM_ECODE_OK;
@@ -1250,7 +1437,7 @@ TmEcode UnixSocketHostbitRemove(json_t *cmd, json_t* answer, void *data_unused)
     Host *host = HostLookupHostFromHash(&a);
     if (host) {
         HostBitUnset(host, idx);
-        HostUnlock(host);
+        HostRelease(host);
         json_object_set_new(answer, "message", json_string("hostbit removed"));
         return TM_ECODE_OK;
     } else {
@@ -1306,13 +1493,11 @@ TmEcode UnixSocketHostbitList(json_t *cmd, json_t* answer, void *data_unused)
 
     SCLogInfo("list-hostbit: %s", ipaddress);
 
-    struct timeval ts;
-    memset(&ts, 0, sizeof(ts));
-    TimeGet(&ts);
+    SCTime_t ts = TimeGet();
 
     struct Bit {
         uint32_t id;
-        uint32_t expire;
+        SCTime_t expire;
     } bits[256];
     memset(&bits, 0, sizeof(bits));
     int i = 0, use = 0;
@@ -1329,7 +1514,7 @@ TmEcode UnixSocketHostbitList(json_t *cmd, json_t* answer, void *data_unused)
         bits[use].expire = iter->expire;
         use++;
     }
-    HostUnlock(host);
+    HostRelease(host);
 
     json_t *jdata = json_object();
     json_t *jarray = json_array();
@@ -1347,15 +1532,15 @@ TmEcode UnixSocketHostbitList(json_t *cmd, json_t* answer, void *data_unused)
         json_t *bitobject = json_object();
         if (bitobject == NULL)
             continue;
-        uint32_t expire = 0;
-        if ((uint32_t)ts.tv_sec < bits[i].expire)
-            expire = bits[i].expire - (uint32_t)ts.tv_sec;
+        uint64_t expire = 0;
+        if (SCTIME_CMP_LT(ts, bits[i].expire))
+            expire = SCTIME_SECS(bits[i].expire) - SCTIME_SECS(ts);
 
         const char *name = VarNameStoreLookupById(bits[i].id, VAR_TYPE_HOST_BIT);
         if (name == NULL)
             continue;
         json_object_set_new(bitobject, "name", json_string(name));
-        SCLogDebug("xbit %s expire %u", name, expire);
+        SCLogDebug("xbit %s expire %" PRIu64, name, expire);
         json_object_set_new(bitobject, "expire", json_integer(expire));
         json_array_append_new(jarray, bitobject);
     }
@@ -1382,7 +1567,6 @@ TmEcode UnixSocketSetMemcap(json_t *cmd, json_t* answer, void *data)
     char *memcap = NULL;
     char *value_str = NULL;
     uint64_t value;
-    int i;
 
     json_t *jarg = json_object_get(cmd, "config");
     if (!json_is_string(jarg)) {
@@ -1399,15 +1583,16 @@ TmEcode UnixSocketSetMemcap(json_t *cmd, json_t* answer, void *data)
     value_str = (char *)json_string_value(jarg);
 
     if (ParseSizeStringU64(value_str, &value) < 0) {
-        SCLogError(SC_ERR_SIZE_PARSE, "Error parsing "
-                   "memcap from unix socket: %s", value_str);
+        SCLogError("Error parsing "
+                   "memcap from unix socket: %s",
+                value_str);
         json_object_set_new(answer, "message",
                             json_string("error parsing memcap specified, "
                                         "value not changed"));
         return TM_ECODE_FAILED;
     }
 
-    for (i = 0; i < MEMCAPS_MAX; i++) {
+    for (size_t i = 0; i < ARRAY_SIZE(memcaps); i++) {
         if (strcmp(memcaps[i].name, memcap) == 0 && memcaps[i].SetFunc) {
             int updated = memcaps[i].SetFunc(value);
             char message[150];
@@ -1450,7 +1635,6 @@ TmEcode UnixSocketSetMemcap(json_t *cmd, json_t* answer, void *data)
 TmEcode UnixSocketShowMemcap(json_t *cmd, json_t *answer, void *data)
 {
     char *memcap = NULL;
-    int i;
 
     json_t *jarg = json_object_get(cmd, "config");
     if (!json_is_string(jarg)) {
@@ -1459,7 +1643,7 @@ TmEcode UnixSocketShowMemcap(json_t *cmd, json_t *answer, void *data)
     }
     memcap = (char *)json_string_value(jarg);
 
-    for (i = 0; i < MEMCAPS_MAX; i++) {
+    for (size_t i = 0; i < ARRAY_SIZE(memcaps); i++) {
         if (strcmp(memcaps[i].name, memcap) == 0 && memcaps[i].GetFunc) {
             char str[50];
             uint64_t val = memcaps[i].GetFunc();
@@ -1490,7 +1674,6 @@ TmEcode UnixSocketShowMemcap(json_t *cmd, json_t *answer, void *data)
 TmEcode UnixSocketShowAllMemcap(json_t *cmd, json_t *answer, void *data)
 {
     json_t *jmemcaps = json_array();
-    int i;
 
     if (jmemcaps == NULL) {
         json_object_set_new(answer, "message",
@@ -1498,7 +1681,7 @@ TmEcode UnixSocketShowAllMemcap(json_t *cmd, json_t *answer, void *data)
         return TM_ECODE_FAILED;
     }
 
-    for (i = 0; i < MEMCAPS_MAX; i++) {
+    for (size_t i = 0; i < ARRAY_SIZE(memcaps); i++) {
         json_t *jobj = json_object();
         if (jobj == NULL) {
             json_decref(jmemcaps);
@@ -1523,6 +1706,42 @@ TmEcode UnixSocketShowAllMemcap(json_t *cmd, json_t *answer, void *data)
     json_object_set_new(answer, "message", jmemcaps);
     SCReturnInt(TM_ECODE_OK);
 }
+
+TmEcode UnixSocketGetFlowStatsById(json_t *cmd, json_t *answer, void *data)
+{
+    /* Input: we need the IP tuple including VLAN/tenant and the flow ID */
+    json_t *jarg = json_object_get(cmd, "flow_id");
+    if (!json_is_integer(jarg)) {
+        SCLogInfo("error: command is not a string");
+        json_object_set_new(answer, "message", json_string("flow_id is not an integer"));
+        return TM_ECODE_FAILED;
+    }
+    int64_t flow_id = json_integer_value(jarg);
+
+    Flow *f = FlowGetExistingFlowFromFlowId(flow_id);
+    if (f == NULL) {
+        json_object_set_new(answer, "message", json_string("Not found"));
+        SCReturnInt(TM_ECODE_FAILED);
+    }
+    uint32_t tosrcpktcnt = f->tosrcpktcnt;
+    uint32_t todstpktcnt = f->todstpktcnt;
+    uint64_t tosrcbytecnt = f->tosrcbytecnt;
+    uint64_t todstbytecnt = f->todstbytecnt;
+    uint64_t age = SCTIME_SECS(f->lastts) - SCTIME_SECS(f->startts);
+    FLOWLOCK_UNLOCK(f);
+
+    json_t *flow_info = json_object();
+    if (flow_info == NULL) {
+        SCReturnInt(TM_ECODE_FAILED);
+    }
+    json_object_set_new(flow_info, "pkts_toclient", json_integer(tosrcpktcnt));
+    json_object_set_new(flow_info, "pkts_toserver", json_integer(todstpktcnt));
+    json_object_set_new(flow_info, "bytes_toclient", json_integer(tosrcbytecnt));
+    json_object_set_new(flow_info, "bytes_toserver", json_integer(todstbytecnt));
+    json_object_set_new(flow_info, "age", json_integer(age));
+    json_object_set_new(answer, "message", flow_info);
+    SCReturnInt(TM_ECODE_OK);
+}
 #endif /* BUILD_UNIX_SOCKET */
 
 #ifdef BUILD_UNIX_SOCKET
@@ -1536,7 +1755,7 @@ static int RunModeUnixSocketMaster(void)
 
     PcapCommand *pcapcmd = SCMalloc(sizeof(PcapCommand));
     if (unlikely(pcapcmd == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Can not allocate pcap command");
+        SCLogError("Can not allocate pcap command");
         return 1;
     }
     TAILQ_INIT(&pcapcmd->files);

@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __IPPAIR_H__
-#define __IPPAIR_H__
+#ifndef SURICATA_IPPAIR_H
+#define SURICATA_IPPAIR_H
 
 #include "decode.h"
 #include "util-storage.h"
@@ -65,9 +65,6 @@ typedef struct IPPair_ {
     /** use cnt, reference counter */
     SC_ATOMIC_DECLARE(unsigned int, use_cnt);
 
-    /** storage api handle */
-    Storage *storage;
-
     /** hash pointers, protected by hash row mutex/spin */
     struct IPPair_ *hnext;
     struct IPPair_ *hprev;
@@ -75,6 +72,9 @@ typedef struct IPPair_ {
     /** list pointers, protected by ippair-queue mutex/spin */
     struct IPPair_ *lnext;
     struct IPPair_ *lprev;
+
+    /** storage api handle as a flex array member, so must stay last */
+    Storage storage[];
 } IPPair;
 
 typedef struct IPPairHashRow_ {
@@ -86,7 +86,6 @@ typedef struct IPPairHashRow_ {
 /** ippair hash table */
 extern IPPairHashRow *ippair_hash;
 
-#define IPPAIR_VERBOSE    0
 #define IPPAIR_QUIET      1
 
 typedef struct IPPairConfig_ {
@@ -111,36 +110,20 @@ typedef struct IPPairConfig_ {
 #define IPPairDecrUsecnt(h) \
     (void)SC_ATOMIC_SUB((h)->use_cnt, 1)
 
-#define IPPairReference(dst_h_ptr, h) do {            \
-        if ((h) != NULL) {                          \
-            IPPairIncrUsecnt((h));                    \
-            *(dst_h_ptr) = h;                       \
-        }                                           \
-    } while (0)
-
-#define IPPairDeReference(src_h_ptr) do {               \
-        if (*(src_h_ptr) != NULL) {                   \
-            IPPairDecrUsecnt(*(src_h_ptr));             \
-            *(src_h_ptr) = NULL;                      \
-        }                                             \
-    } while (0)
-
 extern IPPairConfig ippair_config;
 SC_ATOMIC_EXTERN(uint64_t,ippair_memuse);
 SC_ATOMIC_EXTERN(uint32_t,ippair_counter);
 SC_ATOMIC_EXTERN(uint32_t,ippair_prune_idx);
 
-void IPPairInitConfig(char quiet);
+void IPPairInitConfig(bool quiet);
 void IPPairShutdown(void);
 void IPPairCleanup(void);
 
 IPPair *IPPairLookupIPPairFromHash (Address *, Address *);
 IPPair *IPPairGetIPPairFromHash (Address *, Address *);
 void IPPairRelease(IPPair *);
-void IPPairLock(IPPair *);
 void IPPairClearMemory(IPPair *);
 void IPPairMoveToSpare(IPPair *);
-uint32_t IPPairSpareQueueGetSize(void);
 void IPPairPrintStats (void);
 
 void IPPairRegisterUnittests(void);
@@ -148,11 +131,10 @@ void IPPairRegisterUnittests(void);
 IPPair *IPPairAlloc(void);
 void IPPairFree(IPPair *);
 
-void IPPairLock(IPPair *);
 void IPPairUnlock(IPPair *);
 
 int IPPairSetMemcap(uint64_t size);
 uint64_t IPPairGetMemcap(void);
 uint64_t IPPairGetMemuse(void);
 
-#endif /* __IPPAIR_H__ */
+#endif /* SURICATA_IPPAIR_H */

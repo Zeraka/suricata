@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,6 +25,7 @@
 
 #include "suricata-common.h"
 #include "decode.h"
+#include "action-globals.h"
 #include "detect.h"
 #include "threads.h"
 #include "flow.h"
@@ -40,6 +41,7 @@
 #include "detect-engine.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
+#include "detect-engine-build.h"
 
 #include "flow-bit.h"
 #include "host-bit.h"
@@ -61,10 +63,11 @@ TODO:
     hostbits:set,bitname,both,120;
  */
 
-#define PARSE_REGEX "^([a-z]+)"          /* Action */                    \
-    "(?:\\s*,\\s*([^\\s,]+))?(?:\\s*)?" /* Name. */                     \
-    "(?:\\s*,\\s*([^,\\s]+))?(?:\\s*)?" /* Direction. */                \
-    "(.+)?"                             /* Any remainding data. */
+#define PARSE_REGEX                                                                                \
+    "^([a-z]+)"                         /* Action */                                               \
+    "(?:\\s*,\\s*([^\\s,]+))?(?:\\s*)?" /* Name. */                                                \
+    "(?:\\s*,\\s*([^,\\s]+))?(?:\\s*)?" /* Direction. */                                           \
+    "(.+)?"                             /* Any remaining data. */
 static DetectParseRegex parse_regex;
 
 static int DetectHostbitMatch (DetectEngineThreadCtx *, Packet *,
@@ -104,7 +107,7 @@ static int DetectHostbitMatchToggle (Packet *p, const DetectXbitsData *fd)
             else
                 HostLock(p->host_src);
 
-            HostBitToggle(p->host_src,fd->idx,p->ts.tv_sec + fd->expire);
+            HostBitToggle(p->host_src, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_src);
             break;
         case DETECT_XBITS_TRACK_IPDST:
@@ -116,7 +119,7 @@ static int DetectHostbitMatchToggle (Packet *p, const DetectXbitsData *fd)
             else
                 HostLock(p->host_dst);
 
-            HostBitToggle(p->host_dst,fd->idx,p->ts.tv_sec + fd->expire);
+            HostBitToggle(p->host_dst, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_dst);
             break;
     }
@@ -164,7 +167,7 @@ static int DetectHostbitMatchSet (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            HostBitSet(p->host_src,fd->idx,p->ts.tv_sec + fd->expire);
+            HostBitSet(p->host_src, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_src);
             break;
         case DETECT_XBITS_TRACK_IPDST:
@@ -175,7 +178,7 @@ static int DetectHostbitMatchSet (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            HostBitSet(p->host_dst,fd->idx, p->ts.tv_sec + fd->expire);
+            HostBitSet(p->host_dst, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_dst);
             break;
     }
@@ -194,7 +197,7 @@ static int DetectHostbitMatchIsset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            r = HostBitIsset(p->host_src,fd->idx, p->ts.tv_sec);
+            r = HostBitIsset(p->host_src, fd->idx, p->ts);
             HostUnlock(p->host_src);
             return r;
         case DETECT_XBITS_TRACK_IPDST:
@@ -205,7 +208,7 @@ static int DetectHostbitMatchIsset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            r = HostBitIsset(p->host_dst,fd->idx, p->ts.tv_sec);
+            r = HostBitIsset(p->host_dst, fd->idx, p->ts);
             HostUnlock(p->host_dst);
             return r;
     }
@@ -224,7 +227,7 @@ static int DetectHostbitMatchIsnotset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            r = HostBitIsnotset(p->host_src,fd->idx, p->ts.tv_sec);
+            r = HostBitIsnotset(p->host_src, fd->idx, p->ts);
             HostUnlock(p->host_src);
             return r;
         case DETECT_XBITS_TRACK_IPDST:
@@ -235,7 +238,7 @@ static int DetectHostbitMatchIsnotset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            r = HostBitIsnotset(p->host_dst,fd->idx, p->ts.tv_sec);
+            r = HostBitIsnotset(p->host_dst, fd->idx, p->ts);
             HostUnlock(p->host_dst);
             return r;
     }
@@ -256,7 +259,7 @@ int DetectXbitMatchHost(Packet *p, const DetectXbitsData *xd)
         case DETECT_XBITS_CMD_TOGGLE:
             return DetectHostbitMatchToggle(p,xd);
         default:
-            SCLogError(SC_ERR_UNKNOWN_VALUE, "unknown cmd %" PRIu32 "", xd->cmd);
+            SCLogError("unknown cmd %" PRIu32 "", xd->cmd);
             return 0;
     }
 
@@ -282,48 +285,53 @@ static int DetectHostbitMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
 static int DetectHostbitParse(const char *str, char *cmd, int cmd_len,
     char *name, int name_len, char *dir, int dir_len)
 {
-    const int max_substrings = 30;
-    int count, rc;
-    int ov[max_substrings];
+    int rc;
+    size_t pcre2len;
 
-    count = DetectParsePcreExec(&parse_regex, str, 0, 0, ov, max_substrings);
+    pcre2_match_data *match = NULL;
+    int count = DetectParsePcreExec(&parse_regex, &match, str, 0, 0);
     if (count != 2 && count != 3 && count != 4) {
-        SCLogError(SC_ERR_PCRE_MATCH,
-            "\"%s\" is not a valid setting for hostbits.", str);
-        return 0;
+        SCLogError("\"%s\" is not a valid setting for hostbits.", str);
+        goto error;
     }
 
-    rc = pcre_copy_substring((char *)str, ov, max_substrings, 1, cmd, cmd_len);
+    pcre2len = cmd_len;
+    rc = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)cmd, &pcre2len);
     if (rc < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
-        return 0;
+        SCLogError("pcre2_substring_copy_bynumber failed");
+        goto error;
     }
 
     if (count >= 3) {
-        rc = pcre_copy_substring((char *)str, ov, max_substrings, 2, name,
-            name_len);
+        pcre2len = name_len;
+        rc = pcre2_substring_copy_bynumber(match, 2, (PCRE2_UCHAR8 *)name, &pcre2len);
         if (rc < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
-            return 0;
+            SCLogError("pcre2_substring_copy_bynumber failed");
+            goto error;
         }
         if (count >= 4) {
-            rc = pcre_copy_substring((char *)str, ov, max_substrings, 3, dir,
-                dir_len);
+            pcre2len = dir_len;
+            rc = pcre2_substring_copy_bynumber(match, 3, (PCRE2_UCHAR8 *)dir, &pcre2len);
             if (rc < 0) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING,
-                    "pcre_copy_substring failed");
-                return 0;
+                SCLogError("pcre2_substring_copy_bynumber failed");
+                goto error;
             }
         }
     }
 
+    pcre2_match_data_free(match);
     return 1;
+
+error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
+    return 0;
 }
 
 int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
     DetectXbitsData *cd = NULL;
-    SigMatch *sm = NULL;
     uint8_t fb_cmd = 0;
     uint8_t hb_dir = 0;
     char fb_cmd_str[16] = "", fb_name[256] = "";
@@ -341,7 +349,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
             hb_dir = DETECT_XBITS_TRACK_IPDST;
         else if (strcmp(hb_dir_str, "both") == 0) {
             //hb_dir = DETECT_XBITS_TRACK_IPBOTH;
-            SCLogError(SC_ERR_UNIMPLEMENTED, "'both' not implemented");
+            SCLogError("'both' not implemented");
             goto error;
         } else {
             // TODO
@@ -362,7 +370,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     } else if (strcmp(fb_cmd_str,"toggle") == 0) {
         fb_cmd = DETECT_XBITS_CMD_TOGGLE;
     } else {
-        SCLogError(SC_ERR_UNKNOWN_VALUE, "ERROR: flowbits action \"%s\" is not supported.", fb_cmd_str);
+        SCLogError("ERROR: flowbits action \"%s\" is not supported.", fb_cmd_str);
         goto error;
     }
 
@@ -370,7 +378,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
         case DETECT_XBITS_CMD_NOALERT:
             if (strlen(fb_name) != 0)
                 goto error;
-            s->flags |= SIG_FLAG_NOALERT;
+            s->action &= ~ACTION_ALERT;
             return 0;
         case DETECT_XBITS_CMD_ISNOTSET:
         case DETECT_XBITS_CMD_ISSET:
@@ -387,7 +395,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     if (unlikely(cd == NULL))
         goto error;
 
-    cd->idx = VarNameStoreSetupAdd(fb_name, VAR_TYPE_HOST_BIT);
+    cd->idx = VarNameStoreRegister(fb_name, VAR_TYPE_HOST_BIT);
     cd->cmd = fb_cmd;
     cd->tracker = hb_dir;
     cd->type = VAR_TYPE_HOST_BIT;
@@ -398,12 +406,6 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_HOSTBITS;
-    sm->ctx = (void *)cd;
 
     switch (fb_cmd) {
         /* case DETECT_XBITS_CMD_NOALERT can't happen here */
@@ -411,14 +413,20 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
         case DETECT_XBITS_CMD_ISNOTSET:
         case DETECT_XBITS_CMD_ISSET:
             /* checks, so packet list */
-            SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
+                        DETECT_SM_LIST_MATCH) == NULL) {
+                goto error;
+            }
             break;
 
         case DETECT_XBITS_CMD_SET:
         case DETECT_XBITS_CMD_UNSET:
         case DETECT_XBITS_CMD_TOGGLE:
             /* modifiers, only run when entire sig has matched */
-            SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
+                        DETECT_SM_LIST_POSTMATCH) == NULL) {
+                goto error;
+            }
             break;
 
         // suppress coverity warning as scan-build-7 warns w/o this.
@@ -432,8 +440,6 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
 error:
     if (cd != NULL)
         SCFree(cd);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 }
 
@@ -443,6 +449,7 @@ void DetectHostbitFree (DetectEngineCtx *de_ctx, void *ptr)
 
     if (fd == NULL)
         return;
+    VarNameStoreUnregister(fd->idx, VAR_TYPE_HOST_BIT);
 
     SCFree(fd);
 }
@@ -454,7 +461,7 @@ static void HostBitsTestSetup(void)
     StorageInit();
     HostBitInitCtx();
     StorageFinalize();
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
 }
 
 static void HostBitsTestShutdown(void)
@@ -544,7 +551,7 @@ static int HostBitsTestParse01(void)
 /**
  * \test HostBitsTestSig01 is a test for a valid noalert flowbits option
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -555,7 +562,7 @@ static int HostBitsTestSig01(void)
                     "Host: one.example.org\r\n"
                     "\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     Signature *s = NULL;
     ThreadVars th_v;
@@ -563,7 +570,6 @@ static int HostBitsTestSig01(void)
     DetectEngineCtx *de_ctx = NULL;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -587,16 +593,15 @@ static int HostBitsTestSig01(void)
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
+    PacketFree(p);
     HostBitsTestShutdown();
-
-    SCFree(p);
     PASS;
 }
 
 /**
  * \test various options
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -642,11 +647,10 @@ static int HostBitsTestSig02(void)
     PASS;
 }
 
-#if 0
 /**
- * \test HostBitsTestSig03 is a test for a invalid flowbits option
+ * \test HostBitsTestSig03 is a test check idx value
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 
@@ -657,86 +661,7 @@ static int HostBitsTestSig03(void)
                     "Host: one.example.org\r\n"
                     "\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-
-    de_ctx = DetectEngineCtxInit();
-
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert ip any any -> any any (msg:\"Unknown cmd\"; flowbits:wrongcmd; content:\"GET \"; sid:1;)");
-
-    if (s == NULL) {
-        goto end;
-    }
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    result = 1;
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-end:
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-    }
-
-    if (det_ctx != NULL) {
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    }
-
-    if (de_ctx != NULL) {
-        DetectEngineCtxFree(de_ctx);
-    }
-
-
-    SCFree(p);
-    return result;
-}
-#endif
-
-/**
- * \test HostBitsTestSig04 is a test check idx value
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-
-static int HostBitsTestSig04(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     Signature *s = NULL;
@@ -746,7 +671,6 @@ static int HostBitsTestSig04(void)
     int idx = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -763,8 +687,8 @@ static int HostBitsTestSig04(void)
     s = de_ctx->sig_list = SigInit(de_ctx,"alert ip any any -> any any (msg:\"isset option\"; hostbits:isset,fbt; content:\"GET \"; sid:1;)");
     FAIL_IF_NULL(s);
 
-    idx = VarNameStoreSetupAdd("fbt", VAR_TYPE_HOST_BIT);
-    FAIL_IF(idx != 1);
+    idx = VarNameStoreRegister("fbt", VAR_TYPE_HOST_BIT);
+    FAIL_IF(idx == 0);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
@@ -773,455 +697,6 @@ static int HostBitsTestSig04(void)
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-    HostBitsTestShutdown();
-
-    SCFree(p);
-    PASS;
-}
-
-/**
- * \test HostBitsTestSig05 is a test check noalert flag
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-
-static int HostBitsTestSig05(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-
-    memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-
-    HostBitsTestSetup();
-
-    de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,
-        "alert ip any any -> any any (hostbits:noalert; content:\"GET \"; sid:1;)");
-    FAIL_IF_NULL(s);
-    FAIL_IF((s->flags & SIG_FLAG_NOALERT) != SIG_FLAG_NOALERT);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    FAIL_IF(PacketAlertCheck(p, 1));
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    HostBitsTestShutdown();
-
-    SCFree(p);
-    PASS;
-}
-
-#if 0
-/**
- * \test HostBitsTestSig06 is a test set flowbits option
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-
-static int HostBitsTestSig06(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-    Flow f;
-    GenericVar flowvar, *gv = NULL;
-    int result = 0;
-    int idx = 0;
-
-    memset(p, 0, SIZE_OF_PACKET);
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(Flow));
-    memset(&flowvar, 0, sizeof(GenericVar));
-
-    FLOW_INITIALIZE(&f);
-    p->flow = &f;
-    p->flow->flowvar = &flowvar;
-
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-    p->flags |= PKT_HAS_FLOW;
-    p->flowflags |= FLOW_PKT_TOSERVER;
-
-    de_ctx = DetectEngineCtxInit();
-
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert ip any any -> any any (msg:\"Flowbit set\"; flowbits:set,myflow; sid:10;)");
-
-    if (s == NULL) {
-        goto end;
-    }
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    idx = VariableNameGetIdx(de_ctx, "myflow", VAR_TYPE_HOST_BIT);
-
-    gv = p->flow->flowvar;
-
-    for ( ; gv != NULL; gv = gv->next) {
-        if (gv->type == DETECT_HOSTBITS && gv->idx == idx) {
-                result = 1;
-        }
-    }
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    if(gv) GenericVarFree(gv);
-    FLOW_DESTROY(&f);
-
-    SCFree(p);
-    return result;
-end:
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-    }
-
-    if (det_ctx != NULL) {
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    }
-
-    if (de_ctx != NULL) {
-        DetectEngineCtxFree(de_ctx);
-    }
-
-    if(gv) GenericVarFree(gv);
-    FLOW_DESTROY(&f);
-    SCFree(p);
-    return result;
-}
-
-/**
- * \test HostBitsTestSig07 is a test unset flowbits option
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-
-static int HostBitsTestSig07(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-    Flow f;
-    GenericVar flowvar, *gv = NULL;
-    int result = 0;
-    int idx = 0;
-
-    memset(p, 0, SIZE_OF_PACKET);
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(Flow));
-    memset(&flowvar, 0, sizeof(GenericVar));
-
-    FLOW_INITIALIZE(&f);
-    p->flow = &f;
-    p->flow->flowvar = &flowvar;
-
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-
-    de_ctx = DetectEngineCtxInit();
-
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,"alert ip any any -> any any (msg:\"Flowbit set\"; flowbits:set,myflow2; sid:10;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    s = s->next = SigInit(de_ctx,"alert ip any any -> any any (msg:\"Flowbit unset\"; flowbits:unset,myflow2; sid:11;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    idx = VariableNameGetIdx(de_ctx, "myflow", VAR_TYPE_HOST_BIT);
-
-    gv = p->flow->flowvar;
-
-    for ( ; gv != NULL; gv = gv->next) {
-        if (gv->type == DETECT_HOSTBITS && gv->idx == idx) {
-                result = 1;
-        }
-    }
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    if(gv) GenericVarFree(gv);
-    FLOW_DESTROY(&f);
-
-    SCFree(p);
-    return result;
-end:
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-    }
-
-    if (det_ctx != NULL) {
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    }
-
-    if (de_ctx != NULL) {
-        DetectEngineCtxFree(de_ctx);
-    }
-
-    if(gv) GenericVarFree(gv);
-    FLOW_DESTROY(&f);
-
-    SCFree(p);
-    return result;}
-#endif
-
-/**
- * \test set / isset
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-static int HostBitsTestSig07(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-    Flow f;
-    int result = 0;
-
-    memset(p, 0, SIZE_OF_PACKET);
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(Flow));
-
-    HostBitsTestSetup();
-
-    FLOW_INITIALIZE(&f);
-    p->flow = &f;
-    p->flowflags = FLOW_PKT_TOSERVER;
-
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-
-    de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx,
-            "alert ip any any -> any any (hostbits:set,myflow2; sid:10;)");
-    FAIL_IF_NULL(s);
-
-    s = s->next  = SigInit(de_ctx,
-            "alert ip any any -> any any (hostbits:isset,myflow2; sid:11;)");
-    FAIL_IF_NULL(s);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    SCLogInfo("p->host_src %p", p->host_src);
-
-    if (HostHasHostBits(p->host_src) == 1) {
-        if (PacketAlertCheck(p, 11)) {
-            result = 1;
-        }
-    }
-    FAIL_IF_NOT(result);
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    FLOW_DESTROY(&f);
-
-    HostBitsTestShutdown();
-    SCFree(p);
-    PASS;
-}
-
-/**
- * \test set / toggle / toggle / isset
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
- */
-static int HostBitsTestSig08(void)
-{
-    uint8_t *buf = (uint8_t *)
-                    "GET /one/ HTTP/1.1\r\n"
-                    "Host: one.example.org\r\n"
-                    "\r\n";
-    uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    DetectEngineCtx *de_ctx = NULL;
-    Flow f;
-
-    memset(p, 0, SIZE_OF_PACKET);
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(Flow));
-
-    HostBitsTestSetup();
-
-    FLOW_INITIALIZE(&f);
-    p->flow = &f;
-
-    p->src.family = AF_INET;
-    p->dst.family = AF_INET;
-    p->payload = buf;
-    p->payload_len = buflen;
-    p->proto = IPPROTO_TCP;
-
-    de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = DetectEngineAppendSig(de_ctx,
-            "alert ip any any -> any any (hostbits:set,myflow2; sid:10;)");
-    FAIL_IF_NULL(s);
-    s = DetectEngineAppendSig(de_ctx,
-            "alert ip any any -> any any (hostbits:toggle,myflow2; sid:11;)");
-    FAIL_IF_NULL(s);
-    s = DetectEngineAppendSig(de_ctx,
-            "alert ip any any -> any any (hostbits:toggle,myflow2; sid:12;)");
-    FAIL_IF_NULL(s);
-    s = DetectEngineAppendSig(de_ctx,
-            "alert ip any any -> any any (hostbits:isset,myflow2; sid:13;)");
-    FAIL_IF_NULL(s);
-
-    SCSigRegisterSignatureOrderingFuncs(de_ctx);
-    SCSigOrderSignatures(de_ctx);
-    SCSigSignatureOrderingModuleCleanup(de_ctx);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
-    SCLogInfo("p->host_src %p", p->host_src);
-
-    if (HostHasHostBits(p->host_src) == 1) {
-        if (PacketAlertCheck(p, 10)) {
-            SCLogInfo("sid 10 matched");
-        }
-        if (PacketAlertCheck(p, 11)) {
-            SCLogInfo("sid 11 matched");
-        }
-        if (PacketAlertCheck(p, 12)) {
-            SCLogInfo("sid 12 matched");
-        }
-        if (PacketAlertCheck(p, 13)) {
-            SCLogInfo("sid 13 matched");
-        } else {
-            FAIL;
-        }
-    }
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    FLOW_DESTROY(&f);
-
     HostBitsTestShutdown();
 
     SCFree(p);
@@ -1236,15 +711,6 @@ void HostBitsRegisterTests(void)
     UtRegisterTest("HostBitsTestParse01", HostBitsTestParse01);
     UtRegisterTest("HostBitsTestSig01", HostBitsTestSig01);
     UtRegisterTest("HostBitsTestSig02", HostBitsTestSig02);
-#if 0
-    UtRegisterTest("HostBitsTestSig03", HostBitsTestSig03, 0);
-#endif
-    UtRegisterTest("HostBitsTestSig04", HostBitsTestSig04);
-    UtRegisterTest("HostBitsTestSig05", HostBitsTestSig05);
-#if 0
-    UtRegisterTest("HostBitsTestSig06", HostBitsTestSig06, 1);
-#endif
-    UtRegisterTest("HostBitsTestSig07", HostBitsTestSig07);
-    UtRegisterTest("HostBitsTestSig08", HostBitsTestSig08);
+    UtRegisterTest("HostBitsTestSig03", HostBitsTestSig03);
 }
 #endif /* UNITTESTS */

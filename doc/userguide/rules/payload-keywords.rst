@@ -157,7 +157,7 @@ Example::
 
 ``endswith`` is a short hand notation for::
 
-    content:".php"; isdatat:!1,relative;
+    content:".php"; isdataat:!1,relative;
 
 ``endswith`` cannot be mixed with ``offset``, ``within`` or
 ``distance`` for the same pattern.
@@ -197,6 +197,8 @@ distance:5; means the pattern can be anywhere after the previous
 match + 5 bytes. For limiting how far after the last match Suricata
 needs to look, use 'within'.
 
+The absolute value for distance must be less than or equal to 1MB (1048576).
+
 Examples of distance:
 
 .. image:: payload-keywords/distance5.png
@@ -222,6 +224,8 @@ within comes with a mandatory numeric value. Using within makes sure
 there will only be a match if the content matches with the payload
 within the set amount of bytes. Within can not be 0 (zero)
 
+The absolute value for within must be less than or equal to 1MB (1048576).
+
 Example:
 
 .. image:: payload-keywords/within2.png
@@ -240,13 +244,19 @@ payload for a match, use within.
 
 .. image:: payload-keywords/within_distance2.png
 
+rawbytes
+--------
+
+The rawbytes keyword has no effect but is included to be compatible with
+signatures that use it, for example signatures used with Snort.
+
 isdataat
 --------
 
 The purpose of the isdataat keyword is to look if there is still data
 at a specific part of the payload.  The keyword starts with a number
 (the position) and then optional followed by 'relative' separated by a
-comma and the option rawbytes.  You use the word 'relative' to know if
+comma and the option rawbytes. You use the word 'relative' to know if
 there is still data at a specific part of the payload relative to the
 last match.
 
@@ -264,41 +274,123 @@ You can also use the negation (!) before isdataat.
 
 .. image:: payload-keywords/isdataat1.png
 
+absent
+------
+
+The keyword ``absent`` checks that a sticky buffer does not exist.
+It can be used without any argument to match only on absent buffer :
+
+Example of ``absent`` in a rule:
+
+.. container:: example-rule
+
+   alert http any any -> any any (msg:"HTTP request without referer";  :example-rule-emphasis:`http.referer; absent;` sid:1; rev:1;)
+
+
+It can take an argument "or_else" to match on absent buffer or on what comes next such as negated content, for instance :
+
+.. container:: example-rule
+
+   alert http any any -> any any (msg:"HTTP request without referer";  :example-rule-emphasis:`http.referer; absent: or_else;` content: !"abc"; sid:1; rev:1;)
+
+For files (i.e ``file.data``), absent means there are no files in the transaction.
+
 bsize
 -----
 
-With the bsize keyword, you can match on the length of the buffer. This adds precision to the content match, previously this could have been done with isdataat.
+With the ``bsize`` keyword, you can match on the length of the buffer. This adds
+precision to the content match, previously this could have been done with ``isdataat``.
+
+bsize uses an :ref:`unsigned 64-bit integer <rules-integer-keywords>`.
+
+An optional operator can be specified; if no operator is present, the operator will
+default to '='. When a relational operator is used, e.g., '<', '>' or '<>' (range),
+the bsize value will be compared using the relational operator. Ranges are exclusive.
+
+If one or more ``content`` keywords precedes ``bsize``, each occurrence of ``content``
+will be inspected and an error will be raised if the content length and the bsize
+value prevent a match.
 
 Format::
 
   bsize:<number>;
+  bsize:=<number>;
+  bsize:<<number>;
+  bsize:><number>;
+  bsize:<lo-number><><hi-number>;
 
-Example of bsize in a rule:
+Examples of ``bsize`` in a rule:
 
 .. container:: example-rule
 
-   alert dns any any -> any any (msg:"test bsize rule"; dns.query; content:"google.com"; bsize:10; sid:123; rev:1;)
+   alert dns any any -> any any (msg:"bsize exact buffer size"; dns.query; content:"google.com"; bsize:10; sid:1; rev:1;)
+
+   alert dns any any -> any any (msg:"bsize less than value"; dns.query; content:"google.com"; bsize:<25; sid:2; rev:1;)
+
+   alert dns any any -> any any (msg:"bsize buffer less than or equal value"; dns.query; content:"google.com"; bsize:<=20; sid:3; rev:1;)
+
+   alert dns any any -> any any (msg:"bsize buffer greater than value"; dns.query; content:"google.com"; bsize:>8; sid:4; rev:1;)
+
+   alert dns any any -> any any (msg:"bsize buffer greater than or equal value"; dns.query; content:"google.com"; bsize:>=8; sid:5; rev:1;)
+
+   alert dns any any -> any any (msg:"bsize buffer range value"; dns.query; content:"google.com"; bsize:8<>20; sid:6; rev:1;)
+
+
+.. container:: example-rule
+
+   alert dns any any -> any any (msg:"test bsize rule"; dns.query; content:"short"; bsize:<10; sid:124; rev:1;)
+
+.. container:: example-rule
+
+   alert dns any any -> any any (msg:"test bsize rule"; dns.query; content:"longer string"; bsize:>10; sid:125; rev:1;)
+
+.. container:: example-rule
+
+   alert dns any any -> any any (msg:"test bsize rule"; dns.query; content:"middle"; bsize:6<>15; sid:126; rev:1;)
+
+To emphasize how range works: in the example above, a match will occur if
+``bsize`` is greater than 6 and less than 15.
 
 dsize
 -----
 
 With the dsize keyword, you can match on the size of the packet
-payload. You can use the keyword for example to look for abnormal
-sizes of payloads. This may be convenient in detecting buffer
-overflows.
+payload/data. You can use the keyword for example to look for abnormal
+sizes of payloads which are equal to some n i.e. 'dsize:n'
+not equal 'dsize:!n' less than 'dsize:<n' or greater than 'dsize:>n'
+This may be convenient in detecting buffer overflows.
+
+dsize cannot be used when using app/streamlayer protocol keywords (i.e. http.uri)
+
+dsize uses an :ref:`unsigned 16-bit integer <rules-integer-keywords>`.
 
 Format::
 
-  dsize:<number>;
+  dsize:[<>!]number; || dsize:min<>max;
 
-Example of dsize in a rule:
+Examples of dsize values:
 
 .. container:: example-rule
 
-    alert udp $EXTERNAL_NET any -> $HOME_NET 65535 (msg:"GPL DELETED EXPLOIT LANDesk Management Suite Alerting Service buffer overflow"; :example-rule-emphasis:`dsize:>268;` reference: bugtraq,23483; reference: cve,2007-1674; classtype: attempted-admin; sid:100000928; rev:1;)
+   alert tcp any any -> any any (msg:"dsize exact size"; dsize:10; sid:1; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize less than value"; dsize:<10; sid:2; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize less than or equal value"; dsize:<=10; sid:3; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize greater than value"; dsize:>8; sid:4; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize greater than or equal value"; dsize:>=10; sid:5; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize range value"; dsize:8<>20; sid:6; rev:1;)
+
+   alert tcp any any -> any any (msg:"dsize not equal value"; dsize:!9; sid:7; rev:1;)
+
+.. _byte_test:
 
 byte_test
 ---------
+
 The ``byte_test`` keyword extracts ``<num of bytes>`` and performs an operation selected
 with ``<operator>`` against the value in ``<test value>`` at a particular ``<offset>``.
 The ``<bitmask value>`` is applied to the extracted bytes (before the operator is applied),
@@ -306,13 +398,14 @@ and the final result will be right shifted one bit for each trailing ``0`` in
 the ``<bitmask value>``.
 
 Format::
-  
-  byte_test:<num of bytes>, [!]<operator>, <test value>, <offset> [,relative] \
-  [,<endian>][, string, <num type>][, dce][, bitmask <bitmask value>]; 
+
+  byte_test:<num of bytes> | <variable_name>, [!]<operator>, <test value>, <offset> [,relative] \
+  [,<endian>][, string, <num type>][, dce][, bitmask <bitmask value>];
 
 
 +----------------+------------------------------------------------------------------------------+
 | <num of bytes> | The number of bytes selected from the packet to be converted			|
+|                | or the name of a byte_extract/byte_math variable.            		|
 +----------------+------------------------------------------------------------------------------+
 | <operator>	 | 										|
 |		 | - [!] Negation can prefix other operators					|
@@ -339,7 +432,7 @@ Format::
 |		 | - dec - Converted string represented in decimal				|
 |		 | - oct - Converted string represented in octal				|
 +----------------+------------------------------------------------------------------------------+
-| [dce]		 | Allow the DCE module determine the byte order 				|
+| [dce]		 | Allow the DCE module to determine the byte order 				|
 +----------------+------------------------------------------------------------------------------+
 | [bitmask]	 | Applies the AND operator on the bytes converted				|
 +----------------+------------------------------------------------------------------------------+
@@ -349,23 +442,23 @@ Example::
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num = Value"; \
-	 content:"|00 01 00 02|"; byte_test:2,=,0x01;)
+	 content:"|00 01 00 02|"; byte_test:2,=,0x01,0;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num = Value relative to content"; \
-	 content:"|00 01 00 02|"; byte_test:2,=,0x03,relative;)
+	 content:"|00 01 00 02|"; byte_test:2,=,0x03,2,relative;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num != Value"; content:"|00 01 00 02|"; \
-	 byte_test:2,!=,0x06;)
+	 byte_test:2,!=,0x06,0;)
 
   alert tcp any any -> any any \ 
          (msg:"Byte_Test Example - Detect Large Values"; content:"|00 01 00 02|"; \
-         byte_test:2,>,1000,relative;)
+         byte_test:2,>,1000,1,relative;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Lowest bit is set"; \
-	 content:"|00 01 00 02|"; byte_test:2,&,0x01,relative;)
+	 content:"|00 01 00 02|"; byte_test:2,&,0x01,12,relative;)
 
   alert tcp any any -> any any (msg:"Byte_Test Example - Compare to String"; \
  	 content:"foobar"; byte_test:4,=,1337,1,relative,string,dec;)
@@ -379,51 +472,58 @@ an existing variable or a specified value.
 
 When ``relative`` is included, there must be a previous ``content`` or ``pcre`` match.
 
+Note: if ``oper`` is ``/`` and the divisor is 0, there will never be a match on the ``byte_math`` keyword.
+
 The result can be stored in a result variable and referenced by
 other rule options later in the rule.
 
+
 ==============	==================================
- Keyword	Modifier
+ Keyword	    Modifier
 ============== 	==================================
- content	offset,depth,distance,within
- byte_test	offset,value
- byte_jump	offset
- isdataat	offset
+ content	    offset,depth,distance,within
+ byte_test	    offset,value
+ byte_jump	    offset
+ isdataat	    offset
 ==============	==================================
 
 Format::
 
-  byte_math:bytes <num of bytes>, offset <offset>, oper <operator>, rvalue <rvalue>, \
-	result <result_var> [, relative] [, endian <endian>] [, string <number-type>] \
-	[, dce] [, bitmask <value>];
+  byte_math:bytes <num of bytes> | <variable-name> , offset <offset>, oper <operator>, rvalue <rvalue>, \
+        result <result_var> [, relative] [, endian <endian>] [, string <number-type>] \
+        [, dce] [, bitmask <value>];
+
 
 +-----------------------+-----------------------------------------------------------------------+
-| <num of bytes>	| The number of bytes selected from the packet 				|
+| <num of bytes>        | The number of bytes selected from the packet                          |
+|                       | or the name of a byte_extract variable.                               |
 +-----------------------+-----------------------------------------------------------------------+
-| <offset>		| Number of bytes into the payload					|
+| <offset>              | Number of bytes into the payload                                      |
 +-----------------------+-----------------------------------------------------------------------+
-| oper <operator>	| Mathematical operation to perform: +, -, \*, /, <<, >> 		|
+| oper <operator>       | Mathematical operation to perform: +, -, \*, /, <<, >>                |
 +-----------------------+-----------------------------------------------------------------------+
-| rvalue <rvalue>	| Value to perform the math operation with 				|
+| rvalue <rvalue>       | Value to perform the math operation with                              |
 +-----------------------+-----------------------------------------------------------------------+
-| result <result-var>	| Where to store the computed value 					|
+| result <result-var>   | Where to store the computed value                                     |
 +-----------------------+-----------------------------------------------------------------------+
-| [relative]		| Offset relative to last content match					|
+| [relative]            | Offset relative to last content match                                 |
 +-----------------------+-----------------------------------------------------------------------+
-| [endian <type>]	| - big (Most significant byte at lowest address)			|
-|		       	| - little (Most significant byte at the highest address)		|
+| [endian <type>]       | - big (Most significant byte at lowest address)                       |
+|                       | - little (Most significant byte at the highest address)               |
+|                       | - dce (Allow the DCE module to determine the byte order)              |
 +-----------------------+-----------------------------------------------------------------------+
-| [string <num_type>]  	| 									|
-|		       	| - hex Converted data is represented in hex				|
-|		       	| - dec Converted data is represented in decimal			|
-|		       	| - oct Converted data is represented as octal				|
+| [string <num_type>]   |                                                                       |
+|                       | - hex Converted data is represented in hex                            |
+|                       | - dec Converted data is represented in decimal                        |
+|                       | - oct Converted data is represented as octal                          |
 +-----------------------+-----------------------------------------------------------------------+
-| [dce]			| Allow the DCE module determine the byte order				|
+| [dce]                 | Allow the DCE module to determine the byte order                      |
 +-----------------------+-----------------------------------------------------------------------+
-| [bitmask] <value>	| The AND operator will be applied to the extracted value		|
-|			| The result will be right shifted by the number of bits equal to the	|
-|			| number of trailing zeros in the mask					|
+| [bitmask] <value>     | The AND operator will be applied to the extracted value               |
+|                       | The result will be right shifted by the number of bits equal to the   |
+|                       | number of trailing zeros in the mask                                  |
 +-----------------------+-----------------------------------------------------------------------+
+
 
 Example::
 
@@ -448,12 +548,15 @@ The ``byte_jump`` keyword allows for the ability to select a ``<num of bytes>`` 
 
 Format::
 
-  byte_jump:<num of bytes>, <offset> [, relative][, multiplier <mult_value>] \
-	[, <endian>][, string, <num_type>][, align][, from_beginning][, from_end] \ 
+  byte_jump:<num of bytes> | <variable-name>, <offset> [, relative][, multiplier <mult_value>] \
+        [, <endian>][, string, <num_type>][, align][, from_beginning][, from_end] \
         [, post_offset <value>][, dce][, bitmask <value>];
 
+
+
 +-----------------------+-----------------------------------------------------------------------+
-| <num of bytes>	| The number of bytes selected from the packet to be converted		|
+| <num of bytes>        | The number of bytes selected from the packet to be converted          |
+|                       | or the name of a byte_extract/byte_math variable.                     |
 +-----------------------+-----------------------------------------------------------------------+
 | <offset>		| Number of bytes into the payload					|
 +-----------------------+-----------------------------------------------------------------------+
@@ -480,11 +583,12 @@ Format::
 | [post_offset] <value>	| After the jump operation has been performed, it will			|
 |			| jump an additional number of bytes specified by <value>		|
 +-----------------------+-----------------------------------------------------------------------+
-| [dce]			| Allow the DCE module determine the byte order				|
+| [dce]                 | Allow the DCE module to determine the byte order                      |
 +-----------------------+-----------------------------------------------------------------------+
 | [bitmask] <value>	| The AND operator will be applied by <value> and the			|
 |			| converted bytes, then jump operation is performed			|
 +-----------------------+-----------------------------------------------------------------------+
+
 
 Example::
 
@@ -533,10 +637,10 @@ Format::
 |		     | - dec - Converted string represented in decimal				|
 |		     | - oct - Converted string represented in octal				|
 +--------------------+--------------------------------------------------------------------------+
-| [dce]		     | Allow the DCE module determine the byte order 				|
+| [dce]              | Allow the DCE module to determine the byte order                         |
 +--------------------+--------------------------------------------------------------------------+
-| align <align-value>| Round the extracted value up to the next 				|
-|                    | next <align-value> byte boundary post-multiplication (if any)            |
+| align <align-value>| Round the extracted value up to the next                                 |
+|                    | <align-value> byte boundary post-multiplication (if any)                 |
 |                    | ; <align-value> may be 2 or 4                                            |
 +--------------------+--------------------------------------------------------------------------+
 
@@ -565,6 +669,97 @@ Example::
 	 flow:established,to_server; content:"|00 FF|"; \
 	 byte_extract:2,0,cmp_ver,relative; content:"FooBar"; distance:0; byte_test:2,=,cmp_ver,0; sid:3;)
 
+.. _keyword_entropy:
+
+entropy
+-------
+
+The ``entropy`` keyword calculates the Shannon entropy value for content and compares it with
+an entropy value. When there is a match, rule processing will continue. Entropy values
+are between 0.0 and 8.0, inclusive. Internally, entropy is represented as a 64-bit
+floating point value.
+
+The ``entropy`` keyword syntax is the keyword entropy followed by options
+and the entropy value and operator used to determine if the values agree.
+
+The minimum entropy keyword specification is::
+
+    entropy: value <entropy-spec>
+
+This results in the calculated entropy value being compared with
+`entropy-spec` using the (default) equality operator.
+
+Example::
+
+  entropy: 7.01
+
+A match occurs when the calculated entropy and specified entropy values agree.
+This is determined by calculating the entropy value and comparing it with the
+value from the rule using the specified operator.
+
+Example::
+
+  entropy: <7.01
+
+Options have default values:
+- bytes is equal to the current content length
+- offset is 0
+- equality comparison
+
+When entropy keyword options are specified, all options and "value" must
+be comma-separated. Options and value may be specified in any order.
+
+The complete format for the ``entropy`` keyword is::
+
+	entropy: [bytes <byteval>] [offset <offsetval>] value <operator><entropy-value>
+
+This example shows all possible options with default values and an entropy value of `4.037`::
+
+	entropy: bytes 0, offset 0,  value = 4.037
+
+The following operators are available::
+
+ * = (default): Match when calculated value equals entropy value
+ * < Match when calculated value is strictly less than entropy value
+ * <=  Match when calculated value is less than or equal to entropy value
+ * > Match when calculated value is strictly greater than entropy value
+ * >= Match when calculated value is greater than or equal to entropy value
+ * !=  Match when calculated value is not equal to entropy value
+ * x-y Match when calculated value is within the exclusive range
+ * !x-y Match when calculated value is not within the exclusive range
+
+This example matches if the `file.data` content for an HTTP transaction has
+a Shannon entropy value of 4 or higher::
+
+	alert http any any -> any any (msg:"entropy simple test"; file.data; entropy: value >= 4; sid:1;)
+
+Logging
+~~~~~~~
+
+When the ``entropy`` rule keyword is provided and the rule is evaluated, the
+`calculated entropy` value is associated with the flow even if the calculated
+entropy value didn't result in a match or alert. Subsequent logging of event
+types that include the flow, including alerts, will contain the ``entropy`` value in
+the ``metadata`` section of an output log. The follow is an example that shows
+the calculated entropy value with the buffer on which the value was computed::
+
+     "metadata": {
+        "entropy": {
+          "file_data": 4.265743301617466
+        }
+      }
+
+The events where entropy is logged will depend largely on how it's used within a
+rule and the rule's protocol.
+
+For example -- this rule -- when evaluated by Suricata -- will result in the
+`calculated entropy` being included in the ``alert, flow`` and ``http`` events.
+Depending on the traffic and Suricata configuration, other event types may
+include the entropy value::
+
+    alert http any any -> any any (flow:established; file.data; entropy: value > 4.4; sid: 1;)
+
+
 rpc
 ---
 
@@ -592,7 +787,7 @@ Example of the rpc keyword in a rule:
 replace
 -------
 
-The replace content modifier can only be used in ips. It adjusts
+The replace content modifier can only be used in IPS. It adjusts
 network traffic.  It changes the content it follows ('abc') into
 another ('def'), see example:
 
@@ -608,6 +803,7 @@ the reassembled stream.
 The checksums will be recalculated by Suricata and changed after the
 replace keyword is being used.
 
+.. _pcre:
 
 pcre (Perl Compatible Regular Expressions)
 ------------------------------------------
@@ -659,7 +855,7 @@ you should add them to pcre, behind regex. Like this::
 *Pcre compatible modifiers*
 
 There are a few pcre compatible modifiers which can change the
-qualities of pcre as well.  These are:
+qualities of pcre as well. These are:
 
 * ``A``: A pattern has to match at the beginning of a buffer. (In pcre
   ^ is similar to A.)
@@ -668,6 +864,67 @@ qualities of pcre as well.  These are:
 
 .. note:: The following characters must be escaped inside the content:
              ``;`` ``\`` ``"``
+
+PCRE extraction
+~~~~~~~~~~~~~~~
+
+It is possible to capture groups from the regular expression and log them into the
+alert events.
+
+There are 3 capabilities:
+
+* pkt: the extracted group is logged as pkt variable in ``metadata.pktvars``
+* alert: the extracted group is logged to the ``alert.context`` subobject
+* flow: the extracted group is stored in a flow variable and end up in the ``metadata.flowvars``
+
+To use the feature, parameters of pcre keyword need to be updated.
+After the regular pcre regex and options, a comma-separated list of variable names.
+The prefix here is ``flow:``, ``pkt:`` or ``alert:`` and the names can contain special
+characters now. The names map to the capturing substring expressions in order ::
+
+  pcre:"/([a-z]+)\/[a-z]+\/(.+)\/(.+)\/changelog$/GUR, \
+      flow:ua/ubuntu/repo,flow:ua/ubuntu/pkg/base,     \
+      flow:ua/ubuntu/pkg/version";
+
+This would result in the alert event having something like ::
+
+  "metadata": {
+    "flowvars": [
+       {"ua/ubuntu/repo": "fr"},
+       {"ua/ubuntu/pkg/base": "curl"},
+       {"ua/ubuntu/pkg/version": "2.2.1"}
+    ]
+  }
+
+The other events on the same flow such as the ``flow`` one will
+also have the flow vars.
+
+If this is not wanted, you can use the ``alert:`` construct to only
+get the event in the alert ::
+
+  pcre:"/([a-z]+)\/[a-z]+\/(.+)\/(.+)\/changelog$/GUR, \
+      alert:ua/ubuntu/repo,alert:ua/ubuntu/pkg/base,     \
+      alert:ua/ubuntu/pkg/version";
+
+With that syntax, the result of the extraction will appear like ::
+
+  "alert": {
+    "context": {
+       "ua/ubuntu/repo": "fr",
+       "ua/ubuntu/pkg/base": "curl",
+       "ua/ubuntu/pkg/version": "2.2.1"
+    ]
+  }
+
+A combination of the extraction scopes can be combined.
+
+It is also possible to extract key/value pair in the ``pkt`` scope.
+One capture would be the key, the second the value. The notation is similar to the last ::
+
+  pcre:"^/([A-Z]+) (.*)\r\n/, pkt:key,pkt:value";
+
+``key`` and ``value`` are simply hardcoded names to trigger the key/value extraction.
+As a consequence, they can't be used as name for the variables.
 
 Suricata's modifiers
 ~~~~~~~~~~~~~~~~~~~~
@@ -690,7 +947,7 @@ Suricata has its own specific pcre modifiers. These are:
 .. image:: pcre/pcre6.png
 
 * ``I``: Makes pcre match on the HTTP-raw-uri. It matches on the same
-  buffer as http_raw_uri.  I can be combined with /R. Note that R is
+  buffer as http_raw_uri. I can be combined with /R. Note that R is
   relative to the previous match so both matches have to be in the
   HTTP-raw-uri buffer. Read more about :ref:`HTTP URI Normalization <rules-http-uri-normalization>`.
 
@@ -704,12 +961,12 @@ Suricata has its own specific pcre modifiers. These are:
   /R. Note that R is relative to the previous match so both matches
   have to be in the HTTP-response body.
 
-* ``H``: Makes pcre match on the HTTP-header.  H can be combined with
+* ``H``: Makes pcre match on the HTTP-header. H can be combined with
   /R. Note that R is relative to the previous match so both matches have
   to be in the HTTP-header body.
 
 * ``D``: Makes pcre match on the unnormalized header. So, it matches
-  on the same buffer as http_raw_header.  D can be combined with
+  on the same buffer as http_raw_header. D can be combined with
   /R. Note that R is relative to the previous match so both matches
   have to be in the HTTP-raw-header.
 
@@ -748,4 +1005,23 @@ Suricata has its own specific pcre modifiers. These are:
   buffer as http_host.  W can be combined with /R. Note that R is
   relative to the previous match so both matches have to be in the
   HTTP-Host buffer.
+
+.. _pcre-update-v1-to-v2:
+
+Changes from PCRE1 to PCRE2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The upgrade from PCRE1 to PCRE2 changes the behavior for some
+PCRE expressions.
+
+- ``\I`` is a valid pcre in PCRE1, with a useless escape, so
+  equivalent to ``I``, but it is no longer the case in PCRE2.
+  There are other characters than I exhibiting this pattern
+- ``[\d-a]`` is a valid pcre in PCRE1, with either a digit,
+  a dash or the character ``a``, but the dash must now be escaped
+  with PCRE2 as ``[\d\-a]`` to get the same behavior
+- ``pcre2_substring_copy_bynumber`` now returns an error
+  ``PCRE2_ERROR_UNSET`` instead of ``pcre_copy_substring`` returning
+  no error and giving an empty string. If the behavior of some use
+  case is no longer the expected one, please let us know.
 

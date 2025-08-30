@@ -3,14 +3,22 @@
 AUTOMAKE_OPTIONS = foreign 1.4
 ACLOCAL_AMFLAGS = -I m4
 EXTRA_DIST = ChangeLog COPYING LICENSE suricata.yaml.in \
-             threshold.config \
+             threshold.config SECURITY.md \
              $(SURICATA_UPDATE_DIR) \
 	     lua \
-	     acsite.m4
-SUBDIRS = $(HTP_DIR) rust src qa rules doc contrib etc python ebpf \
+	     acsite.m4 \
+	     scripts/generate-images.sh \
+	     scripts/docs-almalinux9-minimal-build.sh \
+	     scripts/docs-ubuntu-debian-minimal-build.sh \
+       scripts/evedoc.py \
+	     examples/plugins
+SUBDIRS = rust src plugins qa rules doc etc python ebpf \
           $(SURICATA_UPDATE_DIR)
+DIST_SUBDIRS = $(SUBDIRS) examples/lib/simple examples/lib/custom
 
 CLEANFILES = stamp-h[0-9]*
+
+DISTCLEANFILES = compile_commands.json
 
 install-data-am:
 	@echo "Run 'make install-conf' if you want to install initial configuration files. Or 'make install-full' to install configuration and rules";
@@ -30,6 +38,8 @@ install-conf:
 	install -d "$(DESTDIR)$(e_logcertsdir)"
 	install -d "$(DESTDIR)$(e_rundir)"
 	install -m 770 -d "$(DESTDIR)$(e_localstatedir)"
+	install -m 770 -d "$(DESTDIR)$(e_datadir)"
+	install -m 770 -d "$(DESTDIR)$(e_sghcachedir)"
 
 install-rules:
 if INSTALL_SURICATA_UPDATE
@@ -38,19 +48,41 @@ if INSTALL_SURICATA_UPDATE
 		--suricata-conf $(DESTDIR)$(sysconfdir)/suricata/suricata.yaml \
 		--no-test --no-reload
 else
-	@echo "error: rules not installed as suricata-update not available"
-	@exit 1
+	@echo ""
+	@echo "Warning: No rules will be downloaded as suricata-update"
+	@echo "   is not available: ${install_suricata_update_reason}"
 endif
 	@echo ""
 	@echo "You can now start suricata by running as root something like:"
 	@echo "  $(DESTDIR)$(bindir)/suricata -c $(DESTDIR)$(e_sysconfdir)suricata.yaml -i eth0"
 	@echo ""
-	@echo "If a library like libhtp.so is not found, you can run suricata with:"
+	@echo "If a shared library is not found, you can add library paths with:"
 	@echo "  LD_LIBRARY_PATH="$(DESTDIR)$(prefix)/lib" "$(DESTDIR)$(bindir)/suricata" -c "$(DESTDIR)$(e_sysconfdir)suricata.yaml" -i eth0"
 	@echo ""
 	@echo "The Emerging Threats Open rules are now installed. Rules can be"
 	@echo "updated and managed with the suricata-update tool."
 	@echo ""
 	@echo "For more information please see:"
-	@echo "  https://suricata.readthedocs.io/en/latest/rule-management/index.html"
+	@echo "  https://docs.suricata.io/en/latest/rule-management/index.html"
 	@echo ""
+
+install-library:
+	cd src && $(MAKE) $@
+	cd rust && $(MAKE) $@
+	$(INSTALL) libsuricata-config "$(DESTDIR)$(bindir)/libsuricata-config"
+
+install-headers:
+	cd src && $(MAKE) $@
+
+compile-commands:
+if HAVE_CLANG
+	$(MAKE) -C src clean
+	TMP_DIR=$$(mktemp -d --suffix=.suricata-compile-commands) && \
+	$(MAKE) EXTRA_CFLAGS="-MJ $$TMP_DIR/\$$*.json" && \
+	echo '[' > $(top_builddir)/compile_commands.json && \
+	cat $$TMP_DIR/*.json >> $(top_builddir)/compile_commands.json && \
+	echo ']' >> $(top_builddir)/compile_commands.json && \
+	rm -rf $$TMP_DIR
+else
+	@echo "clang compile_commands.json generation not supported with current compiler"
+endif

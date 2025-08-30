@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __HOST_H__
-#define __HOST_H__
+#ifndef SURICATA_HOST_H
+#define SURICATA_HOST_H
 
 #include "decode.h"
 #include "util-storage.h"
@@ -68,9 +68,6 @@ typedef struct Host_ {
     /** pointers to iprep storage */
     void *iprep;
 
-    /** storage api handle */
-    Storage *storage;
-
     /** hash pointers, protected by hash row mutex/spin */
     struct Host_ *hnext;
     struct Host_ *hprev;
@@ -78,6 +75,9 @@ typedef struct Host_ {
     /** list pointers, protected by host-queue mutex/spin */
     struct Host_ *lnext;
     struct Host_ *lprev;
+
+    /** storage api handle */
+    Storage storage[];
 } Host;
 
 typedef struct HostHashRow_ {
@@ -133,7 +133,7 @@ SC_ATOMIC_EXTERN(uint64_t,host_memuse);
 SC_ATOMIC_EXTERN(uint32_t,host_counter);
 SC_ATOMIC_EXTERN(uint32_t,host_prune_idx);
 
-void HostInitConfig(char quiet);
+void HostInitConfig(bool quiet);
 void HostShutdown(void);
 void HostCleanup(void);
 
@@ -143,7 +143,6 @@ void HostRelease(Host *);
 void HostLock(Host *);
 void HostClearMemory(Host *);
 void HostMoveToSpare(Host *);
-uint32_t HostSpareQueueGetSize(void);
 void HostPrintStats (void);
 
 void HostRegisterUnittests(void);
@@ -157,5 +156,4 @@ int HostSetMemcap(uint64_t);
 uint64_t HostGetMemcap(void);
 uint64_t HostGetMemuse(void);
 
-#endif /* __HOST_H__ */
-
+#endif /* SURICATA_HOST_H */

@@ -184,7 +184,7 @@ static inline void ConsolidateBackward(TcpStream *stream,
 
 static int Insert(TcpStream *stream, struct TCPSACK *tree, uint32_t le, uint32_t re)
 {
-    SCLogDebug("* inserting: %u/%u\n", le, re);
+    SCLogDebug("inserting: %u-%u", le, re);
 
     struct StreamTcpSackRecord *sa = StreamTcpSackRecordAlloc();
     if (unlikely(sa == NULL))
@@ -248,21 +248,47 @@ static int StreamTcpSackInsertRange(TcpStream *stream, uint32_t le, uint32_t re)
  */
 int StreamTcpSackUpdatePacket(TcpStream *stream, Packet *p)
 {
+    SCEnter();
+
+    const TCPHdr *tcph = PacketGetTCP(p);
     const int records = TCP_GET_SACK_CNT(p);
-    const uint8_t *data = TCP_GET_SACK_PTR(p);
+    const uint8_t *data = TCP_GET_SACK_PTR(p, tcph);
 
     if (records == 0 || data == NULL)
-        return 0;
+        SCReturnInt(0);
 
     TCPOptSackRecord rec[records], *sack_rec = rec;
     memcpy(&rec, data, sizeof(TCPOptSackRecord) * records);
+
+    uint32_t first_le = 0;
+    uint32_t first_re = 0;
 
     for (int record = 0; record < records; record++) {
         const uint32_t le = SCNtohl(sack_rec->le);
         const uint32_t re = SCNtohl(sack_rec->re);
 
-        SCLogDebug("%p last_ack %u, left edge %u, right edge %u", sack_rec,
-            stream->last_ack, le, re);
+        if (!first_le)
+            first_le = le;
+        if (!first_re)
+            first_re = re;
+
+        SCLogDebug("%p last_ack %u, left edge %u, right edge %u pkt ACK %u", sack_rec,
+                stream->last_ack, le, re, TCP_GET_RAW_ACK(tcph));
+
+        /* RFC 2883 D-SACK */
+        if (SEQ_LT(le, TCP_GET_RAW_ACK(tcph))) {
+            SCLogDebug("packet: %" PRIu64 ": D-SACK? %u-%u before ACK %u", p->pcap_cnt, le, re,
+                    TCP_GET_RAW_ACK(tcph));
+            STREAM_PKT_FLAG_SET(p, STREAM_PKT_FLAG_DSACK);
+            goto next;
+        } else if (record == 1) { // 2nd record
+            if (SEQ_GEQ(first_le, le) && SEQ_LEQ(first_re, re)) {
+                SCLogDebug("packet: %" PRIu64 ": D-SACK? %u-%u inside 2nd range %u-%u ACK %u",
+                        p->pcap_cnt, first_le, first_re, le, re, TCP_GET_RAW_ACK(tcph));
+                STREAM_PKT_FLAG_SET(p, STREAM_PKT_FLAG_DSACK);
+            }
+            goto next;
+        }
 
         if (SEQ_LEQ(re, stream->last_ack)) {
             SCLogDebug("record before last_ack");
@@ -292,6 +318,86 @@ int StreamTcpSackUpdatePacket(TcpStream *stream, Packet *p)
     StreamTcpSackPrintList(stream);
 #endif
     SCReturnInt(0);
+}
+
+static inline int CompareOverlap(
+        struct StreamTcpSackRecord *lookup, struct StreamTcpSackRecord *intree)
+{
+    if (lookup->re <= intree->le) // entirely before
+        return -1;
+    else if (lookup->re >= intree->le && lookup->le < intree->re) // (some) overlap
+        return 0;
+    else
+        return 1; // entirely after
+}
+
+static struct StreamTcpSackRecord *FindOverlap(
+        struct TCPSACK *head, struct StreamTcpSackRecord *elm)
+{
+    SCLogDebug("looking up le:%u re:%u", elm->le, elm->re);
+
+    struct StreamTcpSackRecord *tmp = RB_ROOT(head);
+    struct StreamTcpSackRecord *res = NULL;
+    while (tmp) {
+        SCLogDebug("compare with le:%u re:%u", tmp->le, tmp->re);
+        const int comp = CompareOverlap(elm, tmp);
+        SCLogDebug("compare result: %d", comp);
+        if (comp < 0) {
+            res = tmp;
+            tmp = RB_LEFT(tmp, rb);
+        } else if (comp > 0) {
+            tmp = RB_RIGHT(tmp, rb);
+        } else {
+            return tmp;
+        }
+    }
+    return res;
+}
+
+bool StreamTcpSackPacketIsOutdated(TcpStream *stream, Packet *p)
+{
+    const TCPHdr *tcph = PacketGetTCP(p);
+    const int records = TCP_GET_SACK_CNT(p);
+    const uint8_t *data = TCP_GET_SACK_PTR(p, tcph);
+    if (records > 0 && data != NULL) {
+        int sack_outdated = 0;
+        TCPOptSackRecord rec[records], *sack_rec = rec;
+        memcpy(&rec, data, sizeof(TCPOptSackRecord) * records);
+        for (int record = 0; record < records; record++) {
+            const uint32_t le = SCNtohl(sack_rec->le);
+            const uint32_t re = SCNtohl(sack_rec->re);
+            SCLogDebug("%p last_ack %u, left edge %u, right edge %u", sack_rec, stream->last_ack,
+                    le, re);
+
+            struct StreamTcpSackRecord lookup = { .le = le, .re = re };
+            struct StreamTcpSackRecord *res = FindOverlap(&stream->sack_tree, &lookup);
+            SCLogDebug("res %p", res);
+            if (res) {
+                if (le >= res->le && re <= res->re) {
+                    SCLogDebug("SACK rec le:%u re:%u eclipsed by in tree le:%u re:%u", le, re,
+                            res->le, res->re);
+                    sack_outdated++;
+                } else {
+                    SCLogDebug("SACK rec le:%u re:%u SACKs new DATA vs in tree le:%u re:%u", le, re,
+                            res->le, res->re);
+                }
+            } else {
+                SCLogDebug("SACK rec le:%u re:%u SACKs new DATA. No match in tree", le, re);
+            }
+            sack_rec++;
+        }
+#ifdef DEBUG
+        StreamTcpSackPrintList(stream);
+#endif
+        if (records != sack_outdated) {
+            // SACK tree needs updating
+            return false;
+        } else {
+            // SACK list is packet is completely outdated
+            return true;
+        }
+    }
+    return false;
 }
 
 void StreamTcpSackPruneList(TcpStream *stream)

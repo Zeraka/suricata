@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2017 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -53,11 +53,13 @@
 
 #include "util-debug.h"
 #include "util-privs.h"
+#include "util-datalink.h"
 
 #include "detect.h"
 #include "detect-engine-state.h"
 #include "stream.h"
 
+#include "app-layer-frames.h"
 #include "app-layer-parser.h"
 #include "app-layer.h"
 
@@ -65,37 +67,32 @@
 
 /**
  * \internal
- * \brief Pseudo packet setup for flow forced reassembly.
+ * \brief Pseudo packet setup to finish a flow when needed.
  *
+ * \param p         a dummy pseudo packet from packet pool.  Not all pseudo
+ *                  packets need to force reassembly, in which case we just
+ *                  set dummy ack/seq values.
  * \param direction Direction of the packet.  0 indicates toserver and 1
  *                  indicates toclient.
  * \param f         Pointer to the flow.
  * \param ssn       Pointer to the tcp session.
- * \param dummy     Indicates to create a dummy pseudo packet.  Not all pseudo
- *                  packets need to force reassembly, in which case we just
- *                  set dummy ack/seq values.
+ * \retval          pseudo packet with everything set up
  */
-static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
-                                                           int direction,
-                                                           Flow *f,
-                                                           TcpSession *ssn)
+static inline Packet *FlowPseudoPacketSetup(
+        Packet *p, int direction, Flow *f, const TcpSession *ssn)
 {
+    const int orig_dir = direction;
     p->tenant_id = f->tenant_id;
-    p->datalink = DLT_RAW;
+    p->datalink = DatalinkGetGlobalType();
     p->proto = IPPROTO_TCP;
     FlowReference(&p->flow, f);
     p->flags |= PKT_STREAM_EST;
-    p->flags |= PKT_STREAM_EOF;
     p->flags |= PKT_HAS_FLOW;
     p->flags |= PKT_PSEUDO_STREAM_END;
-    p->vlan_id[0] = f->vlan_id[0];
-    p->vlan_id[1] = f->vlan_id[1];
+    memcpy(&p->vlan_id[0], &f->vlan_id[0], sizeof(p->vlan_id));
     p->vlan_idx = f->vlan_idx;
     p->livedev = (struct LiveDevice_ *)f->livedev;
 
-    if (f->flags & FLOW_NOPACKET_INSPECTION) {
-        DecodeSetNoPacketInspectionFlag(p);
-    }
     if (f->flags & FLOW_NOPAYLOAD_INSPECTION) {
         DecodeSetNoPayloadInspectionFlag(p);
     }
@@ -133,26 +130,26 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
             }
         }
         /* set the ip header */
-        p->ip4h = (IPV4Hdr *)GET_PKT_DATA(p);
+        IPV4Hdr *ip4h = PacketSetIPV4(p, GET_PKT_DATA(p));
         /* version 4 and length 20 bytes for the tcp header */
-        p->ip4h->ip_verhl = 0x45;
-        p->ip4h->ip_tos = 0;
-        p->ip4h->ip_len = htons(40);
-        p->ip4h->ip_id = 0;
-        p->ip4h->ip_off = 0;
-        p->ip4h->ip_ttl = 64;
-        p->ip4h->ip_proto = IPPROTO_TCP;
+        ip4h->ip_verhl = 0x45;
+        ip4h->ip_tos = 0;
+        ip4h->ip_len = htons(40);
+        ip4h->ip_id = 0;
+        ip4h->ip_off = 0;
+        ip4h->ip_ttl = 64;
+        ip4h->ip_proto = IPPROTO_TCP;
         //p->ip4h->ip_csum =
         if (direction == 0) {
-            p->ip4h->s_ip_src.s_addr = f->src.addr_data32[0];
-            p->ip4h->s_ip_dst.s_addr = f->dst.addr_data32[0];
+            ip4h->s_ip_src.s_addr = f->src.addr_data32[0];
+            ip4h->s_ip_dst.s_addr = f->dst.addr_data32[0];
         } else {
-            p->ip4h->s_ip_src.s_addr = f->dst.addr_data32[0];
-            p->ip4h->s_ip_dst.s_addr = f->src.addr_data32[0];
+            ip4h->s_ip_src.s_addr = f->dst.addr_data32[0];
+            ip4h->s_ip_dst.s_addr = f->src.addr_data32[0];
         }
 
         /* set the tcp header */
-        p->tcph = (TCPHdr *)((uint8_t *)GET_PKT_DATA(p) + 20);
+        PacketSetTCP(p, GET_PKT_DATA(p) + 20);
 
         SET_PKT_LEN(p, 40); /* ipv4 hdr + tcp hdr */
 
@@ -178,83 +175,82 @@ static inline Packet *FlowForceReassemblyPseudoPacketSetup(Packet *p,
             }
         }
         /* set the ip header */
-        p->ip6h = (IPV6Hdr *)GET_PKT_DATA(p);
+        IPV6Hdr *ip6h = PacketSetIPV6(p, GET_PKT_DATA(p));
         /* version 6 */
-        p->ip6h->s_ip6_vfc = 0x60;
-        p->ip6h->s_ip6_flow = 0;
-        p->ip6h->s_ip6_nxt = IPPROTO_TCP;
-        p->ip6h->s_ip6_plen = htons(20);
-        p->ip6h->s_ip6_hlim = 64;
+        ip6h->s_ip6_vfc = 0x60;
+        ip6h->s_ip6_flow = 0;
+        ip6h->s_ip6_nxt = IPPROTO_TCP;
+        ip6h->s_ip6_plen = htons(20);
+        ip6h->s_ip6_hlim = 64;
         if (direction == 0) {
-            p->ip6h->s_ip6_src[0] = f->src.addr_data32[0];
-            p->ip6h->s_ip6_src[1] = f->src.addr_data32[1];
-            p->ip6h->s_ip6_src[2] = f->src.addr_data32[2];
-            p->ip6h->s_ip6_src[3] = f->src.addr_data32[3];
-            p->ip6h->s_ip6_dst[0] = f->dst.addr_data32[0];
-            p->ip6h->s_ip6_dst[1] = f->dst.addr_data32[1];
-            p->ip6h->s_ip6_dst[2] = f->dst.addr_data32[2];
-            p->ip6h->s_ip6_dst[3] = f->dst.addr_data32[3];
+            ip6h->s_ip6_src[0] = f->src.addr_data32[0];
+            ip6h->s_ip6_src[1] = f->src.addr_data32[1];
+            ip6h->s_ip6_src[2] = f->src.addr_data32[2];
+            ip6h->s_ip6_src[3] = f->src.addr_data32[3];
+            ip6h->s_ip6_dst[0] = f->dst.addr_data32[0];
+            ip6h->s_ip6_dst[1] = f->dst.addr_data32[1];
+            ip6h->s_ip6_dst[2] = f->dst.addr_data32[2];
+            ip6h->s_ip6_dst[3] = f->dst.addr_data32[3];
         } else {
-            p->ip6h->s_ip6_src[0] = f->dst.addr_data32[0];
-            p->ip6h->s_ip6_src[1] = f->dst.addr_data32[1];
-            p->ip6h->s_ip6_src[2] = f->dst.addr_data32[2];
-            p->ip6h->s_ip6_src[3] = f->dst.addr_data32[3];
-            p->ip6h->s_ip6_dst[0] = f->src.addr_data32[0];
-            p->ip6h->s_ip6_dst[1] = f->src.addr_data32[1];
-            p->ip6h->s_ip6_dst[2] = f->src.addr_data32[2];
-            p->ip6h->s_ip6_dst[3] = f->src.addr_data32[3];
+            ip6h->s_ip6_src[0] = f->dst.addr_data32[0];
+            ip6h->s_ip6_src[1] = f->dst.addr_data32[1];
+            ip6h->s_ip6_src[2] = f->dst.addr_data32[2];
+            ip6h->s_ip6_src[3] = f->dst.addr_data32[3];
+            ip6h->s_ip6_dst[0] = f->src.addr_data32[0];
+            ip6h->s_ip6_dst[1] = f->src.addr_data32[1];
+            ip6h->s_ip6_dst[2] = f->src.addr_data32[2];
+            ip6h->s_ip6_dst[3] = f->src.addr_data32[3];
         }
 
         /* set the tcp header */
-        p->tcph = (TCPHdr *)((uint8_t *)GET_PKT_DATA(p) + 40);
+        PacketSetTCP(p, GET_PKT_DATA(p) + 40);
 
         SET_PKT_LEN(p, 60); /* ipv6 hdr + tcp hdr */
     }
 
-    p->tcph->th_offx2 = 0x50;
-    p->tcph->th_flags |= TH_ACK;
-    p->tcph->th_win = 10;
-    p->tcph->th_urp = 0;
+    p->l4.hdrs.tcph->th_offx2 = 0x50;
+    p->l4.hdrs.tcph->th_flags = 0;
+    p->l4.hdrs.tcph->th_win = 10;
+    p->l4.hdrs.tcph->th_urp = 0;
 
     /* to server */
-    if (direction == 0) {
-        p->tcph->th_sport = htons(f->sp);
-        p->tcph->th_dport = htons(f->dp);
+    if (orig_dir == 0) {
+        p->l4.hdrs.tcph->th_sport = htons(f->sp);
+        p->l4.hdrs.tcph->th_dport = htons(f->dp);
 
-        p->tcph->th_seq = htonl(ssn->client.next_seq);
-        p->tcph->th_ack = htonl(ssn->server.last_ack);
+        p->l4.hdrs.tcph->th_seq = htonl(ssn->client.next_seq);
+        p->l4.hdrs.tcph->th_ack = 0;
 
         /* to client */
     } else {
-        p->tcph->th_sport = htons(f->dp);
-        p->tcph->th_dport = htons(f->sp);
+        p->l4.hdrs.tcph->th_sport = htons(f->dp);
+        p->l4.hdrs.tcph->th_dport = htons(f->sp);
 
-        p->tcph->th_seq = htonl(ssn->server.next_seq);
-        p->tcph->th_ack = htonl(ssn->client.last_ack);
+        p->l4.hdrs.tcph->th_seq = htonl(ssn->server.next_seq);
+        p->l4.hdrs.tcph->th_ack = 0;
     }
 
     if (FLOW_IS_IPV4(f)) {
-        p->tcph->th_sum = TCPChecksum(p->ip4h->s_ip_addrs,
-                                               (uint16_t *)p->tcph, 20, 0);
+        IPV4Hdr *ip4h = p->l3.hdrs.ip4h;
+        p->l4.hdrs.tcph->th_sum = TCPChecksum(ip4h->s_ip_addrs, (uint16_t *)p->l4.hdrs.tcph, 20, 0);
         /* calc ipv4 csum as we may log it and barnyard might reject
          * a wrong checksum */
-        p->ip4h->ip_csum = IPV4Checksum((uint16_t *)p->ip4h,
-                IPV4_GET_RAW_HLEN(p->ip4h), 0);
+        ip4h->ip_csum = IPV4Checksum((uint16_t *)ip4h, IPV4_GET_RAW_HLEN(ip4h), 0);
     } else if (FLOW_IS_IPV6(f)) {
-        p->tcph->th_sum = TCPChecksum(p->ip6h->s_ip6_addrs,
-                                              (uint16_t *)p->tcph, 20, 0);
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        p->l4.hdrs.tcph->th_sum =
+                TCPChecksum(ip6h->s_ip6_addrs, (uint16_t *)p->l4.hdrs.tcph, 20, 0);
     }
 
-    memset(&p->ts, 0, sizeof(struct timeval));
-    TimeGet(&p->ts);
+    p->ts = TimeGet();
 
     if (direction == 0) {
         if (f->alparser && !STREAM_HAS_SEEN_DATA(&ssn->client)) {
-            AppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TS);
+            SCAppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TS);
         }
     } else {
         if (f->alparser && !STREAM_HAS_SEEN_DATA(&ssn->server)) {
-            AppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TC);
+            SCAppLayerParserStateSetFlag(f->alparser, APP_LAYER_PARSER_EOF_TC);
         }
     }
 
@@ -265,12 +261,7 @@ error:
     return NULL;
 }
 
-Packet *FlowForceReassemblyPseudoPacketGet(int direction,
-                                                         Flow *f,
-                                                         TcpSession *ssn);
-Packet *FlowForceReassemblyPseudoPacketGet(int direction,
-                                                         Flow *f,
-                                                         TcpSession *ssn)
+Packet *FlowPseudoPacketGet(int direction, Flow *f, const TcpSession *ssn)
 {
     PacketPoolWait();
     Packet *p = PacketPoolGetPacket();
@@ -280,7 +271,7 @@ Packet *FlowForceReassemblyPseudoPacketGet(int direction,
 
     PACKET_PROFILING_START(p);
 
-    return FlowForceReassemblyPseudoPacketSetup(p, direction, f, ssn);
+    return FlowPseudoPacketSetup(p, direction, f, ssn);
 }
 
 /**
@@ -288,19 +279,18 @@ Packet *FlowForceReassemblyPseudoPacketGet(int direction,
  *
  *  \param f *LOCKED* flow
  *
- *  \retval 0 no
- *  \retval 1 yes
+ *  \retval false no
+ *  \retval true yes
  */
-int FlowForceReassemblyNeedReassembly(Flow *f)
+bool FlowNeedsReassembly(Flow *f)
 {
-
     if (f == NULL || f->protoctx == NULL) {
-        SCReturnInt(0);
+        return false;
     }
 
     TcpSession *ssn = (TcpSession *)f->protoctx;
-    int client = StreamNeedsReassembly(ssn, STREAM_TOSERVER);
-    int server = StreamNeedsReassembly(ssn, STREAM_TOCLIENT);
+    uint8_t client = StreamNeedsReassembly(ssn, STREAM_TOSERVER);
+    uint8_t server = StreamNeedsReassembly(ssn, STREAM_TOCLIENT);
 
     /* if state is not fully closed we assume that we haven't fully
      * inspected the app layer state yet */
@@ -324,55 +314,64 @@ int FlowForceReassemblyNeedReassembly(Flow *f)
         }
     }
 
+    /* if any frame is present we assume it still needs work */
+    FramesContainer *frames_container = AppLayerFramesGetContainer(f);
+    if (frames_container) {
+        if (frames_container->toserver.cnt)
+            client = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+        if (frames_container->toclient.cnt)
+            server = STREAM_HAS_UNPROCESSED_SEGMENTS_NEED_ONLY_DETECTION;
+    }
+
     /* nothing to do */
     if (client == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE &&
         server == STREAM_HAS_UNPROCESSED_SEGMENTS_NONE) {
-        SCReturnInt(0);
+        return false;
     }
 
     f->ffr_ts = client;
     f->ffr_tc = server;
-    SCReturnInt(1);
+    return true;
 }
 
 /**
  * \internal
- * \brief Forces reassembly for flow if it needs it.
+ * \brief Sends the flow to its respective thread's flow queue.
  *
  *        The function requires flow to be locked beforehand.
  *
- * \param f Pointer to the flow.
+ * Normally, the first thread_id value should be used. This is when the flow is
+ * created on seeing the first packet to the server; when the flow's reversed
+ * flag is set, choose the second thread_id (to client/source).
  *
- * \retval 0 This flow doesn't need any reassembly processing; 1 otherwise.
+ * \param f Pointer to the flow.
  */
-int FlowForceReassemblyForFlow(Flow *f)
+void FlowSendToLocalThread(Flow *f)
 {
-    const int thread_id = (int)f->thread_id[0];
-    TmThreadsInjectFlowById(f, thread_id);
-    return 1;
+    // Choose the thread_id based on whether the flow has been
+    // reversed.
+    int idx = f->flags & FLOW_DIR_REVERSED ? 1 : 0;
+    TmThreadsInjectFlowById(f, (const int)f->thread_id[idx]);
 }
 
 /**
  * \internal
- * \brief Forces reassembly for flows that need it.
+ * \brief Remove flows from the hash bucket as they have more work to be done in
+ *        in the detection engine.
  *
  * When this function is called we're running in virtually dead engine,
  * so locking the flows is not strictly required. The reasons it is still
  * done are:
  * - code consistency
  * - silence complaining profilers
- * - allow us to aggressively check using debug valdation assertions
+ * - allow us to aggressively check using debug validation assertions
  * - be robust in case of future changes
- * - locking overhead if neglectable when no other thread fights us
- *
- * \param q The queue to process flows from.
+ * - locking overhead is negligible when no other thread fights us
  */
-static inline void FlowForceReassemblyForHash(void)
+static inline void FlowRemoveHash(void)
 {
     for (uint32_t idx = 0; idx < flow_config.hash_size; idx++) {
         FlowBucket *fb = &flow_hash[idx];
-
-        PacketPoolWaitForN(9);
         FBLOCK_LOCK(fb);
 
         Flow *f = fb->head;
@@ -381,7 +380,6 @@ static inline void FlowForceReassemblyForHash(void)
         /* we need to loop through all the flows in the queue */
         while (f != NULL) {
             Flow *next_f = f->next;
-            PacketPoolWaitForN(3);
 
             FLOWLOCK_WRLOCK(f);
 
@@ -397,10 +395,11 @@ static inline void FlowForceReassemblyForHash(void)
 
             /* in case of additional work, we pull the flow out of the
              * hash and xfer ownership to the injected packet(s) */
-            if (FlowForceReassemblyNeedReassembly(f) == 1) {
+            if (FlowNeedsReassembly(f)) {
                 RemoveFromHash(f, prev_f);
                 f->flow_end_flags |= FLOW_END_FLAG_SHUTDOWN;
-                FlowForceReassemblyForFlow(f);
+                FlowSendToLocalThread(f);
+                FLOWLOCK_UNLOCK(f);
                 f = next_f;
                 continue;
             }
@@ -413,15 +412,14 @@ static inline void FlowForceReassemblyForHash(void)
         }
         FBLOCK_UNLOCK(fb);
     }
-    return;
 }
 
 /**
- * \brief Force reassembly for all the flows that have unprocessed segments.
+ * \brief Clean up all the flows that have unprocessed segments and have
+ *        some work to do in the detection engine.
  */
-void FlowForceReassembly(void)
+void FlowWorkToDoCleanup(void)
 {
-    /* Carry out flow reassembly for unattended flows */
-    FlowForceReassemblyForHash();
-    return;
+    /* Carry out cleanup of unattended flows */
+    FlowRemoveHash();
 }

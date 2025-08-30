@@ -21,22 +21,9 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_FILESIZE_H__
-#define	__DETECT_FILESIZE_H__
+#ifndef SURICATA_DETECT_FILESIZE_H
+#define SURICATA_DETECT_FILESIZE_H
 
-#define DETECT_FILESIZE_LT   0   /**< "less than" operator */
-#define DETECT_FILESIZE_GT   1   /**< "greater than" operator */
-#define DETECT_FILESIZE_RA   2   /**< range operator */
-#define DETECT_FILESIZE_EQ   3   /**< equal operator */
-
-typedef struct DetectFilesizeData_ {
-    uint64_t size1;     /**< 1st value in the signature*/
-    uint64_t size2;     /**< 2nd value in the signature*/
-    uint8_t mode;       /**< operator used in the signature */
-} DetectFilesizeData;
-
-//int DetectFilesizeMatch (ThreadVars *, DetectEngineThreadCtx *, Flow *,
-//                       uint8_t, void *, Signature *, SigMatch *);
 void DetectFilesizeRegister(void);
 
 #endif	/* _DETECT_URILEN_H */

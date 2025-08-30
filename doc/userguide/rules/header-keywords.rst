@@ -1,4 +1,3 @@
-
 .. role:: example-rule-emphasis
 
 IP Keywords
@@ -10,17 +9,19 @@ ttl
 The ttl keyword is used to check for a specific IP time-to-live value
 in the header of a packet. The format is::
 
-  ttl:<number>
+  ttl:<number>;
 
 For example::
 
   ttl:10;
 
+ttl uses an :ref:`unsigned 8-bit integer <rules-integer-keywords>`.
+
 At the end of the ttl keyword you can enter the value on which you
 want to match. The Time-to-live value determines the maximal amount
 of time a packet can be in the Internet-system. If this field is set
 to 0, then the packet has to be destroyed. The time-to-live is based
-on hop count. Each hop/router the packet passes subtracts one of the
+on hop count. Each hop/router the packet passes subtracts one from the
 packet TTL counter. The purpose of this mechanism is to limit the
 existence of packets so that packets can not end up in infinite
 routing loops.
@@ -29,7 +30,8 @@ Example of the ttl keyword in a rule:
 
 .. container:: example-rule
 
-    alert ip $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL MISC 0 ttl"; :example-rule-emphasis:`ttl:0;` reference:url,support.microsoft.com/default.aspx?scid=kb#-#-EN-US#-#-q138268; reference:url,www.isi.edu/in-notes/rfc1122.txt; classtype:misc-activity; sid:2101321; rev:9;)
+    alert ip $EXTERNAL_NET any -> $HOME_NET any (msg:"IP Packet With TTL 0";
+    :example-rule-emphasis:`ttl:0;` classtype:misc-activity; sid:1; rev:1;)
 
 ipopts
 ^^^^^^
@@ -55,17 +57,17 @@ any        any IP options are set
 
 Format of the ipopts keyword::
 
-  ipopts: <name>
+  ipopts: <name>;
 
 For example::
 
-  ipopts: lsrr;
+  ipopts: ts;
 
 Example of ipopts in a rule:
 
 .. container:: example-rule
 
-    alert ip $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL MISC source route ssrr"; :example-rule-emphasis:`ipopts:ssrr;` reference:arachnids,422; classtype:bad-unknown; sid:2100502; rev:3;)
+    alert ip $EXTERNAL_NET any -> $HOME_NET any (msg:"IP Packet with timestamp option"; :example-rule-emphasis:`ipopts:ts;` classtype:misc-activity; sid:2; rev:1;)
 
 sameip
 ^^^^^^
@@ -82,7 +84,7 @@ Example of sameip in a rule:
 
 .. container:: example-rule
 
-    alert ip any any -> any any (msg:"GPL SCAN same SRC/DST"; :example-rule-emphasis:`sameip;` reference:bugtraq,2666; reference:cve,1999-0016; reference:url,www.cert.org/advisories/CA-1997-28.html; classtype:bad-unknown; sid:2100527; rev:9;)
+    alert ip any any -> any any (msg:"IP Packet with the same source and destination IP"; :example-rule-emphasis:`sameip;` classtype:bad-unknown; sid:3; rev:1;)
 
 ip_proto
 ^^^^^^^^
@@ -105,30 +107,39 @@ Example of ip_proto in a rule:
 
 .. container:: example-rule
 
-    alert ip any any -> any any (msg:"GPL MISC IP Proto 103 PIM"; :example-rule-emphasis:`ip_proto:103;` reference:bugtraq,8211; reference:cve,2003-0567; classtype:non-standard-protocol; sid:2102189; rev:4;)
+    alert ip any any -> any any (msg:"IP Packet with protocol 1"; :example-rule-emphasis:`ip_proto:1;` classtype:bad-unknown; sid:5; rev:1;)
 
 The named variant of that example would be::
 
-    ip_proto:PIM
+    ip_proto:ICMP;
 
 ipv4.hdr
 ^^^^^^^^
 
-Sticky buffer to match on the whole IPv4 header.
+Sticky buffer to match on content contained within an IPv4 header.
 
 Example rule:
 
 .. container:: example-rule
 
-    alert ip any any -> any any (:example-rule-emphasis:`ipv4.hdr; content:"|3A|"; offset:9; depth:1;` sid:1234; rev:5;)
+    alert ip any any -> any any (msg:"IPv4 header keyword example"; :example-rule-emphasis:`ipv4.hdr; content:"|06|"; offset:9; depth:1;` sid:1; rev:1;)
 
-This example looks if byte 9 of IPv4 header has value 3A.
-That means that the IPv4 protocol is ICMPv6.
+This example looks if byte 10 of IPv4 header has value 06, which indicates that
+the IPv4 protocol is TCP.
 
 ipv6.hdr
 ^^^^^^^^
 
-Sticky buffer to match on the whole IPv6 header.
+Sticky buffer to match on content contained within an IPv6 header.
+
+Example rule:
+
+.. container:: example-rule
+
+    alert ip any any -> any any (msg:"IPv6 header keyword example"; :example-rule-emphasis:`ipv6.hdr; content:"|06|"; offset:6; depth:1;` sid:1; rev:1;)
+
+This example looks if byte 7 of IP64 header has value 06, which indicates that
+the IPv6 protocol is TCP.
 
 id
 ^^
@@ -150,11 +161,11 @@ Example of id in a rule:
 
 .. container:: example-rule
 
-    alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"ET DELETED F5 BIG-IP 3DNS TCP Probe 1"; :example-rule-emphasis:`id: 1;` dsize: 24; flags: S,12; content:"\|00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\|"; window: 2048; reference:url,www.f5.com/f5products/v9intro/index.html; reference:url,doc.emergingthreats.net/2001609; classtype:misc-activity; sid:2001609; rev:13;)
+    alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"id keyword example"; :example-rule-emphasis:`id:1;` content:"content|3a 20|"; fast_pattern; classtype:misc-activity; sid:12; rev:1;)
 
 geoip
 ^^^^^
-The geoip keyword enables (you) to match on the source, destination or
+The geoip keyword enables matching on the source, destination or
 source and destination IPv4 addresses of network traffic, and to see to
 which country it belongs. To be able to do this, Suricata uses the GeoIP2
 API of MaxMind.
@@ -167,22 +178,19 @@ The syntax of geoip::
   geoip: both,US,CA,UK;
   geoip: any,CN,IR;
 
-So, you can see you can use the following to make clear on which
-direction you would like to match
-
 ====== =============================================================
 Option Description
 ====== =============================================================
-both   Both directions have to match with the given geoip(s)
-any    One of the directions has to match with the given geoip(s).
-dest   If the destination matches with the given geoip.
+both   Both source and destination have to match with the given geoip(s)
+any    Either the source or the destination has to match with the given geoip(s).
+dest   The destination matches with the given geoip.
 src    The source matches with the given geoip.
 ====== =============================================================
 
-The keyword only supports IPv4. As it uses the GeoIP2 API of MaxMind,
+geoip currently only supports IPv4. As it uses the GeoIP2 API of MaxMind,
 libmaxminddb must be compiled in. You must download and install the
 GeoIP2 or GeoLite2 database editions desired. Visit the MaxMind site
-at https://dev.maxmind.com/geoip/geoip2/geolite2/ for details.
+at https://dev.maxmind.com/geoip/geolite2-free-geolocation-data for details.
 
 You must also supply the location of the GeoIP2 or GeoLite2 database
 file on the local system in the YAML-file configuration (for example)::
@@ -222,7 +230,7 @@ Example of fragbits in a rule:
 
 .. container:: example-rule
 
-   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"ET EXPLOIT Invalid non-fragmented packet with fragment offset>0"; :example-rule-emphasis:`fragbits: M;` fragoffset: >0; reference:url,doc.emergingthreats.net/bin/view/Main/2001022; classtype:bad-unknown; sid:2001022; rev:5; metadata:created_at 2010_07_30, updated_at 2010_07_30;)
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"fragbits keyword example non-fragmented packet with fragment offset>0"; :example-rule-emphasis:`fragbits:M;` fragoffset:>0; classtype:bad-unknown; sid:123; rev:1;)
 
 fragoffset
 ^^^^^^^^^^
@@ -249,13 +257,13 @@ Example of fragoffset in a rule:
 
 .. container:: example-rule
 
-   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"ET EXPLOIT Invalid non-fragmented packet with fragment offset>0"; fragbits: M; :example-rule-emphasis:`fragoffset: >0;` reference:url,doc.emergingthreats.net/bin/view/Main/2001022; classtype:bad-unknown; sid:2001022; rev:5; metadata:created_at 2010_07_30, updated_at 2010_07_30;)
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"fragoffset keyword example invalid non-fragmented packet with fragment offset>0"; fragbits:M; :example-rule-emphasis:`fragoffset:>0;` classtype:bad-unknown; sid:13; rev:1;)
 
 tos
 ^^^
 
 The tos keyword can match on specific decimal values of the IP header TOS
-field. The tos keyword can be have a value from 0 - 255. This field of the
+field. The tos keyword can have a value from 0 - 255. This field of the
 IP header has been updated by `rfc2474 <https://tools.ietf.org/html/rfc2474>`_
 to include functionality for
 `Differentiated services <https://en.wikipedia.org/wiki/Differentiated_services>`_.
@@ -265,7 +273,7 @@ the value 0. When specifying a value for tos, ensure that the value follows this
 E.g, instead of specifying the decimal value 34 (hex 22), right shift twice and use
 decimal 136 (hex 88).
 
-You can specify hexadecimal values as with a leading `x`, e.g, `x88`.
+You can specify hexadecimal values with a leading `x`, e.g, `x88`.
 
 Format of tos::
 
@@ -275,31 +283,89 @@ Example of tos in a rule:
 
 .. container:: example-rule
 
-    alert ip any any -> any any (msg:"Differentiated Services Codepoint: Class Selector 1 (8)"; flow:established; :example-rule-emphasis:`tos:8;` classtype:not-suspicious; sid:2600115; rev:1;)
+    alert ip any any -> any any (msg:"tos keyword example tos value 8"; flow:established; :example-rule-emphasis:`tos:8;` classtype:not-suspicious; sid:123; rev:1;)
 
-Example of tos with negated values:
+Example of tos with a negated value:
 
 .. container:: example-rule
 
-    alert ip any any -> any any (msg:"TGI HUNT non-DiffServ aware TOS setting"; flow:established,to_server; :example-rule-emphasis:`tos:!0; tos:!8; tos:!16; tos:!24; tos:!32; tos:!40; tos:!48; tos:!56;` threshold:type limit, track by_src, seconds 60, count 1; classtype:bad-unknown; sid:2600124; rev:1;)
+    alert ip any any -> any any (msg:"tos keyword example with negated content"; flow:established,to_server; :example-rule-emphasis:`tos:!8;` classtype:bad-unknown; sid:14; rev:1;)
 
 
 TCP keywords
 ------------
 
+tcp.flags
+^^^^^^^^^
+
+The tcp.flags keyword checks for specific `TCP flag bits
+<https://en.wikipedia.org/wiki/Transmission_Control_Protocol#TCP_segment_structure>`_.
+
+The following flag bits may be checked:
+
+====  ====================================
+Flag  Description
+====  ====================================
+F     FIN - Finish
+S     SYN - Synchronize sequence numbers
+R     RST - Reset
+P     PSH - Push
+A     ACK - Acknowledgment
+U     URG - Urgent
+C     CWR - Congestion Window Reduced
+E     ECE - ECN-Echo
+0     No TCP Flags Set
+====  ====================================
+
+The following modifiers can be set to change the match criteria:
+
+========  ===================================
+Modifier  Description
+========  ===================================
+``+``     match on the bits, plus any others
+``*``     match if any of the bits are set
+``!``     match if the bits are not set
+========  ===================================
+
+To handle writing rules for session initiation packets such as ECN where a SYN
+packet is sent with CWR and ECE flags set, an option mask may be used by
+appending a comma and masked values. For example, a rule that checks for a SYN
+flag, regardless of the values of the reserved bits is ``tcp.flags:S,CE;``
+
+Format of tcp.flags::
+
+    tcp.flags:[modifier]<test flags>[,<ignore flags>];
+    tcp.flags:[!|*|+]<FSRPAUCE0>[,<FSRPAUCE>];
+
+Example:
+
+.. container:: example-rule
+
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig";
+   :example-rule-emphasis:`tcp.flags:FPU,CE;` classtype:misc-activity; sid:1; rev:1;)
+
+It is also possible to use the `tcp.flags` content as a fast_pattern by using the `prefilter` keyword. For more information on `prefilter` usage see :doc:`prefilter-keywords`.
+Example:
+
+.. container:: example-rule
+
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig";
+   :example-rule-emphasis:`tcp.flags:FPU,CE; prefilter;` classtype:misc-activity; sid:1; rev:1;)
+
 seq
 ^^^
-The seq keyword can be used in a signature to check for a specific TCP
+The ``seq`` keyword can be used in a signature to check for a specific TCP
 sequence number. A sequence number is a number that is generated
 practically at random by both endpoints of a TCP-connection. The
 client and the server both create a sequence number, which increases
-with one with every byte that they send. So this sequence number is
+by one with every byte that they send. So this sequence number is
 different for both sides. This sequence number has to be acknowledged
-by both sides of the connection. Through sequence numbers, TCP
-handles acknowledgement, order and retransmission. Its number
-increases with every data-byte the sender has send. The seq helps
+by both sides of the connection.
+
+Through sequence numbers, TCP handles acknowledgement, order and retransmission.
+Its number increases with every data-byte the sender has sent. The seq helps
 keeping track of to what place in a data-stream a byte belongs. If the
-SYN flag is set at 1, than the sequence number of the first byte of
+SYN flag is set at 1, then the sequence number of the first byte of
 the data is this number plus 1 (so, 2).
 
 Example::
@@ -320,42 +386,45 @@ Example of seq in a packet (Wireshark):
 ack
 ^^^
 
-The ack is the acknowledgement of the receipt of all previous
+The ``ack`` keyword can be used in a signature to check for a specific TCP
+acknowledgement number.
+
+The ``ack`` is the acknowledgement of the receipt of all previous
 (data)-bytes send by the other side of the TCP-connection. In most
 occasions every packet of a TCP connection has an ACK flag after the
 first SYN and a ack-number which increases with the receipt of every
-new data-byte. The ack keyword can be used in a signature to check
-for a specific TCP acknowledgement number.
+new data-byte.
 
-Format of ack::
+Format of ``ack``::
 
   ack:1;
 
-Example of ack in a signature:
+Example of ``ack`` in a signature:
 
 .. container:: example-rule
 
     alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL SCAN NULL"; flow:stateless; :example-rule-emphasis:`ack:0;` flags:0; seq:0; reference:arachnids,4; classtype:attempted-recon; sid:2100623; rev:7;)
 
-Example of ack in a packet (Wireshark):
+Example of ``ack`` in a packet (Wireshark):
 
 .. image:: header-keywords/Wireshark_ack.png
 
 window
 ^^^^^^
 
-The window keyword is used to check for a specific TCP window size.
+The ``window`` keyword is used to check for a specific TCP window size.
+
 The TCP window size is a mechanism that has control of the
 data-flow. The window is set by the receiver (receiver advertised
 window size) and indicates the amount of bytes that can be
 received. This amount of data has to be acknowledged by the receiver
-first, before the sender can send the same amount of new data. This
-mechanism is used to prevent the receiver from being overflowed by
-data. The value of the window size is limited and can be 2 to 65.535
-bytes. To make more use of your bandwidth you can use a bigger
-TCP-window.
+first, before the sender can send the same amount of new data.
 
-The format of the window keyword::
+This mechanism is used to prevent the receiver from being overflowed by
+data. The value of the window size is limited and can be 2 to 65.535 bytes.
+To make more use of your bandwidth you can use a bigger TCP-window.
+
+The format of the window keyword is::
 
   window:[!]<number>;
 
@@ -371,7 +440,9 @@ tcp.mss
 Match on the TCP MSS option value. Will not match if the option is not
 present.
 
-The format of the keyword::
+``tcp.mss`` uses an :ref:`unsigned 16-bit integer <rules-integer-keywords>`.
+
+The format of the keyword is::
 
   tcp.mss:<min>-<max>;
   tcp.mss:[<|>]<number>;
@@ -382,6 +453,26 @@ Example rule:
 .. container:: example-rule
 
     alert tcp $EXTERNAL_NET any -> $HOME_NET any (flow:stateless; flags:S,12; :example-rule-emphasis:`tcp.mss:<536;` sid:1234; rev:5;)
+
+tcp.wscale
+^^^^^^^^^^
+
+Match on the TCP window scaling option value. Will not match if the option is not
+present.
+
+``tcp.wscale`` uses an :ref:`unsigned 8-bit integer <rules-integer-keywords>`.
+
+The format of the keyword is::
+
+  tcp.wscale:<min>-<max>;
+  tcp.wscale:[<|>]<number>;
+  tcp.wscale:<value>;
+
+Example rule:
+
+.. container:: example-rule
+
+    alert tcp $EXTERNAL_NET any -> $HOME_NET any (flow:stateless; flags:S,12; :example-rule-emphasis:`tcp.wscale:>10;` sid:1234; rev:5;)
 
 tcp.hdr
 ^^^^^^^
@@ -446,6 +537,8 @@ messages. The different messages are distinct by different names, but
 more important by numeric values. For more information see the table
 with message-types and codes.
 
+itype uses an :ref:`unsigned 8-bit integer <rules-integer-keywords>`.
+
 The format of the itype keyword::
 
   itype:min<>max;
@@ -504,6 +597,8 @@ With the icode keyword you can match on a specific ICMP code. The
 code of a ICMP message clarifies the message. Together with the
 ICMP-type it indicates with what kind of problem you are dealing with.
 A code has a different purpose with every ICMP-type.
+
+icode uses an :ref:`unsigned 8-bit integer <rules-integer-keywords>`.
 
 The format of the icode keyword::
 
@@ -643,6 +738,17 @@ Example of icmp_seq in a rule:
 
     alert icmp $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL SCAN Broadscan Smurf Scanner"; dsize:4; icmp_id:0; :example-rule-emphasis:`icmp_seq:0;` itype:8; classtype:attempted-recon; sid:2100478; rev:4;)
 
+.. note:: Some pcap analysis tools, like wireshark, may give both a little
+  endian and big endian value for ``icmp_seq``. The ``icmp_seq`` keyword
+  matches on the big endian value, this is due to Suricata using the network
+  byte order (big endian) to perform the match comparison.
+
+
+icmpv4.hdr
+^^^^^^^^^^
+
+Sticky buffer to match on the whole ICMPv4 header.
+
 icmpv6.hdr
 ^^^^^^^^^^
 
@@ -653,6 +759,8 @@ icmpv6.mtu
 
 Match on the ICMPv6 MTU optional value. Will not match if the MTU is not
 present.
+
+icmpv6.mtu uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>`.
 
 The format of the keyword::
 

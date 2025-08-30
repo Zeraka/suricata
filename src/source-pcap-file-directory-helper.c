@@ -24,8 +24,11 @@
  */
 
 #include "source-pcap-file-directory-helper.h"
+#include "suricata.h"
 #include "runmode-unix-socket.h"
 #include "util-mem.h"
+#include "util-time.h"
+#include "util-path.h"
 #include "source-pcap-file.h"
 
 static void GetTime(struct timespec *tm);
@@ -41,6 +44,8 @@ static TmEcode PcapDirectoryPopulateBuffer(PcapFileDirectoryVars *ptv,
                                            struct timespec * older_than);
 static TmEcode PcapDirectoryDispatchForTimeRange(PcapFileDirectoryVars *pv,
                                                  struct timespec *older_than);
+
+extern PcapFileGlobalVars pcap_g;
 
 void GetTime(struct timespec *tm)
 {
@@ -131,11 +136,11 @@ TmEcode PcapDirectoryFailure(PcapFileDirectoryVars *ptv)
     TmEcode status = TM_ECODE_FAILED;
 
     if (unlikely(ptv == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Directory vars was null");
+        SCLogError("Directory vars was null");
         SCReturnInt(TM_ECODE_FAILED);
     }
     if (unlikely(ptv->shared == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Directory shared vars was null");
+        SCLogError("Directory shared vars was null");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -151,11 +156,11 @@ TmEcode PcapDirectoryDone(PcapFileDirectoryVars *ptv)
     TmEcode status = TM_ECODE_DONE;
 
     if (unlikely(ptv == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Directory vars was null");
+        SCLogError("Directory vars was null");
         SCReturnInt(TM_ECODE_FAILED);
     }
     if (unlikely(ptv->shared == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Directory shared vars was null");
+        SCLogError("Directory shared vars was null");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -176,36 +181,26 @@ TmEcode PcapDetermineDirectoryOrFile(char *filename, DIR **directory)
     if (temp_dir == NULL) {//if null, our filename may just be a normal file
         switch (errno) {
             case EACCES:
-                SCLogError(SC_ERR_FOPEN, "%s: Permission denied", filename);
+                SCLogError("%s: Permission denied", filename);
                 break;
 
             case EBADF:
-                SCLogError(SC_ERR_FOPEN,
-                           "%s: Not a valid file descriptor opened for reading",
-                           filename);
+                SCLogError("%s: Not a valid file descriptor opened for reading", filename);
                 break;
 
             case EMFILE:
-                SCLogError(SC_ERR_FOPEN,
-                           "%s: Per process open file descriptor limit reached",
-                           filename);
+                SCLogError("%s: Per process open file descriptor limit reached", filename);
                 break;
 
             case ENFILE:
-                SCLogError(SC_ERR_FOPEN,
-                           "%s: System wide open file descriptor limit reached",
-                           filename);
+                SCLogError("%s: System wide open file descriptor limit reached", filename);
                 break;
 
             case ENOENT:
-                SCLogError(SC_ERR_FOPEN,
-                           "%s: Does not exist, or name is an empty string",
-                           filename);
+                SCLogError("%s: Does not exist, or name is an empty string", filename);
                 break;
             case ENOMEM:
-                SCLogError(SC_ERR_FOPEN,
-                           "%s: Insufficient memory to complete the operation",
-                           filename);
+                SCLogError("%s: Insufficient memory to complete the operation", filename);
                 break;
 
             case ENOTDIR: //no error checking the directory, just is a plain file
@@ -214,7 +209,7 @@ TmEcode PcapDetermineDirectoryOrFile(char *filename, DIR **directory)
                 break;
 
             default:
-                SCLogError(SC_ERR_FOPEN, "%s: %" PRId32, filename, errno);
+                SCLogError("%s: %" PRId32, filename, errno);
         }
     } else {
         //no error, filename references a directory
@@ -227,23 +222,14 @@ TmEcode PcapDetermineDirectoryOrFile(char *filename, DIR **directory)
 
 int PcapDirectoryGetModifiedTime(char const *file, struct timespec *out)
 {
-#ifdef OS_WIN32
-    struct _stat buf;
-#else
-    struct stat buf;
-#endif /* OS_WIN32 */
+    SCStat buf;
     int ret;
 
     if (file == NULL)
         return -1;
 
-#ifdef OS_WIN32
-    if((ret = _stat(file, &buf)) != 0)
+    if ((ret = SCStatFn(file, &buf)) != 0)
         return ret;
-#else
-    if ((ret = stat(file, &buf)) != 0)
-        return ret;
-#endif
 
 #ifdef OS_DARWIN
     out->tv_sec = buf.st_mtimespec.tv_sec;
@@ -265,17 +251,17 @@ TmEcode PcapDirectoryInsertFile(PcapFileDirectoryVars *pv,
     PendingFile *next_file_to_compare = NULL;
 
     if (unlikely(pv == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "No directory vars passed");
+        SCLogError("No directory vars passed");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
     if (unlikely(file_to_add == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "File passed was null");
+        SCLogError("File passed was null");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
     if (unlikely(file_to_add->filename == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "File was passed with null filename");
+        SCLogError("File was passed with null filename");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -307,11 +293,11 @@ TmEcode PcapDirectoryPopulateBuffer(PcapFileDirectoryVars *pv,
                                     struct timespec *older_than
 ) {
     if (unlikely(pv == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "No directory vars passed");
+        SCLogError("No directory vars passed");
         SCReturnInt(TM_ECODE_FAILED);
     }
     if (unlikely(pv->filename == NULL)) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "No directory filename was passed");
+        SCLogError("No directory filename was passed");
         SCReturnInt(TM_ECODE_FAILED);
     }
     struct dirent * dir = NULL;
@@ -335,7 +321,7 @@ TmEcode PcapDirectoryPopulateBuffer(PcapFileDirectoryVars *pv,
         written = snprintf(pathbuff, PATH_MAX, "%s/%s", pv->filename, dir->d_name);
 
         if (written <= 0 || written >= PATH_MAX) {
-            SCLogError(SC_ERR_SPRINTF, "Could not write path");
+            SCLogError("Could not write path");
 
             SCReturnInt(TM_ECODE_FAILED);
         } else {
@@ -365,14 +351,14 @@ TmEcode PcapDirectoryPopulateBuffer(PcapFileDirectoryVars *pv,
 
             file_to_add = SCCalloc(1, sizeof(PendingFile));
             if (unlikely(file_to_add == NULL)) {
-                SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate pending file");
+                SCLogError("Failed to allocate pending file");
 
                 SCReturnInt(TM_ECODE_FAILED);
             }
 
             file_to_add->filename = SCStrdup(pathbuff);
             if (unlikely(file_to_add->filename == NULL)) {
-                SCLogError(SC_ERR_MEM_ALLOC, "Failed to copy filename");
+                SCLogError("Failed to copy filename");
                 CleanupPendingFile(file_to_add);
 
                 SCReturnInt(TM_ECODE_FAILED);
@@ -385,7 +371,7 @@ TmEcode PcapDirectoryPopulateBuffer(PcapFileDirectoryVars *pv,
                        (uintmax_t)SCTimespecAsEpochMillis(&file_to_add->modified_time));
 
             if (PcapDirectoryInsertFile(pv, file_to_add) == TM_ECODE_FAILED) {
-                SCLogError(SC_ERR_INVALID_ARGUMENT, "Failed to add file");
+                SCLogError("Failed to add file");
                 CleanupPendingFile(file_to_add);
 
                 SCReturnInt(TM_ECODE_FAILED);
@@ -401,7 +387,7 @@ TmEcode PcapDirectoryDispatchForTimeRange(PcapFileDirectoryVars *pv,
                                           struct timespec *older_than)
 {
     if (PcapDirectoryPopulateBuffer(pv, older_than) == TM_ECODE_FAILED) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Failed to populate directory buffer");
+        SCLogError("Failed to populate directory buffer");
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -424,31 +410,29 @@ TmEcode PcapDirectoryDispatchForTimeRange(PcapFileDirectoryVars *pv,
             TAILQ_REMOVE(&pv->directory_content, current_file, next);
 
             if (unlikely(current_file == NULL)) {
-                SCLogWarning(SC_ERR_PCAP_DISPATCH, "Current file was null");
+                SCLogWarning("Current file was null");
             } else if (unlikely(current_file->filename == NULL)) {
-                SCLogWarning(SC_ERR_PCAP_DISPATCH, "Current file filename was null");
+                SCLogWarning("Current file filename was null");
             } else {
                 SCLogDebug("Processing file %s", current_file->filename);
 
-                PcapFileFileVars *pftv = SCMalloc(sizeof(PcapFileFileVars));
+                const size_t toalloc = sizeof(PcapFileFileVars) + pcap_g.read_buffer_size;
+                PcapFileFileVars *pftv = SCCalloc(1, toalloc);
                 if (unlikely(pftv == NULL)) {
-                    SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate PcapFileFileVars");
+                    SCLogError("Failed to allocate PcapFileFileVars");
                     SCReturnInt(TM_ECODE_FAILED);
                 }
-                memset(pftv, 0, sizeof(PcapFileFileVars));
 
                 pftv->filename = SCStrdup(current_file->filename);
                 if (unlikely(pftv->filename == NULL)) {
-                    SCLogError(SC_ERR_MEM_ALLOC, "Failed to allocate filename");
+                    SCLogError("Failed to allocate filename");
                     CleanupPcapFileFileVars(pftv);
                     SCReturnInt(TM_ECODE_FAILED);
                 }
                 pftv->shared = pv->shared;
 
                 if (InitPcapFile(pftv) == TM_ECODE_FAILED) {
-                    SCLogWarning(SC_ERR_PCAP_DISPATCH,
-                                 "Failed to init pcap file %s, skipping",
-                                 current_file->filename);
+                    SCLogWarning("Failed to init pcap file %s, skipping", current_file->filename);
                     CleanupPendingFile(current_file);
                     CleanupPcapFileFileVars(pftv);
                     status = TM_ECODE_OK;
@@ -502,7 +486,15 @@ TmEcode PcapDirectoryDispatch(PcapFileDirectoryVars *ptv)
     struct timespec older_than;
     memset(&older_than, 0, sizeof(struct timespec));
     older_than.tv_sec = LONG_MAX;
-    uint32_t poll_seconds = (uint32_t)localtime(&ptv->poll_interval)->tm_sec;
+    uint32_t poll_seconds;
+#ifndef OS_WIN32
+    struct tm safe_tm;
+    memset(&safe_tm, 0, sizeof(safe_tm));
+    poll_seconds = (uint32_t)localtime_r(&ptv->poll_interval, &safe_tm)->tm_sec;
+#else
+    /* windows localtime is threadsafe */
+    poll_seconds = (uint32_t)localtime(&ptv->poll_interval)->tm_sec;
+#endif
 
     if (ptv->should_loop) {
         GetTime(&older_than);
@@ -542,7 +534,7 @@ TmEcode PcapDirectoryDispatch(PcapFileDirectoryVars *ptv)
     StatsSyncCountersIfSignalled(ptv->shared->tv);
 
     if (status == TM_ECODE_FAILED) {
-        SCLogError(SC_ERR_PCAP_DISPATCH, "Directory %s run mode failed", ptv->filename);
+        SCLogError("Directory %s run mode failed", ptv->filename);
         status = PcapDirectoryFailure(ptv);
     } else {
         SCLogInfo("Directory run mode complete");

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2019 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -26,18 +26,21 @@
  */
 
 #include "suricata-common.h"
-#include "util-error.h"
-#include "util-debug.h"
-#include "util-byte.h"
-#include "util-ip.h"
-#include "util-radix-tree.h"
-#include "util-unittest.h"
-#include "threads.h"
-#include "util-print.h"
-#include "host.h"
-#include "conf.h"
 #include "detect.h"
 #include "reputation.h"
+#include "threads.h"
+#include "conf.h"
+
+#include "util-byte.h"
+#include "util-debug.h"
+#include "util-error.h"
+#include "util-ip.h"
+#include "util-path.h"
+#include "util-print.h"
+#include "util-unittest.h"
+#include "util-validate.h"
+#include "util-radix4-tree.h"
+#include "util-radix6-tree.h"
 
 /** effective reputation version, atomic as the host
  *  time out code will use it to check if a host's
@@ -45,7 +48,7 @@
 SC_ATOMIC_DECLARE(uint32_t, srep_eversion);
 /** reputation version set to the host's reputation,
  *  this will be set to 1 before rep files are loaded,
- *  so hosts will always have a minial value of 1 */
+ *  so hosts will always have a minimal value of 1 */
 static uint32_t srep_version = 0;
 
 static uint32_t SRepIncrVersion(void)
@@ -72,107 +75,101 @@ static void SRepCIDRFreeUserData(void *data)
 {
     if (data != NULL)
         SCFree(data);
-
-    return;
 }
 
-static void SRepCIDRAddNetblock(SRepCIDRTree *cidr_ctx, char *ip, int cat, int value)
+static SCRadix4Config iprep_radix4_config = { SRepCIDRFreeUserData, NULL };
+static SCRadix6Config iprep_radix6_config = { SRepCIDRFreeUserData, NULL };
+
+static void SRepCIDRAddNetblock(SRepCIDRTree *cidr_ctx, char *ip, int cat, uint8_t value)
 {
     SReputation *user_data = NULL;
-    if ((user_data = SCMalloc(sizeof(SReputation))) == NULL) {
-        FatalError(SC_ERR_FATAL, "Error allocating memory. Exiting");
+    if ((user_data = SCCalloc(1, sizeof(SReputation))) == NULL) {
+        FatalError("Error allocating memory. Exiting");
     }
-    memset(user_data, 0x00, sizeof(SReputation));
 
     user_data->version = SRepGetVersion();
     user_data->rep[cat] = value;
 
     if (strchr(ip, ':') != NULL) {
-        if (cidr_ctx->srepIPV6_tree[cat] == NULL) {
-            cidr_ctx->srepIPV6_tree[cat] = SCRadixCreateRadixTree(SRepCIDRFreeUserData, NULL);
-            if (cidr_ctx->srepIPV6_tree[cat] == NULL) {
-                SCLogDebug("Error initializing Reputation IPV6 with CIDR module for cat %d", cat);
-                exit(EXIT_FAILURE);
-            }
-            SCLogDebug("Reputation IPV6 with CIDR module for cat %d initialized", cat);
-        }
-
         SCLogDebug("adding ipv6 host %s", ip);
-        if (SCRadixAddKeyIPV6String(ip, cidr_ctx->srepIPV6_tree[cat], (void *)user_data) == NULL) {
-            SCLogWarning(SC_ERR_INVALID_VALUE,
-                        "failed to add ipv6 host %s", ip);
+        if (!SCRadix6AddKeyIPV6String(
+                    &cidr_ctx->srep_ipv6_tree[cat], &iprep_radix6_config, ip, (void *)user_data)) {
+            SCFree(user_data);
+            if (sc_errno != SC_EEXIST)
+                SCLogWarning("failed to add ipv6 host %s", ip);
         }
 
     } else {
-        if (cidr_ctx->srepIPV4_tree[cat] == NULL) {
-            cidr_ctx->srepIPV4_tree[cat] = SCRadixCreateRadixTree(SRepCIDRFreeUserData, NULL);
-            if (cidr_ctx->srepIPV4_tree[cat] == NULL) {
-                SCLogDebug("Error initializing Reputation IPV4 with CIDR module for cat %d", cat);
-                exit(EXIT_FAILURE);
-            }
-            SCLogDebug("Reputation IPV4 with CIDR module for cat %d initialized", cat);
-        }
-
         SCLogDebug("adding ipv4 host %s", ip);
-        if (SCRadixAddKeyIPV4String(ip, cidr_ctx->srepIPV4_tree[cat], (void *)user_data) == NULL) {
-            SCLogWarning(SC_ERR_INVALID_VALUE,
-                        "failed to add ipv4 host %s", ip);
+        if (!SCRadix4AddKeyIPV4String(
+                    &cidr_ctx->srep_ipv4_tree[cat], &iprep_radix4_config, ip, (void *)user_data)) {
+            SCFree(user_data);
+            if (sc_errno != SC_EEXIST)
+                SCLogWarning("failed to add ipv4 host %s", ip);
         }
     }
 }
 
-static uint8_t SRepCIDRGetIPv4IPRep(SRepCIDRTree *cidr_ctx, uint8_t *ipv4_addr, uint8_t cat)
+static int8_t SRepCIDRGetIPv4IPRep(SRepCIDRTree *cidr_ctx, uint8_t *ipv4_addr, uint8_t cat)
 {
     void *user_data = NULL;
-    (void)SCRadixFindKeyIPV4BestMatch(ipv4_addr, cidr_ctx->srepIPV4_tree[cat], &user_data);
+    (void)SCRadix4TreeFindBestMatch(&cidr_ctx->srep_ipv4_tree[cat], ipv4_addr, &user_data);
     if (user_data == NULL)
-        return 0;
+        return -1;
 
     SReputation *r = (SReputation *)user_data;
     return r->rep[cat];
 }
 
-static uint8_t SRepCIDRGetIPv6IPRep(SRepCIDRTree *cidr_ctx, uint8_t *ipv6_addr, uint8_t cat)
+static int8_t SRepCIDRGetIPv6IPRep(SRepCIDRTree *cidr_ctx, uint8_t *ipv6_addr, uint8_t cat)
 {
     void *user_data = NULL;
-    (void)SCRadixFindKeyIPV6BestMatch(ipv6_addr, cidr_ctx->srepIPV6_tree[cat], &user_data);
+    (void)SCRadix6TreeFindBestMatch(&cidr_ctx->srep_ipv6_tree[cat], ipv6_addr, &user_data);
     if (user_data == NULL)
-        return 0;
+        return -1;
 
     SReputation *r = (SReputation *)user_data;
     return r->rep[cat];
 }
 
-uint8_t SRepCIDRGetIPRepSrc(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version)
+int8_t SRepCIDRGetIPRepSrc(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version)
 {
-    uint8_t rep = 0;
+    int8_t rep = -3;
 
-    if (PKT_IS_IPV4(p))
+    if (PacketIsIPv4(p))
         rep = SRepCIDRGetIPv4IPRep(cidr_ctx, (uint8_t *)GET_IPV4_SRC_ADDR_PTR(p), cat);
-    else if (PKT_IS_IPV6(p))
+    else if (PacketIsIPv6(p))
         rep = SRepCIDRGetIPv6IPRep(cidr_ctx, (uint8_t *)GET_IPV6_SRC_ADDR(p), cat);
 
     return rep;
 }
 
-uint8_t SRepCIDRGetIPRepDst(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version)
+int8_t SRepCIDRGetIPRepDst(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version)
 {
-    uint8_t rep = 0;
+    int8_t rep = -3;
 
-    if (PKT_IS_IPV4(p))
+    if (PacketIsIPv4(p))
         rep = SRepCIDRGetIPv4IPRep(cidr_ctx, (uint8_t *)GET_IPV4_DST_ADDR_PTR(p), cat);
-    else if (PKT_IS_IPV6(p))
+    else if (PacketIsIPv6(p))
         rep = SRepCIDRGetIPv6IPRep(cidr_ctx, (uint8_t *)GET_IPV6_DST_ADDR(p), cat);
 
     return rep;
 }
 
 /** \brief Increment effective reputation version after
- *         a rule/reputatio reload is complete. */
+ *         a rule/reputation reload is complete. */
 void SRepReloadComplete(void)
 {
     (void) SC_ATOMIC_ADD(srep_eversion, 1);
     SCLogDebug("effective Reputation version %u", SRepGetEffectiveVersion());
+}
+
+void SRepFreeHostData(Host *h)
+{
+    SCFree(h->iprep);
+    h->iprep = NULL;
+    DEBUG_VALIDATE_BUG_ON(SC_ATOMIC_GET(h->use_cnt) != 1);
+    HostDecrUsecnt(h);
 }
 
 /** \brief Set effective reputation version after
@@ -205,11 +202,7 @@ int SRepHostTimedOut(Host *h)
     if (r->version < eversion) {
         SCLogDebug("host %p has reputation version %u, "
                 "effective version is %u", h, r->version, eversion);
-
-        SCFree(h->iprep);
-        h->iprep = NULL;
-
-        HostDecrUsecnt(h);
+        SRepFreeHostData(h);
         return 1;
     }
 
@@ -258,7 +251,6 @@ static int SRepCatSplitLine(char *line, uint8_t *cat, char *shortname, size_t sh
     *cat = (uint8_t)c;
     strlcpy(shortname, ptrs[1], shortname_len);
     return 0;
-
 }
 
 /**
@@ -275,7 +267,8 @@ static int SRepSplitLine(SRepCIDRTree *cidr_ctx, char *line, Address *ip, uint8_
     char *origline = line;
 
     while (i < (int)line_len) {
-        if (line[i] == ',' || line[i] == '\n' || line[i] == '\0' || i == (int)(line_len - 1)) {
+        if (line[i] == ',' || line[i] == '\n' || line[i] == '\r' || line[i] == '\0' ||
+                i == (int)(line_len - 1)) {
             line[i] = '\0';
 
             ptrs[idx] = line;
@@ -304,11 +297,11 @@ static int SRepSplitLine(SRepCIDRTree *cidr_ctx, char *line, Address *ip, uint8_
     if (strcmp(ptrs[0], "ip") == 0)
         return 1;
 
-    int c, v;
-    if (StringParseI32RangeCheck(&c, 10, 0, (const char *)ptrs[1], 0, SREP_MAX_CATS - 1) < 0)
+    uint8_t c, v;
+    if (StringParseU8RangeCheck(&c, 10, 0, (const char *)ptrs[1], 0, SREP_MAX_CATS - 1) <= 0)
         return -1;
 
-    if (StringParseI32RangeCheck(&v, 10, 0, (const char *)ptrs[2], 0, SREP_MAX_VAL) < 0)
+    if (StringParseU8RangeCheck(&v, 10, 0, (const char *)ptrs[2], 0, SREP_MAX_VAL) <= 0)
         return -1;
 
     if (strchr(ptrs[0], '/') != NULL) {
@@ -350,7 +343,7 @@ static int SRepLoadCatFile(const char *filename)
     FILE *fp = fopen(filename, "r");
 
     if (fp == NULL) {
-        SCLogError(SC_ERR_OPENING_RULE_FILE, "opening ip rep file %s: %s", filename, strerror(errno));
+        SCLogError("opening ip rep file %s: %s", filename, strerror(errno));
         return -1;
     }
 
@@ -396,7 +389,7 @@ int SRepLoadCatFileFromFD(FILE *fp)
         if (SRepCatSplitLine(line, &cat, shortname, sizeof(shortname)) == 0) {
             strlcpy(srep_cat_table[cat], shortname, SREP_SHORTNAME_LEN);
         } else {
-            SCLogError(SC_ERR_NO_REPUTATION, "bad line \"%s\"", line);
+            SCLogError("bad line \"%s\"", line);
         }
     }
 
@@ -416,7 +409,7 @@ static int SRepLoadFile(SRepCIDRTree *cidr_ctx, char *filename)
     FILE *fp = fopen(filename, "r");
 
     if (fp == NULL) {
-        SCLogError(SC_ERR_OPENING_RULE_FILE, "opening ip rep file %s: %s", filename, strerror(errno));
+        SCLogError("opening ip rep file %s: %s", filename, strerror(errno));
         return -1;
     }
 
@@ -425,15 +418,11 @@ static int SRepLoadFile(SRepCIDRTree *cidr_ctx, char *filename)
     fclose(fp);
     fp = NULL;
     return r;
-
 }
 
 int SRepLoadFileFromFD(SRepCIDRTree *cidr_ctx, FILE *fp)
 {
     char line[8192] = "";
-    Address a;
-    memset(&a, 0x00, sizeof(a));
-    a.family = AF_INET;
 
     while(fgets(line, (int)sizeof(line), fp) != NULL) {
         size_t len = strlen(line);
@@ -455,10 +444,14 @@ int SRepLoadFileFromFD(SRepCIDRTree *cidr_ctx, FILE *fp)
             line[len - 1] = '\0';
         }
 
+        Address a;
+        memset(&a, 0x00, sizeof(a));
+        a.family = AF_INET;
+
         uint8_t cat = 0, value = 0;
         int r = SRepSplitLine(cidr_ctx, line, &a, &cat, &value);
         if (r < 0) {
-            SCLogError(SC_ERR_NO_REPUTATION, "bad line \"%s\"", line);
+            SCLogError("bad line \"%s\"", line);
         } else if (r == 0) {
             if (a.family == AF_INET) {
                 char ipstr[16];
@@ -472,16 +465,14 @@ int SRepLoadFileFromFD(SRepCIDRTree *cidr_ctx, FILE *fp)
 
             Host *h = HostGetHostFromHash(&a);
             if (h == NULL) {
-                SCLogError(SC_ERR_NO_REPUTATION, "failed to get a host, increase host.memcap");
+                SCLogError("failed to get a host, increase host.memcap");
                 break;
             } else {
                 //SCLogInfo("host %p", h);
 
                 if (h->iprep == NULL) {
-                    h->iprep = SCMalloc(sizeof(SReputation));
+                    h->iprep = SCCalloc(1, sizeof(SReputation));
                     if (h->iprep != NULL) {
-                        memset(h->iprep, 0x00, sizeof(SReputation));
-
                         HostIncrUsecnt(h);
                     }
                 }
@@ -533,7 +524,7 @@ static char *SRepCompleteFilePath(char *file)
 
     /* Path not specified */
     if (PathIsRelative(file)) {
-        if (ConfGet("default-reputation-path", &defaultpath) == 1) {
+        if (SCConfGet("default-reputation-path", &defaultpath) == 1) {
             SCLogDebug("Default path: %s", defaultpath);
             size_t path_len = sizeof(char) * (strlen(defaultpath) +
                           strlen(file) + 2);
@@ -574,22 +565,21 @@ static char *SRepCompleteFilePath(char *file)
  */
 int SRepInit(DetectEngineCtx *de_ctx)
 {
-    ConfNode *files;
-    ConfNode *file = NULL;
+    SCConfNode *files;
+    SCConfNode *file = NULL;
     const char *filename = NULL;
     int init = 0;
-    int i = 0;
 
-    de_ctx->srepCIDR_ctx = (SRepCIDRTree *)SCMalloc(sizeof(SRepCIDRTree));
+    de_ctx->srepCIDR_ctx = (SRepCIDRTree *)SCCalloc(1, sizeof(SRepCIDRTree));
     if (de_ctx->srepCIDR_ctx == NULL)
         exit(EXIT_FAILURE);
-    memset(de_ctx->srepCIDR_ctx, 0, sizeof(SRepCIDRTree));
-    SRepCIDRTree *cidr_ctx = de_ctx->srepCIDR_ctx;
 
-    for (i = 0; i < SREP_MAX_CATS; i++) {
-        cidr_ctx->srepIPV4_tree[i] = NULL;
-        cidr_ctx->srepIPV6_tree[i] = NULL;
+    for (int i = 0; i < SREP_MAX_CATS; i++) {
+        de_ctx->srepCIDR_ctx->srep_ipv4_tree[i] = SCRadix4TreeInitialize();
+        de_ctx->srepCIDR_ctx->srep_ipv6_tree[i] = SCRadix6TreeInitialize();
     }
+
+    SRepCIDRTree *cidr_ctx = de_ctx->srepCIDR_ctx;
 
     if (SRepGetVersion() == 0) {
         SC_ATOMIC_INIT(srep_eversion);
@@ -597,29 +587,30 @@ int SRepInit(DetectEngineCtx *de_ctx)
     }
 
     /* if both settings are missing, we assume the user doesn't want ip rep */
-    (void)ConfGet("reputation-categories-file", &filename);
-    files = ConfGetNode("reputation-files");
+    (void)SCConfGet("reputation-categories-file", &filename);
+    files = SCConfGetNode("reputation-files");
     if (filename == NULL && files == NULL) {
         SCLogConfig("IP reputation disabled");
         return 0;
     }
 
     if (files == NULL) {
-        SCLogError(SC_ERR_NO_REPUTATION, "\"reputation-files\" not set");
+        SCLogError("\"reputation-files\" not set");
         return -1;
     }
 
     if (init) {
         if (filename == NULL) {
-            SCLogError(SC_ERR_NO_REPUTATION, "\"reputation-categories-file\" not set");
+            SCLogError("\"reputation-categories-file\" not set");
             return -1;
         }
 
         /* init even if we have reputation files, so that when we
          * have a live reload, we have inited the cats */
         if (SRepLoadCatFile(filename) < 0) {
-            SCLogError(SC_ERR_NO_REPUTATION, "failed to load reputation "
-                    "categories file %s", filename);
+            SCLogError("failed to load reputation "
+                       "categories file %s",
+                    filename);
             return -1;
         }
     }
@@ -636,7 +627,7 @@ int SRepInit(DetectEngineCtx *de_ctx)
 
                 int r = SRepLoadFile(cidr_ctx, sfile);
                 if (r < 0){
-                    if (de_ctx->failure_fatal == 1) {
+                    if (de_ctx->failure_fatal) {
                         exit(EXIT_FAILURE);
                     }
                 }
@@ -655,21 +646,13 @@ int SRepInit(DetectEngineCtx *de_ctx)
     return 0;
 }
 
-void SRepDestroy(DetectEngineCtx *de_ctx) {
+void SRepDestroy(DetectEngineCtx *de_ctx)
+{
     if (de_ctx->srepCIDR_ctx != NULL) {
-        int i;
-        for (i = 0; i < SREP_MAX_CATS; i++) {
-            if (de_ctx->srepCIDR_ctx->srepIPV4_tree[i] != NULL) {
-                SCRadixReleaseRadixTree(de_ctx->srepCIDR_ctx->srepIPV4_tree[i]);
-                de_ctx->srepCIDR_ctx->srepIPV4_tree[i] = NULL;
-            }
-
-            if (de_ctx->srepCIDR_ctx->srepIPV6_tree[i] != NULL) {
-                SCRadixReleaseRadixTree(de_ctx->srepCIDR_ctx->srepIPV6_tree[i]);
-                de_ctx->srepCIDR_ctx->srepIPV6_tree[i] = NULL;
-            }
+        for (int i = 0; i < SREP_MAX_CATS; i++) {
+            SCRadix4TreeRelease(&de_ctx->srepCIDR_ctx->srep_ipv4_tree[i], &iprep_radix4_config);
+            SCRadix6TreeRelease(&de_ctx->srepCIDR_ctx->srep_ipv6_tree[i], &iprep_radix6_config);
         }
-
         SCFree(de_ctx->srepCIDR_ctx);
         de_ctx->srepCIDR_ctx = NULL;
     }

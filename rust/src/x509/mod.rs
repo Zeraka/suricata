@@ -15,17 +15,23 @@
  * 02110-1301, USA.
  */
 
+//! Module for SSL/TLS X.509 certificates parser and decoder.
+
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
 use crate::common::rust_string_to_c;
-use nom;
+use nom7::Err;
 use std;
 use std::os::raw::c_char;
-use x509_parser::{error::X509Error, parse_x509_der, X509Certificate};
+use std::fmt;
+use x509_parser::prelude::*;
+use crate::x509::GeneralName;
+mod time;
+mod log;
 
 #[repr(u32)]
 pub enum X509DecodeError {
-    Success = 0,
+    _Success = 0,
     /// Generic decoding error
     InvalidCert,
     /// Some length does not match, or certificate is incomplete
@@ -42,19 +48,32 @@ pub enum X509DecodeError {
 
 pub struct X509(X509Certificate<'static>);
 
+pub struct SCGeneralName<'a>(&'a GeneralName<'a>);
+
+impl fmt::Display for SCGeneralName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            GeneralName::DNSName(s) => write!(f, "{}", s),
+            GeneralName::URI(s) => write!(f, "{}", s),
+            GeneralName::IPAddress(s) => write!(f, "{:?}", s),
+            _ => write!(f, "{}", self.0)
+        }
+    }
+}
+
 /// Attempt to parse a X.509 from input, and return a pointer to the parsed object if successful.
 ///
 /// # Safety
 ///
 /// input must be a valid buffer of at least input_len bytes
 #[no_mangle]
-pub unsafe extern "C" fn rs_x509_decode(
+pub unsafe extern "C" fn SCX509Decode(
     input: *const u8,
     input_len: u32,
     err_code: *mut u32,
 ) -> *mut X509 {
     let slice = std::slice::from_raw_parts(input, input_len as usize);
-    let res = parse_x509_der(slice);
+    let res = X509Certificate::from_der(slice);
     match res {
         Ok((_rem, cert)) => Box::into_raw(Box::new(X509(cert))),
         Err(e) => {
@@ -66,7 +85,7 @@ pub unsafe extern "C" fn rs_x509_decode(
 }
 
 #[no_mangle]
-pub extern "C" fn rs_x509_get_subject(ptr: *const X509) -> *mut c_char {
+pub unsafe extern "C" fn SCX509GetSubject(ptr: *const X509) -> *mut c_char {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -76,7 +95,38 @@ pub extern "C" fn rs_x509_get_subject(ptr: *const X509) -> *mut c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn rs_x509_get_issuer(ptr: *const X509) -> *mut c_char {
+pub unsafe extern "C" fn SCX509GetSubjectAltNameLen(ptr: *const X509) -> u16 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let x509 = cast_pointer! {ptr, X509};
+    let san_list = x509.0.tbs_certificate.subject_alternative_name();
+    if let Ok(Some(sans)) = san_list {
+        // SAN length in a certificate is kept u16 following discussions at
+        // https://community.letsencrypt.org/t/why-sans-are-limited-to-100-domains-only
+        debug_validate_bug_on!(sans.value.general_names.len() == usize::from(u16::MAX));
+        return sans.value.general_names.len() as u16;
+    }
+    return 0;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn SCX509GetSubjectAltNameAt(ptr: *const X509, idx: u16) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let x509 = cast_pointer! {ptr, X509};
+    let san_list = x509.0.tbs_certificate.subject_alternative_name();
+    if let Ok(Some(sans)) = san_list {
+        let general_name = &sans.value.general_names[idx as usize];
+        let dns_name = SCGeneralName(general_name);
+        return rust_string_to_c(dns_name.to_string());
+    }
+    return std::ptr::null_mut();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn SCX509GetIssuer(ptr: *const X509) -> *mut c_char {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -86,7 +136,7 @@ pub extern "C" fn rs_x509_get_issuer(ptr: *const X509) -> *mut c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn rs_x509_get_serial(ptr: *const X509) -> *mut c_char {
+pub unsafe extern "C" fn SCX509GetSerial(ptr: *const X509) -> *mut c_char {
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -101,9 +151,9 @@ pub extern "C" fn rs_x509_get_serial(ptr: *const X509) -> *mut c_char {
 ///
 /// # Safety
 ///
-/// ptr must be a valid object obtained using `rs_x509_decode`
+/// ptr must be a valid object obtained using `SCX509Decode`
 #[no_mangle]
-pub unsafe extern "C" fn rs_x509_get_validity(
+pub unsafe extern "C" fn SCX509GetValidity(
     ptr: *const X509,
     not_before: *mut i64,
     not_after: *mut i64,
@@ -112,8 +162,8 @@ pub unsafe extern "C" fn rs_x509_get_validity(
         return -1;
     }
     let x509 = &*ptr;
-    let n_b = x509.0.tbs_certificate.validity.not_before.to_timespec().sec;
-    let n_a = x509.0.tbs_certificate.validity.not_after.to_timespec().sec;
+    let n_b = x509.0.validity().not_before.timestamp();
+    let n_a = x509.0.validity().not_after.timestamp();
     *not_before = n_b;
     *not_after = n_a;
     0
@@ -123,19 +173,19 @@ pub unsafe extern "C" fn rs_x509_get_validity(
 ///
 /// # Safety
 ///
-/// ptr must be a valid object obtained using `rs_x509_decode`
+/// ptr must be a valid object obtained using `SCX509Decode`
 #[no_mangle]
-pub unsafe extern "C" fn rs_x509_free(ptr: *mut X509) {
+pub unsafe extern "C" fn SCX509Free(ptr: *mut X509) {
     if ptr.is_null() {
         return;
     }
     drop(Box::from_raw(ptr));
 }
 
-fn x509_parse_error_to_errcode(e: &nom::Err<X509Error>) -> X509DecodeError {
+fn x509_parse_error_to_errcode(e: &Err<X509Error>) -> X509DecodeError {
     match e {
-        nom::Err::Incomplete(_) => X509DecodeError::InvalidLength,
-        nom::Err::Error(e) | nom::Err::Failure(e) => match e {
+        Err::Incomplete(_) => X509DecodeError::InvalidLength,
+        Err::Error(e) | Err::Failure(e) => match e {
             X509Error::InvalidVersion => X509DecodeError::InvalidVersion,
             X509Error::InvalidSerial => X509DecodeError::InvalidSerial,
             X509Error::InvalidAlgorithmIdentifier => X509DecodeError::InvalidAlgorithmIdentifier,

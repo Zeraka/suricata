@@ -10,7 +10,7 @@ define four hook functions.
 For lua output scripts suricata offers a wide range of lua functions.
 They all return information on specific engine internals and aspects of the network traffic.
 They are described in the following sections, grouped by the event/traffic type.
-But let's start with a example explaining the four hook functions, and how to make
+But let's start with an example explaining the four hook functions, and how to make
 suricata load a lua output script.
 
 Script structure
@@ -27,6 +27,12 @@ Example:
 
 ::
 
+  local config = require("suricata.config")
+  local logger = require("suricata.log")
+  local http = require("suricata.http")
+  local packet = require("suricata.packet")
+  local flow = require("suricata.flow")
+
   function init (args)
       local needs = {}
       needs["protocol"] = "http"
@@ -34,33 +40,36 @@ Example:
   end
 
   function setup (args)
-      filename = SCLogPath() .. "/" .. name
+      filename = config.log_path() .. "/" .. name
       file = assert(io.open(filename, "a"))
-      SCLogInfo("HTTP Log Filename " .. filename)
+      logger.info("HTTP Log Filename " .. filename)
       http = 0
   end
 
   function log(args)
-      http_uri = HttpGetRequestUriRaw()
+      local tx = http.get_tx()
+
+      http_uri = tx:request_uri_raw()
       if http_uri == nil then
           http_uri = "<unknown>"
       end
       http_uri = string.gsub(http_uri, "%c", ".")
 
-      http_host = HttpGetRequestHost()
+      http_host = tx:request_host()
       if http_host == nil then
           http_host = "<hostname unknown>"
       end
       http_host = string.gsub(http_host, "%c", ".")
 
-      http_ua = HttpGetRequestHeader("User-Agent")
+      http_ua = tx:request_header("User-Agent")
       if http_ua == nil then
           http_ua = "<useragent unknown>"
       end
       http_ua = string.gsub(http_ua, "%g", ".")
 
-      timestring = SCPacketTimeString()
-      ip_version, src_ip, dst_ip, protocol, src_port, dst_port = SCFlowTuple()
+      local p = packet.get()
+      timestring = p:timestring_legacy()
+      ip_version, src_ip, dst_ip, protocol, src_port, dst_port = p:tuple()
 
       file:write (timestring .. " " .. http_host .. " [**] " .. http_uri .. " [**] " ..
              http_ua .. " [**] " .. src_ip .. ":" .. src_port .. " -> " ..
@@ -71,9 +80,11 @@ Example:
   end
 
   function deinit (args)
-      SCLogInfo ("HTTP transactions logged: " .. http);
+      logger.info ("HTTP transactions logged: " .. http);
       file:close(file)
   end
+
+.. _lua-output-yaml:
 
 YAML
 ----
@@ -87,6 +98,15 @@ scripts like so:
     - lua:
         enabled: yes
         scripts-dir: /etc/suricata/lua-output/
+
+        # By default the Lua module search paths are empty. If you plan
+        # to use external modules these paths will need to be set. The
+        # examples below are likely suitable for finding modules
+        # installed with a package manager on a 64 bit Linux system, but
+        # may need tweaking.
+        #path: "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua;/usr/lib64/lua/5.4/?.lua;/usr/lib64/lua/5.4/?/init.lua;./?.lua;./?/init.lua"
+        #cpath: "/usr/lib64/lua/5.4/?.so;/usr/lib64/lua/5.4/loadall.so;./?.so"
+
         scripts:
           - tcp-data.lua
           - flow.lua

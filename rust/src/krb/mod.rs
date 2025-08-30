@@ -15,8 +15,10 @@
  * 02110-1301, USA.
  */
 
+//! Kerberos-v5 application layer, logger and detection module.
+
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
-pub mod krb5;
 pub mod detect;
+pub mod krb5;
 pub mod log;

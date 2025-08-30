@@ -18,45 +18,62 @@
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
 use crate::jsonbuilder::{JsonBuilder, JsonError};
-use crate::krb::krb5::{KRB5State,KRB5Transaction,test_weak_encryption};
+use crate::krb::krb5::{test_weak_encryption, KRB5Transaction};
 
-fn krb5_log_response(jsb: &mut JsonBuilder, tx: &mut KRB5Transaction) -> Result<(), JsonError>
-{
+fn krb5_log_response(jsb: &mut JsonBuilder, tx: &KRB5Transaction) -> Result<(), JsonError> {
+    jsb.open_object("krb5")?;
     match tx.error_code {
         Some(c) => {
-            jsb.set_string("msg_type", "KRB_ERROR")?;
-            jsb.set_string("failed_request", &format!("{:?}", tx.msg_type))?;
+            jsb.set_string("msg_type", &format!("{:?}", tx.msg_type))?;
+            if let Some(req_type) = tx.req_type {
+                jsb.set_string("failed_request", &format!("{:?}", req_type))?;
+            } else {
+                // In case we capture the response but not the request
+                // we can't know the failed request type, since it could be
+                // AS-REQ or TGS-REQ
+                jsb.set_string("failed_request", "UNKNOWN")?;
+            }
             jsb.set_string("error_code", &format!("{:?}", c))?;
-        },
-        None    => { jsb.set_string("msg_type", &format!("{:?}", tx.msg_type))?; },
+        }
+        None => {
+            jsb.set_string("msg_type", &format!("{:?}", tx.msg_type))?;
+        }
     }
     let cname = match tx.cname {
         Some(ref x) => format!("{}", x),
-        None        => "<empty>".to_owned(),
+        None => "<empty>".to_owned(),
     };
     let realm = match tx.realm {
-        Some(ref x) => format!("{}", x.0),
-        None        => "<empty>".to_owned(),
+        Some(ref x) => x.0.to_string(),
+        None => "<empty>".to_owned(),
     };
     let sname = match tx.sname {
         Some(ref x) => format!("{}", x),
-        None        => "<empty>".to_owned(),
+        None => "<empty>".to_owned(),
     };
     let encryption = match tx.etype {
         Some(ref x) => format!("{:?}", x),
-        None        => "<none>".to_owned(),
+        None => "<none>".to_owned(),
     };
     jsb.set_string("cname", &cname)?;
     jsb.set_string("realm", &realm)?;
     jsb.set_string("sname", &sname)?;
     jsb.set_string("encryption", &encryption)?;
-    jsb.set_bool("weak_encryption", tx.etype.map_or(false,test_weak_encryption))?;
+    jsb.set_bool(
+        "weak_encryption",
+        tx.etype.is_some_and(test_weak_encryption),
+    )?;
+    if let Some(x) = tx.ticket_etype {
+        let refs = format!("{:?}", x);
+        jsb.set_string("ticket_encryption", &refs)?;
+        jsb.set_bool("ticket_weak_encryption", test_weak_encryption(x))?;
+    }
+    jsb.close()?;
 
     return Ok(());
 }
 
 #[no_mangle]
-pub extern "C" fn rs_krb5_log_json_response(jsb: &mut JsonBuilder, _state: &mut KRB5State, tx: &mut KRB5Transaction) -> bool
-{
+pub extern "C" fn SCKrb5LogJsonResponse(tx: &KRB5Transaction, jsb: &mut JsonBuilder) -> bool {
     krb5_log_response(jsb, tx).is_ok()
 }

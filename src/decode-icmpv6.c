@@ -33,19 +33,19 @@
 #include "suricata-common.h"
 #include "decode-icmpv6.h"
 #include "decode.h"
-#include "decode-tcp.h"
-#include "decode-sctp.h"
-#include "decode-udp.h"
-#include "decode-events.h"
-#include "util-unittest.h"
 #include "flow.h"
-#include "util-debug.h"
 #include "util-print.h"
+#include "util-validate.h"
 
-#include "pkt-var.h"
-#include "util-profiling.h"
-#include "host.h"
-
+#if defined(DEBUG) || defined(UNITTESTS)
+static inline const IPV6Hdr *PacketGetICMPv6EmbIPv6(const Packet *p)
+{
+    BUG_ON(p->l4.type != PACKET_L4_ICMPV6);
+    const uint8_t *start = (const uint8_t *)PacketGetICMPv6(p);
+    const uint8_t *ip = start + p->l4.vars.icmpv6.emb_ip6h_offset;
+    return (const IPV6Hdr *)ip;
+}
+#endif
 
 /**
  * \brief Get variables and do some checks of the embedded IPV6 packet
@@ -76,62 +76,53 @@ static void DecodePartialIPV6(Packet *p, uint8_t *partial_packet, uint16_t len )
         return;
     }
 
-    /** We need to fill icmpv6vars */
-    p->icmpv6vars.emb_ipv6h = icmp6_ip6h;
-
-    /** Get the IP6 address */
-    p->icmpv6vars.emb_ip6_src[0] = icmp6_ip6h->s_ip6_src[0];
-    p->icmpv6vars.emb_ip6_src[1] = icmp6_ip6h->s_ip6_src[1];
-    p->icmpv6vars.emb_ip6_src[2] = icmp6_ip6h->s_ip6_src[2];
-    p->icmpv6vars.emb_ip6_src[3] = icmp6_ip6h->s_ip6_src[3];
-
-    p->icmpv6vars.emb_ip6_dst[0] = icmp6_ip6h->s_ip6_dst[0];
-    p->icmpv6vars.emb_ip6_dst[1] = icmp6_ip6h->s_ip6_dst[1];
-    p->icmpv6vars.emb_ip6_dst[2] = icmp6_ip6h->s_ip6_dst[2];
-    p->icmpv6vars.emb_ip6_dst[3] = icmp6_ip6h->s_ip6_dst[3];
-
+    /** We need to fill l4.vars.icmpv6 */
+    const uint8_t *icmpv6_ptr = (const uint8_t *)p->l4.hdrs.icmpv6h;
+    DEBUG_VALIDATE_BUG_ON((ptrdiff_t)(partial_packet - icmpv6_ptr) > (ptrdiff_t)UINT16_MAX);
+    p->l4.vars.icmpv6.emb_ip6h_offset = (uint16_t)(partial_packet - icmpv6_ptr);
     /** Get protocol and ports inside the embedded ipv6 packet and set the pointers */
-    p->icmpv6vars.emb_ip6_proto_next = icmp6_ip6h->s_ip6_nxt;
+    p->l4.vars.icmpv6.emb_ip6_proto_next = icmp6_ip6h->s_ip6_nxt;
 
     switch (icmp6_ip6h->s_ip6_nxt) {
         case IPPROTO_TCP:
             if (len >= IPV6_HEADER_LEN + TCP_HEADER_LEN ) {
-                p->icmpv6vars.emb_tcph = (TCPHdr*)(partial_packet + IPV6_HEADER_LEN);
-                p->icmpv6vars.emb_sport = p->icmpv6vars.emb_tcph->th_sport;
-                p->icmpv6vars.emb_dport = p->icmpv6vars.emb_tcph->th_dport;
+                TCPHdr *emb_tcph = (TCPHdr *)(partial_packet + IPV6_HEADER_LEN);
+                p->l4.vars.icmpv6.emb_sport = emb_tcph->th_sport;
+                p->l4.vars.icmpv6.emb_dport = emb_tcph->th_dport;
+                p->l4.vars.icmpv6.emb_ports_set = true;
 
                 SCLogDebug("ICMPV6->IPV6->TCP header sport: "
-                           "%"PRIu16" dport %"PRIu16"", p->icmpv6vars.emb_sport,
-                            p->icmpv6vars.emb_dport);
+                           "%" PRIu16 " dport %" PRIu16 "",
+                        p->l4.vars.icmpv6.emb_sport, p->l4.vars.icmpv6.emb_dport);
             } else {
                 SCLogDebug("Warning, ICMPV6->IPV6->TCP "
                            "header Didn't fit in the packet!");
-                p->icmpv6vars.emb_sport = 0;
-                p->icmpv6vars.emb_dport = 0;
+                p->l4.vars.icmpv6.emb_sport = 0;
+                p->l4.vars.icmpv6.emb_dport = 0;
             }
 
             break;
         case IPPROTO_UDP:
             if (len >= IPV6_HEADER_LEN + UDP_HEADER_LEN ) {
-                p->icmpv6vars.emb_udph = (UDPHdr*)(partial_packet + IPV6_HEADER_LEN);
-                p->icmpv6vars.emb_sport = p->icmpv6vars.emb_udph->uh_sport;
-                p->icmpv6vars.emb_dport = p->icmpv6vars.emb_udph->uh_dport;
+                UDPHdr *emb_udph = (UDPHdr *)(partial_packet + IPV6_HEADER_LEN);
+                p->l4.vars.icmpv6.emb_sport = emb_udph->uh_sport;
+                p->l4.vars.icmpv6.emb_dport = emb_udph->uh_dport;
+                p->l4.vars.icmpv6.emb_ports_set = true;
 
                 SCLogDebug("ICMPV6->IPV6->UDP header sport: "
-                           "%"PRIu16" dport %"PRIu16"", p->icmpv6vars.emb_sport,
-                            p->icmpv6vars.emb_dport);
+                           "%" PRIu16 " dport %" PRIu16 "",
+                        p->l4.vars.icmpv6.emb_sport, p->l4.vars.icmpv6.emb_dport);
             } else {
                 SCLogDebug("Warning, ICMPV6->IPV6->UDP "
                            "header Didn't fit in the packet!");
-                p->icmpv6vars.emb_sport = 0;
-                p->icmpv6vars.emb_dport = 0;
+                p->l4.vars.icmpv6.emb_sport = 0;
+                p->l4.vars.icmpv6.emb_dport = 0;
             }
 
             break;
         case IPPROTO_ICMPV6:
-            p->icmpv6vars.emb_icmpv6h = (ICMPV6Hdr*)(partial_packet + IPV6_HEADER_LEN);
-            p->icmpv6vars.emb_sport = 0;
-            p->icmpv6vars.emb_dport = 0;
+            p->l4.vars.icmpv6.emb_sport = 0;
+            p->l4.vars.icmpv6.emb_dport = 0;
 
             SCLogDebug("ICMPV6->IPV6->ICMP header");
 
@@ -141,15 +132,13 @@ static void DecodePartialIPV6(Packet *p, uint8_t *partial_packet, uint16_t len )
     /* debug print */
 #ifdef DEBUG
     char s[46], d[46];
-    PrintInet(AF_INET6, (const void *)p->icmpv6vars.emb_ip6_src, s, sizeof(s));
-    PrintInet(AF_INET6, (const void *)p->icmpv6vars.emb_ip6_dst, d, sizeof(d));
+    PrintInet(AF_INET6, (const void *)PacketGetICMPv6EmbIPv6(p)->s_ip6_src, s, sizeof(s));
+    PrintInet(AF_INET6, (const void *)PacketGetICMPv6EmbIPv6(p)->s_ip6_dst, d, sizeof(d));
     SCLogDebug("ICMPv6 embedding IPV6 %s->%s - CLASS: %" PRIu32 " FLOW: "
                "%" PRIu32 " NH: %" PRIu32 " PLEN: %" PRIu32 " HLIM: %" PRIu32,
                s, d, IPV6_GET_RAW_CLASS(icmp6_ip6h), IPV6_GET_RAW_FLOW(icmp6_ip6h),
                IPV6_GET_RAW_NH(icmp6_ip6h), IPV6_GET_RAW_PLEN(icmp6_ip6h), IPV6_GET_RAW_HLIM(icmp6_ip6h));
 #endif
-
-    return;
 }
 
 /** \retval type counterpart type or -1 */
@@ -188,6 +177,7 @@ int ICMPv6GetCounterpart(uint8_t type)
 int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                  const uint8_t *pkt, uint32_t len)
 {
+    const IPV6Hdr *ip6h = PacketGetIPv6(p);
     int full_hdr = 0;
     StatsIncr(tv, dtv->counter_icmpv6);
 
@@ -197,11 +187,12 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         return TM_ECODE_FAILED;
     }
 
-    p->icmpv6h = (ICMPV6Hdr *)pkt;
+    ICMPV6Hdr *icmpv6h = PacketSetICMPv6(p, pkt);
     p->proto = IPPROTO_ICMPV6;
-    p->icmp_s.type = p->icmpv6h->type;
-    p->icmp_s.code = p->icmpv6h->code;
-    p->payload_len = len - ICMPV6_HEADER_LEN;
+    const uint8_t type = p->icmp_s.type = icmpv6h->type;
+    const uint8_t code = p->icmp_s.code = icmpv6h->code;
+    DEBUG_VALIDATE_BUG_ON(len - ICMPV6_HEADER_LEN > UINT16_MAX);
+    p->payload_len = (uint16_t)(len - ICMPV6_HEADER_LEN);
     p->payload = (uint8_t *)pkt + ICMPV6_HEADER_LEN;
 
     int ctype = ICMPv6GetCounterpart(p->icmp_s.type);
@@ -209,21 +200,20 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         p->icmp_d.type = (uint8_t)ctype;
     }
 
-    SCLogDebug("ICMPV6 TYPE %" PRIu32 " CODE %" PRIu32 "", p->icmpv6h->type,
-               p->icmpv6h->code);
+    SCLogDebug("ICMPV6 TYPE %u CODE %u", type, code);
 
-    switch (ICMPV6_GET_TYPE(p)) {
+    switch (type) {
         case ICMP6_DST_UNREACH:
             SCLogDebug("ICMP6_DST_UNREACH");
 
-            if (ICMPV6_GET_CODE(p) > ICMP6_DST_UNREACH_REJECTROUTE) {
+            if (code > ICMP6_DST_UNREACH_REJECTROUTE) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
                 if (unlikely(len > ICMPV6_HEADER_LEN + USHRT_MAX)) {
                     return TM_ECODE_FAILED;
                 }
-                DecodePartialIPV6(p, (uint8_t*) (pkt + ICMPV6_HEADER_LEN),
-                                  len - ICMPV6_HEADER_LEN );
+                DecodePartialIPV6(p, (uint8_t *)(pkt + ICMPV6_HEADER_LEN),
+                        (uint16_t)(len - ICMPV6_HEADER_LEN));
                 full_hdr = 1;
             }
 
@@ -231,15 +221,15 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         case ICMP6_PACKET_TOO_BIG:
             SCLogDebug("ICMP6_PACKET_TOO_BIG");
 
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
                 if (unlikely(len > ICMPV6_HEADER_LEN + USHRT_MAX)) {
                     return TM_ECODE_FAILED;
                 }
-                p->icmpv6vars.mtu = ICMPV6_GET_MTU(p);
-                DecodePartialIPV6(p, (uint8_t*) (pkt + ICMPV6_HEADER_LEN),
-                                  len - ICMPV6_HEADER_LEN );
+                p->l4.vars.icmpv6.mtu = ICMPV6_GET_MTU(icmpv6h);
+                DecodePartialIPV6(p, (uint8_t *)(pkt + ICMPV6_HEADER_LEN),
+                        (uint16_t)(len - ICMPV6_HEADER_LEN));
                 full_hdr = 1;
             }
 
@@ -247,14 +237,14 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         case ICMP6_TIME_EXCEEDED:
             SCLogDebug("ICMP6_TIME_EXCEEDED");
 
-            if (ICMPV6_GET_CODE(p) > ICMP6_TIME_EXCEED_REASSEMBLY) {
+            if (code > ICMP6_TIME_EXCEED_REASSEMBLY) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
                 if (unlikely(len > ICMPV6_HEADER_LEN + USHRT_MAX)) {
                     return TM_ECODE_FAILED;
                 }
-                DecodePartialIPV6(p, (uint8_t*) (pkt + ICMPV6_HEADER_LEN),
-                                  len - ICMPV6_HEADER_LEN );
+                DecodePartialIPV6(p, (uint8_t *)(pkt + ICMPV6_HEADER_LEN),
+                        (uint16_t)(len - ICMPV6_HEADER_LEN));
                 full_hdr = 1;
             }
 
@@ -262,171 +252,170 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         case ICMP6_PARAM_PROB:
             SCLogDebug("ICMP6_PARAM_PROB");
 
-            if (ICMPV6_GET_CODE(p) > ICMP6_PARAMPROB_OPTION) {
+            if (code > ICMP6_PARAMPROB_OPTION) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
                 if (unlikely(len > ICMPV6_HEADER_LEN + USHRT_MAX)) {
                     return TM_ECODE_FAILED;
                 }
-                p->icmpv6vars.error_ptr= ICMPV6_GET_ERROR_PTR(p);
-                DecodePartialIPV6(p, (uint8_t*) (pkt + ICMPV6_HEADER_LEN),
-                                  len - ICMPV6_HEADER_LEN );
+                DecodePartialIPV6(p, (uint8_t *)(pkt + ICMPV6_HEADER_LEN),
+                        (uint16_t)(len - ICMPV6_HEADER_LEN));
                 full_hdr = 1;
             }
 
             break;
         case ICMP6_ECHO_REQUEST:
-            SCLogDebug("ICMP6_ECHO_REQUEST id: %u seq: %u",
-                       p->icmpv6h->icmpv6b.icmpv6i.id, p->icmpv6h->icmpv6b.icmpv6i.seq);
+            SCLogDebug("ICMP6_ECHO_REQUEST id: %u seq: %u", icmpv6h->icmpv6b.icmpv6i.id,
+                    icmpv6h->icmpv6b.icmpv6i.seq);
 
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
-                p->icmpv6vars.id = p->icmpv6h->icmpv6b.icmpv6i.id;
-                p->icmpv6vars.seq = p->icmpv6h->icmpv6b.icmpv6i.seq;
+                p->l4.vars.icmpv6.id = icmpv6h->icmpv6b.icmpv6i.id;
+                p->l4.vars.icmpv6.seq = icmpv6h->icmpv6b.icmpv6i.seq;
                 full_hdr = 1;
             }
 
             break;
         case ICMP6_ECHO_REPLY:
-            SCLogDebug("ICMP6_ECHO_REPLY id: %u seq: %u",
-                       p->icmpv6h->icmpv6b.icmpv6i.id, p->icmpv6h->icmpv6b.icmpv6i.seq);
+            SCLogDebug("ICMP6_ECHO_REPLY id: %u seq: %u", icmpv6h->icmpv6b.icmpv6i.id,
+                    icmpv6h->icmpv6b.icmpv6i.seq);
 
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             } else {
-                p->icmpv6vars.id = p->icmpv6h->icmpv6b.icmpv6i.id;
-                p->icmpv6vars.seq = p->icmpv6h->icmpv6b.icmpv6i.seq;
+                p->l4.vars.icmpv6.id = icmpv6h->icmpv6b.icmpv6i.id;
+                p->l4.vars.icmpv6.seq = icmpv6h->icmpv6b.icmpv6i.seq;
                 full_hdr = 1;
             }
 
             break;
         case ND_ROUTER_SOLICIT:
             SCLogDebug("ND_ROUTER_SOLICIT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_ROUTER_ADVERT:
             SCLogDebug("ND_ROUTER_ADVERT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_NEIGHBOR_SOLICIT:
             SCLogDebug("ND_NEIGHBOR_SOLICIT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_NEIGHBOR_ADVERT:
             SCLogDebug("ND_NEIGHBOR_ADVERT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_REDIRECT:
             SCLogDebug("ND_REDIRECT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case MLD_LISTENER_QUERY:
             SCLogDebug("MLD_LISTENER_QUERY");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
-            if (IPV6_GET_HLIM(p) != 1) {
+            if (IPV6_GET_RAW_HLIM(ip6h) != 1) {
                 ENGINE_SET_EVENT(p, ICMPV6_MLD_MESSAGE_WITH_INVALID_HL);
             }
             break;
         case MLD_LISTENER_REPORT:
             SCLogDebug("MLD_LISTENER_REPORT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
-            if (IPV6_GET_HLIM(p) != 1) {
+            if (IPV6_GET_RAW_HLIM(ip6h) != 1) {
                 ENGINE_SET_EVENT(p, ICMPV6_MLD_MESSAGE_WITH_INVALID_HL);
             }
             break;
         case MLD_LISTENER_REDUCTION:
             SCLogDebug("MLD_LISTENER_REDUCTION");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
-            if (IPV6_GET_HLIM(p) != 1) {
+            if (IPV6_GET_RAW_HLIM(ip6h) != 1) {
                 ENGINE_SET_EVENT(p, ICMPV6_MLD_MESSAGE_WITH_INVALID_HL);
             }
             break;
         case ICMP6_RR:
             SCLogDebug("ICMP6_RR");
-            if (ICMPV6_GET_CODE(p) > 2 && ICMPV6_GET_CODE(p) != 255) {
+            if (code > 2 && code != 255) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ICMP6_NI_QUERY:
             SCLogDebug("ICMP6_NI_QUERY");
-            if (ICMPV6_GET_CODE(p) > 2) {
+            if (code > 2) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ICMP6_NI_REPLY:
             SCLogDebug("ICMP6_NI_REPLY");
-            if (ICMPV6_GET_CODE(p) > 2) {
+            if (code > 2) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_INVERSE_SOLICIT:
             SCLogDebug("ND_INVERSE_SOLICIT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case ND_INVERSE_ADVERT:
             SCLogDebug("ND_INVERSE_ADVERT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case MLD_V2_LIST_REPORT:
             SCLogDebug("MLD_V2_LIST_REPORT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case HOME_AGENT_AD_REQUEST:
             SCLogDebug("HOME_AGENT_AD_REQUEST");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case HOME_AGENT_AD_REPLY:
             SCLogDebug("HOME_AGENT_AD_REPLY");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case MOBILE_PREFIX_SOLICIT:
             SCLogDebug("MOBILE_PREFIX_SOLICIT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case MOBILE_PREFIX_ADVERT:
             SCLogDebug("MOBILE_PREFIX_ADVERT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case CERT_PATH_SOLICIT:
             SCLogDebug("CERT_PATH_SOLICIT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case CERT_PATH_ADVERT:
             SCLogDebug("CERT_PATH_ADVERT");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
@@ -444,40 +433,40 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
             break;
         case FMIPV6_MSG:
             SCLogDebug("FMIPV6_MSG");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case RPL_CONTROL_MSG:
             SCLogDebug("RPL_CONTROL_MSG");
-            if (ICMPV6_GET_CODE(p) > 3 && ICMPV6_GET_CODE(p) < 128) {
+            if (code > 3 && code < 128) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
-            if (ICMPV6_GET_CODE(p) > 132) {
+            if (code > 132) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case LOCATOR_UDATE_MSG:
             SCLogDebug("LOCATOR_UDATE_MSG");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case DUPL_ADDR_REQUEST:
             SCLogDebug("DUPL_ADDR_REQUEST");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case DUPL_ADDR_CONFIRM:
             SCLogDebug("DUPL_ADDR_CONFIRM");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
         case MPL_CONTROL_MSG:
             SCLogDebug("MPL_CONTROL_MSG");
-            if (ICMPV6_GET_CODE(p) != 0) {
+            if (code != 0) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_CODE);
             }
             break;
@@ -485,21 +474,22 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
             /* Various range taken from:
              *   http://www.iana.org/assignments/icmpv6-parameters/icmpv6-parameters.xhtml#icmpv6-parameters-2
              */
-            if ((ICMPV6_GET_TYPE(p) > 4) &&  (ICMPV6_GET_TYPE(p) < 100)) {
+            if (type > 4 && type < 100) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNASSIGNED_TYPE);
-            } else if ((ICMPV6_GET_TYPE(p) >= 100) &&  (ICMPV6_GET_TYPE(p) < 102)) {
+            } else if (type >= 100 && type < 102) {
                 ENGINE_SET_EVENT(p, ICMPV6_EXPERIMENTATION_TYPE);
-            } else  if ((ICMPV6_GET_TYPE(p) >= 102) &&  (ICMPV6_GET_TYPE(p) < 127)) {
+            } else if (type >= 102 && type < 127) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNASSIGNED_TYPE);
-            } else if ((ICMPV6_GET_TYPE(p) >= 160) &&  (ICMPV6_GET_TYPE(p) < 200)) {
+            } else if (type >= 160 && type < 200) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNASSIGNED_TYPE);
-            } else if ((ICMPV6_GET_TYPE(p) >= 200) &&  (ICMPV6_GET_TYPE(p) < 202)) {
+            } else if (type >= 200 && type < 202) {
                 ENGINE_SET_EVENT(p, ICMPV6_EXPERIMENTATION_TYPE);
-            } else if (ICMPV6_GET_TYPE(p) >= 202) {
+            } else if (type >= 202) {
                 ENGINE_SET_EVENT(p, ICMPV6_UNASSIGNED_TYPE);
             } else {
-                SCLogDebug("ICMPV6 Message type %" PRIu8 " not "
-                        "implemented yet", ICMPV6_GET_TYPE(p));
+                SCLogDebug("ICMPV6 Message type %u not "
+                           "implemented yet",
+                        type);
                 ENGINE_SET_EVENT(p, ICMPV6_UNKNOWN_TYPE);
             }
     }
@@ -529,6 +519,8 @@ int DecodeICMPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 }
 
 #ifdef UNITTESTS
+#include "packet.h"
+#include "util-unittest-helper.h"
 
 static int ICMPV6CalculateValidChecksumtest01(void)
 {
@@ -608,7 +600,7 @@ static int ICMPV6ParamProbTest01(void)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         0x80, 0x00, 0x08, 0xb5, 0x99, 0xc3, 0xde, 0x40 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
@@ -619,27 +611,25 @@ static int ICMPV6ParamProbTest01(void)
     ipv6dst = (uint32_t*) &raw_ipv6[24];
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF(p->icmpv6h == NULL);
+    FAIL_IF(!PacketIsICMPv6(p));
 
     /* ICMPv6 not processed at all? */
-    FAIL_IF(ICMPV6_GET_TYPE(p) != 4 || ICMPV6_GET_CODE(p) != 0 ||
-        ICMPV6_GET_EMB_PROTO(p) != IPPROTO_ICMPV6);
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 4);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
+    FAIL_IF(ICMPV6_GET_EMB_PROTO(p) != IPPROTO_ICMPV6);
 
     /* Let's check if we retrieved the embedded ipv6 addresses correctly */
-    uint32_t i=0;
-    for (i = 0; i < 4; i++) {
-        FAIL_IF(p->icmpv6vars.emb_ip6_src[i] != ipv6src[i] ||
-            p->icmpv6vars.emb_ip6_dst[i] != ipv6dst[i]);
+    for (int i = 0; i < 4; i++) {
+        FAIL_IF(PacketGetICMPv6EmbIPv6(p)->s_ip6_src[i] != ipv6src[i] ||
+                PacketGetICMPv6EmbIPv6(p)->s_ip6_dst[i] != ipv6dst[i]);
     }
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -664,7 +654,7 @@ static int ICMPV6PktTooBigTest01(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
@@ -675,30 +665,28 @@ static int ICMPV6PktTooBigTest01(void)
     ipv6dst = (uint32_t*) &raw_ipv6[24];
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF(p->icmpv6h == NULL);
+    FAIL_IF(!PacketIsICMPv6(p));
 
     /* Note: it has an embedded ipv6 packet but no protocol after ipv6
      * (IPPROTO_NONE) */
     /* Check if ICMPv6 header was processed at all. */
-    FAIL_IF(ICMPV6_GET_TYPE(p) != 2 || ICMPV6_GET_CODE(p) != 0 );
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 2);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
 
     /* Let's check if we retrieved the embedded ipv6 addresses correctly */
-    uint32_t i=0;
-    for (i = 0; i < 4; i++) {
-        FAIL_IF(p->icmpv6vars.emb_ip6_src[i] != ipv6src[i] ||
-            p->icmpv6vars.emb_ip6_dst[i] != ipv6dst[i]);
+    for (int i = 0; i < 4; i++) {
+        FAIL_IF(PacketGetICMPv6EmbIPv6(p)->s_ip6_src[i] != ipv6src[i] ||
+                PacketGetICMPv6EmbIPv6(p)->s_ip6_dst[i] != ipv6dst[i]);
     }
 
     SCLogDebug("ICMPV6 IPV6 src and dst properly set");
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -723,7 +711,7 @@ static int ICMPV6TimeExceedTest01(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
@@ -734,30 +722,28 @@ static int ICMPV6TimeExceedTest01(void)
     ipv6dst = (uint32_t*) &raw_ipv6[24];
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF_NULL(p->icmpv6h);
+    FAIL_IF(!PacketIsICMPv6(p));
 
     /* Note: it has an embedded ipv6 packet but no protocol after ipv6 (IPPROTO_NONE) */
-    FAIL_IF(ICMPV6_GET_TYPE(p) != 3 || ICMPV6_GET_CODE(p) != 0 ||
-        ICMPV6_GET_EMB_IPV6(p) == NULL ||
-        ICMPV6_GET_EMB_PROTO(p) != IPPROTO_NONE);
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 3);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
+    FAIL_IF_NULL(PacketGetICMPv6EmbIPv6(p));
+    FAIL_IF(ICMPV6_GET_EMB_PROTO(p) != IPPROTO_NONE);
 
     /* Let's check if we retrieved the embedded ipv6 addresses correctly */
-    uint32_t i=0;
-    for (i = 0; i < 4; i++) {
-        FAIL_IF(p->icmpv6vars.emb_ip6_src[i] != ipv6src[i] ||
-            p->icmpv6vars.emb_ip6_dst[i] != ipv6dst[i]);
+    for (int i = 0; i < 4; i++) {
+        FAIL_IF(PacketGetICMPv6EmbIPv6(p)->s_ip6_src[i] != ipv6src[i] ||
+                PacketGetICMPv6EmbIPv6(p)->s_ip6_dst[i] != ipv6dst[i]);
     }
 
     SCLogDebug("ICMPV6 IPV6 src and dst properly set");
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -782,7 +768,7 @@ static int ICMPV6DestUnreachTest01(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
@@ -793,28 +779,26 @@ static int ICMPV6DestUnreachTest01(void)
     ipv6dst = (uint32_t*) &raw_ipv6[24];
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF_NULL(p->icmpv6h);
+    FAIL_IF(!PacketIsICMPv6(p));
 
     /* Note: it has an embedded ipv6 packet but no protocol after ipv6 (IPPROTO_NONE) */
-    FAIL_IF(ICMPV6_GET_TYPE(p) != 1 || ICMPV6_GET_CODE(p) != 0 ||
-        ICMPV6_GET_EMB_IPV6(p) == NULL ||
-        ICMPV6_GET_EMB_PROTO(p) != IPPROTO_NONE);
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 1);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
+    FAIL_IF_NULL(PacketGetICMPv6EmbIPv6(p));
+    FAIL_IF(ICMPV6_GET_EMB_PROTO(p) != IPPROTO_NONE);
 
     /* Let's check if we retrieved the embedded ipv6 addresses correctly */
-    uint32_t i=0;
-    for (i = 0; i < 4; i++) {
-        FAIL_IF(p->icmpv6vars.emb_ip6_src[i] != ipv6src[i] ||
-            p->icmpv6vars.emb_ip6_dst[i] != ipv6dst[i]);
+    for (int i = 0; i < 4; i++) {
+        FAIL_IF(PacketGetICMPv6EmbIPv6(p)->s_ip6_src[i] != ipv6src[i] ||
+                PacketGetICMPv6EmbIPv6(p)->s_ip6_dst[i] != ipv6dst[i]);
     }
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -833,33 +817,28 @@ static int ICMPV6EchoReqTest01(void)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         0x80, 0x00, 0xe5, 0xa5, 0x25, 0xf0, 0x75, 0x23 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF_NULL(p->icmpv6h);
+    FAIL_IF(!PacketIsICMPv6(p));
 
     SCLogDebug("ID: %u seq: %u", ICMPV6_GET_ID(p), ICMPV6_GET_SEQ(p));
 
-    if (ICMPV6_GET_TYPE(p) != 128 || ICMPV6_GET_CODE(p) != 0 ||
-        SCNtohs(ICMPV6_GET_ID(p)) != 9712 || SCNtohs(ICMPV6_GET_SEQ(p)) != 29987) {
-        printf("ICMPv6 Echo reply decode failed TYPE %u CODE %u ID %04x(%u) SEQ %04x(%u): ",
-                ICMPV6_GET_TYPE(p), ICMPV6_GET_CODE(p), ICMPV6_GET_ID(p), SCNtohs(ICMPV6_GET_ID(p)),
-                ICMPV6_GET_SEQ(p), SCNtohs(ICMPV6_GET_SEQ(p)));
-        FAIL;
-    }
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 128);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
+    FAIL_IF(SCNtohs(ICMPV6_GET_ID(p)) != 9712);
+    FAIL_IF(SCNtohs(ICMPV6_GET_SEQ(p)) != 29987);
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -879,34 +858,26 @@ static int ICMPV6EchoRepTest01(void)
         0x00, 0x00, 0x00, 0x00, 0x01, 0x81, 0x00,
         0xe5, 0xa5, 0x25, 0xf0, 0x75, 0x23 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
+    FAIL_IF(!PacketIsICMPv6(p));
 
-    FAIL_IF_NULL(p->icmpv6h);
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 129);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
+    FAIL_IF(SCNtohs(ICMPV6_GET_ID(p)) != 9712);
+    FAIL_IF(SCNtohs(ICMPV6_GET_SEQ(p)) != 29987);
 
-    SCLogDebug("type: %u code %u ID: %u seq: %u", ICMPV6_GET_TYPE(p),
-               ICMPV6_GET_CODE(p),ICMPV6_GET_ID(p), ICMPV6_GET_SEQ(p));
-
-    if (ICMPV6_GET_TYPE(p) != 129 || ICMPV6_GET_CODE(p) != 0 ||
-        SCNtohs(ICMPV6_GET_ID(p)) != 9712 || SCNtohs(ICMPV6_GET_SEQ(p)) != 29987) {
-        printf("ICMPv6 Echo reply decode failed TYPE %u CODE %u ID %04x(%u) SEQ %04x(%u): ",
-                ICMPV6_GET_TYPE(p), ICMPV6_GET_CODE(p), ICMPV6_GET_ID(p), SCNtohs(ICMPV6_GET_ID(p)),
-                ICMPV6_GET_SEQ(p), SCNtohs(ICMPV6_GET_SEQ(p)));
-        FAIL;
-    }
-
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -932,25 +903,24 @@ static int ICMPV6ParamProbTest02(void)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         0x80, 0x00, 0x08, 0xb5, 0x99, 0xc3, 0xde, 0x40 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF_NULL(p->icmpv6h);
-    FAIL_IF(ICMPV6_GET_TYPE(p) != 4 || ICMPV6_GET_CODE(p) != 0);
+    FAIL_IF(!PacketIsICMPv6(p));
+    FAIL_IF(ICMPV6_GET_TYPE(PacketGetICMPv6(p)) != 4);
+    FAIL_IF(ICMPV6_GET_CODE(PacketGetICMPv6(p)) != 0);
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_IPV6_UNKNOWN_VER));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -975,24 +945,22 @@ static int ICMPV6PktTooBigTest02(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
     DecodeIPV6(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
-
-    FAIL_IF_NULL(p->icmpv6h);
+    FAIL_IF(!PacketIsICMPv6(p));
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1014,14 +982,13 @@ static int ICMPV6TimeExceedTest02(void)
 
     /* The icmpv6 header is broken in the checksum (so we dont have a complete header) */
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1030,7 +997,7 @@ static int ICMPV6TimeExceedTest02(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_PKT_TOO_SMALL));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1055,14 +1022,13 @@ static int ICMPV6DestUnreachTest02(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1071,7 +1037,7 @@ static int ICMPV6DestUnreachTest02(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_IPV6_TRUNC_PKT));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1092,14 +1058,13 @@ static int ICMPV6EchoReqTest02(void)
         0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x01,
         0xe5, 0xa5, 0x25, 0xf0, 0x75, 0x23 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1108,7 +1073,7 @@ static int ICMPV6EchoReqTest02(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1129,14 +1094,13 @@ static int ICMPV6EchoRepTest02(void)
         0x00, 0x00, 0x00, 0x00, 0x01, 0x81, 0x01,
         0xe5, 0xa5, 0x25, 0xf0, 0x75, 0x23 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1145,13 +1109,13 @@ static int ICMPV6EchoRepTest02(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
 }
 
-/**\test icmpv6 packet decoding and setting up of payload_len and payload buufer
+/**\test icmpv6 packet decoding and setting up of payload_len and payload buffer
  * \retval retval 0 = Error ; 1 = ok
  */
 static int ICMPV6PayloadTest01(void)
@@ -1169,14 +1133,13 @@ static int ICMPV6PayloadTest01(void)
         0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00 };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1186,7 +1149,7 @@ static int ICMPV6PayloadTest01(void)
     FAIL_IF_NULL(p->payload);
     FAIL_IF(p->payload_len != 37);
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1203,14 +1166,13 @@ static int ICMPV6RouterSolicitTestKnownCode(void)
         0x85, 0x00, 0xbe, 0xb0, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1219,7 +1181,7 @@ static int ICMPV6RouterSolicitTestKnownCode(void)
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1236,14 +1198,13 @@ static int ICMPV6RouterSolicitTestUnknownCode(void)
         0x85, 0x01, 0xbe, 0xaf, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1252,7 +1213,7 @@ static int ICMPV6RouterSolicitTestUnknownCode(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1269,14 +1230,13 @@ static int ICMPV6RouterAdvertTestKnownCode(void)
         0x86, 0x00, 0xbd, 0xb0, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1285,7 +1245,7 @@ static int ICMPV6RouterAdvertTestKnownCode(void)
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1302,14 +1262,13 @@ static int ICMPV6RouterAdvertTestUnknownCode(void)
         0x86, 0x01, 0xbd, 0xaf, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1318,7 +1277,7 @@ static int ICMPV6RouterAdvertTestUnknownCode(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1335,14 +1294,13 @@ static int ICMPV6NeighbourSolicitTestKnownCode(void)
         0x87, 0x00, 0xbc, 0xb0, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1351,7 +1309,7 @@ static int ICMPV6NeighbourSolicitTestKnownCode(void)
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1368,14 +1326,13 @@ static int ICMPV6NeighbourSolicitTestUnknownCode(void)
         0x87, 0x01, 0xbc, 0xaf, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1384,7 +1341,7 @@ static int ICMPV6NeighbourSolicitTestUnknownCode(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1401,14 +1358,13 @@ static int ICMPV6NeighbourAdvertTestKnownCode(void)
         0x88, 0x00, 0xbb, 0xb0, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1417,7 +1373,7 @@ static int ICMPV6NeighbourAdvertTestKnownCode(void)
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1434,14 +1390,13 @@ static int ICMPV6NeighbourAdvertTestUnknownCode(void)
         0x88, 0x01, 0xbb, 0xaf, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1450,7 +1405,7 @@ static int ICMPV6NeighbourAdvertTestUnknownCode(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1467,14 +1422,13 @@ static int ICMPV6RedirectTestKnownCode(void)
         0x89, 0x00, 0xba, 0xb0, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1483,7 +1437,7 @@ static int ICMPV6RedirectTestKnownCode(void)
 
     FAIL_IF(ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1500,14 +1454,13 @@ static int ICMPV6RedirectTestUnknownCode(void)
         0x89, 0x01, 0xba, 0xaf, 0x00, 0x00, 0x00, 0x00
     };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&ip6h, 0, sizeof(IPV6Hdr));
 
@@ -1516,7 +1469,7 @@ static int ICMPV6RedirectTestUnknownCode(void)
 
     FAIL_IF(!ENGINE_ISSET_EVENT(p, ICMPV6_UNKNOWN_CODE));
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1550,28 +1503,25 @@ static int ICMPV6CalculateValidChecksumWithFCS(void)
     };
     uint16_t csum = *(((uint16_t *)(raw_ipv6 + 64)));
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
-    IPV6Hdr ip6h;
     ThreadVars tv;
     DecodeThreadVars dtv;
-
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
-    memset(&ip6h, 0, sizeof(IPV6Hdr));
 
     FlowInitConfig(FLOW_QUIET);
-    DecodeIPV6(&tv, &dtv, p, raw_ipv6 + 14, sizeof(raw_ipv6) - 14);
-    FAIL_IF_NULL(p->icmpv6h);
+    DecodeEthernet(&tv, &dtv, p, raw_ipv6, sizeof(raw_ipv6));
+    FAIL_IF(!PacketIsICMPv6(p));
 
-    uint16_t icmpv6_len = IPV6_GET_RAW_PLEN(p->ip6h) -
-        ((uint8_t *)p->icmpv6h - (uint8_t *)p->ip6h - IPV6_HEADER_LEN);
+    const ICMPV6Hdr *icmpv6h = PacketGetICMPv6(p);
+    const IPV6Hdr *ip6h = PacketGetIPv6(p);
+    uint16_t icmpv6_len = IPV6_GET_RAW_PLEN(ip6h) -
+                          ((const uint8_t *)icmpv6h - (const uint8_t *)ip6h - IPV6_HEADER_LEN);
     FAIL_IF(icmpv6_len != 28);
-    FAIL_IF(ICMPV6CalculateChecksum(p->ip6h->s_ip6_addrs,
-            (uint16_t *)p->icmpv6h, icmpv6_len) != csum);
+    FAIL_IF(ICMPV6CalculateChecksum(ip6h->s_ip6_addrs, (uint16_t *)icmpv6h, icmpv6_len) != csum);
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;
@@ -1587,8 +1537,7 @@ void DecodeICMPV6RegisterTests(void)
 #ifdef UNITTESTS
     UtRegisterTest("ICMPV6CalculateValidChecksumtest01",
                    ICMPV6CalculateValidChecksumtest01);
-    UtRegisterTest("ICMPV6CalculateInValidChecksumtest02",
-                   ICMPV6CalculateInvalidChecksumtest02);
+    UtRegisterTest("ICMPV6CalculateInvalidChecksumtest02", ICMPV6CalculateInvalidChecksumtest02);
 
     UtRegisterTest("ICMPV6ParamProbTest01 (Valid)", ICMPV6ParamProbTest01);
     UtRegisterTest("ICMPV6DestUnreachTest01 (Valid)", ICMPV6DestUnreachTest01);

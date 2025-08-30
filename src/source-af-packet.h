@@ -21,8 +21,8 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __SOURCE_AFP_H__
-#define __SOURCE_AFP_H__
+#ifndef SURICATA_SOURCE_AFP_H
+#define SURICATA_SOURCE_AFP_H
 
 #ifndef HAVE_PACKET_FANOUT /* not defined if linux/if_packet.h trying to force */
 #define HAVE_PACKET_FANOUT 1
@@ -55,8 +55,8 @@ struct ebpf_timeout_config {
 #endif
 
 /* value for flags */
-#define AFP_RING_MODE (1<<0)
-#define AFP_ZERO_COPY (1<<1)
+#define AFP_NEED_PEER (1 << 0)
+// (1<<1) vacant
 #define AFP_SOCK_PROTECT (1<<2)
 #define AFP_EMERGENCY_MODE (1<<3)
 #define AFP_TPACKET_V3 (1<<4)
@@ -69,14 +69,21 @@ struct ebpf_timeout_config {
 #define AFP_COPY_MODE_TAP   1
 #define AFP_COPY_MODE_IPS   2
 
-#define AFP_FILE_MAX_PKTS 256
 #define AFP_IFACE_NAME_LENGTH 48
 
 /* In kernel the allocated block size is allocated using the formula
  * page_size << order. So default value is using the same formula with
  * an order of 3 which guarantee we have some room in the block compared
  * to standard frame size */
-#define AFP_BLOCK_SIZE_DEFAULT_ORDER 3
+#define AFP_BLOCK_SIZE_DEFAULT_ORDER 5
+
+/* Set max packet size to 65561: IP + Ethernet + 3 VLAN tags. */
+#define MAX_PACKET_SIZE 65561
+
+/* Default snaplen to use when defrag enabled. 9k is somewhat
+ * arbitrary but is large enough for the common 9000 jumbo frame plus
+ * some extra headers including tpacket headers. */
+#define DEFAULT_TPACKET_DEFRAG_SNAPLEN 9216
 
 typedef struct AFPIfaceConfig_
 {
@@ -91,6 +98,8 @@ typedef struct AFPIfaceConfig_
     int block_size;
     /* block timeout for tpacket_v3 in milliseconds */
     int block_timeout;
+    /* block size for tpacket v2 */
+    int v2_block_size;
     /* cluster param */
     uint16_t cluster_id;
     int cluster_type;
@@ -98,7 +107,7 @@ typedef struct AFPIfaceConfig_
     int promisc;
     /* misc use flags including ring mode */
     unsigned int flags;
-    int copy_mode;
+    uint8_t copy_mode;
     ChecksumValidationMode checksum_mode;
     const char *bpf_filter;
     const char *ebpf_lb_file;
@@ -125,6 +134,7 @@ typedef struct AFPPeer_ {
     SC_ATOMIC_DECLARE(int, socket);
     SC_ATOMIC_DECLARE(int, sock_usage);
     SC_ATOMIC_DECLARE(int, if_idx);
+    SC_ATOMIC_DECLARE(uint64_t, send_errors);
     int flags;
     SCMutex sock_protect;
     int turn; /**< Field used to store initialisation order. */
@@ -149,6 +159,7 @@ typedef struct AFPPacketVars_
      */
     AFPPeer *mpeer;
     uint8_t copy_mode;
+    uint16_t vlan_tci;
 #ifdef HAVE_PACKET_EBPF
     int v4_map_fd;
     int v6_map_fd;
@@ -157,21 +168,25 @@ typedef struct AFPPacketVars_
 } AFPPacketVars;
 
 #ifdef HAVE_PACKET_EBPF
-#define AFPV_CLEANUP(afpv) do {           \
-    (afpv)->relptr = NULL;                \
-    (afpv)->copy_mode = 0;                \
-    (afpv)->peer = NULL;                  \
-    (afpv)->mpeer = NULL;                 \
-    (afpv)->v4_map_fd = -1;               \
-    (afpv)->v6_map_fd = -1;               \
-} while(0)
+#define AFPV_CLEANUP(afpv)                                                                         \
+    do {                                                                                           \
+        (afpv)->relptr = NULL;                                                                     \
+        (afpv)->copy_mode = 0;                                                                     \
+        (afpv)->vlan_tci = 0;                                                                      \
+        (afpv)->peer = NULL;                                                                       \
+        (afpv)->mpeer = NULL;                                                                      \
+        (afpv)->v4_map_fd = -1;                                                                    \
+        (afpv)->v6_map_fd = -1;                                                                    \
+    } while (0)
 #else
-#define AFPV_CLEANUP(afpv) do {           \
-    (afpv)->relptr = NULL;                \
-    (afpv)->copy_mode = 0;                \
-    (afpv)->peer = NULL;                  \
-    (afpv)->mpeer = NULL;                 \
-} while(0)
+#define AFPV_CLEANUP(afpv)                                                                         \
+    do {                                                                                           \
+        (afpv)->relptr = NULL;                                                                     \
+        (afpv)->copy_mode = 0;                                                                     \
+        (afpv)->vlan_tci = 0;                                                                      \
+        (afpv)->peer = NULL;                                                                       \
+        (afpv)->mpeer = NULL;                                                                      \
+    } while (0)
 #endif
 
 /**
@@ -186,7 +201,6 @@ TmEcode AFPPeersListCheck(void);
 void AFPPeersListClean(void);
 int AFPGetLinkType(const char *ifname);
 
-int AFPIsFanoutSupported(int cluster_id);
+int AFPIsFanoutSupported(uint16_t cluster_id);
 
-
-#endif /* __SOURCE_AFP_H__ */
+#endif /* SURICATA_SOURCE_AFP_H */

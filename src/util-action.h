@@ -21,13 +21,14 @@
  * \author Pablo Rincon <pablo.rincon.crespo@gmail.com>
  */
 
-#ifndef __ACTION_ORDER_H__
-#define __ACTION_ORDER_H__
+#ifndef SURICATA_ACTION_ORDER_H
+#define SURICATA_ACTION_ORDER_H
 
 #include "suricata-common.h"
 
 int ActionInitConfig(void);
 uint8_t ActionOrderVal(uint8_t);
+#ifdef UNITTESTS
 void UtilActionRegisterTests(void);
-
-#endif /* __ACTION_ORDER_H__ */
+#endif
+#endif /* SURICATA_ACTION_ORDER_H */

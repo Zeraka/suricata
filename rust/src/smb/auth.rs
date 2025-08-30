@@ -1,4 +1,4 @@
-/* Copyright (C) 2018 Open Information Security Foundation
+/* Copyright (C) 2018-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,30 +17,28 @@
 
 use crate::kerberos::*;
 
-use crate::log::*;
 use crate::smb::ntlmssp_records::*;
 use crate::smb::smb::*;
 
-use nom;
-use nom::IResult;
+use nom7::{Err, IResult};
 use der_parser::ber::BerObjectContent;
 use der_parser::der::{parse_der_oid, parse_der_sequence};
 
 fn parse_secblob_get_spnego(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 {
-    let (rem, base_o) = der_parser::parse_der(blob).map_err(|e| nom::Err::convert(e))?;
+    let (rem, base_o) = der_parser::parse_der(blob).map_err(Err::convert)?;
     SCLogDebug!("parse_secblob_get_spnego: base_o {:?}", base_o);
     let d = match base_o.content.as_slice() {
-        Err(_) => { return Err(nom::Err::Error(SecBlobError::NotSpNego)); },
+        Err(_) => { return Err(Err::Error(SecBlobError::NotSpNego)); },
         Ok(d) => d,
     };
-    let (next, o) = parse_der_oid(d).map_err(|e| nom::Err::convert(e))?;
+    let (next, o) = parse_der_oid(d).map_err(Err::convert)?;
     SCLogDebug!("parse_secblob_get_spnego: sub_o {:?}", o);
 
     let oid = match o.content.as_oid() {
         Ok(oid) => oid,
         Err(_) => {
-            return Err(nom::Err::Error(SecBlobError::NotSpNego));
+            return Err(Err::Error(SecBlobError::NotSpNego));
         },
     };
     SCLogDebug!("oid {}", oid.to_string());
@@ -50,7 +48,7 @@ fn parse_secblob_get_spnego(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
             SCLogDebug!("SPNEGO {}", oid);
         },
         _ => {
-            return Err(nom::Err::Error(SecBlobError::NotSpNego));
+            return Err(Err::Error(SecBlobError::NotSpNego));
         },
     }
 
@@ -61,19 +59,20 @@ fn parse_secblob_get_spnego(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 
 fn parse_secblob_spnego_start(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 {
-    let (rem, o) = der_parser::parse_der(blob).map_err(|e| nom::Err::convert(e))?;
+    let (rem, o) = der_parser::parse_der(blob).map_err(Err::convert)?;
     let d = match o.content.as_slice() {
         Ok(d) => {
             SCLogDebug!("d: next data len {}",d.len());
             d
         },
         _ => {
-            return Err(nom::Err::Error(SecBlobError::NotSpNego));
+            return Err(Err::Error(SecBlobError::NotSpNego));
         },
     };
     Ok((rem, d))
 }
 
+#[derive(Debug, PartialEq)]
 pub struct SpnegoRequest {
     pub krb: Option<Kerberos5Ticket>,
     pub ntlmssp: Option<NtlmsspData>,
@@ -106,35 +105,31 @@ fn parse_secblob_spnego(blob: &[u8]) -> Option<SpnegoRequest>
             BerObjectContent::Sequence(ref seq) => {
                 for se in seq {
                     SCLogDebug!("SEQ {:?}", se);
-                    match se.content {
-                        BerObjectContent::OID(ref oid) => {
-                            SCLogDebug!("OID {:?}", oid);
-                            match oid.to_string().as_str() {
-                                "1.2.840.48018.1.2.2" => { SCLogDebug!("Microsoft Kerberos 5"); },
-                                "1.2.840.113554.1.2.2" => { SCLogDebug!("Kerberos 5"); have_kerberos = true; },
-                                "1.2.840.113554.1.2.2.1" => { SCLogDebug!("krb5-name"); },
-                                "1.2.840.113554.1.2.2.2" => { SCLogDebug!("krb5-principal"); },
-                                "1.2.840.113554.1.2.2.3" => { SCLogDebug!("krb5-user-to-user-mech"); },
-                                "1.3.6.1.4.1.311.2.2.10" => { SCLogDebug!("NTLMSSP"); have_ntlmssp = true; },
-                                "1.3.6.1.4.1.311.2.2.30" => { SCLogDebug!("NegoEx"); },
-                                _ => { SCLogDebug!("unexpected OID {:?}", oid); },
-                            }
-                        },
-                        _ => { SCLogDebug!("expected OID, got {:?}", se); },
+                    if let BerObjectContent::OID(ref oid) = se.content {
+                        SCLogDebug!("OID {:?}", oid);
+                        match oid.to_string().as_str() {
+                            "1.2.840.48018.1.2.2" => { SCLogDebug!("Microsoft Kerberos 5"); },
+                            "1.2.840.113554.1.2.2" => { SCLogDebug!("Kerberos 5"); have_kerberos = true; },
+                            "1.2.840.113554.1.2.2.1" => { SCLogDebug!("krb5-name"); },
+                            "1.2.840.113554.1.2.2.2" => { SCLogDebug!("krb5-principal"); },
+                            "1.2.840.113554.1.2.2.3" => { SCLogDebug!("krb5-user-to-user-mech"); },
+                            "1.3.6.1.4.1.311.2.2.10" => { SCLogDebug!("NTLMSSP"); have_ntlmssp = true; },
+                            "1.3.6.1.4.1.311.2.2.30" => { SCLogDebug!("NegoEx"); },
+                            _ => { SCLogDebug!("unexpected OID {:?}", oid); },
+                        }
+                    } else {
+                        SCLogDebug!("expected OID, got {:?}", se);
                     }
                 }
             },
-            BerObjectContent::OctetString(ref os) => {
+            BerObjectContent::OctetString(os) => {
                 if have_kerberos {
-                    match parse_kerberos5_request(os) {
-                        Ok((_, t)) => {
-                            kticket = Some(t)
-                        },
-                        _ => { },
+                    if let Ok((_, t)) = parse_kerberos5_request(os) {
+                        kticket = Some(t)
                     }
                 }
 
-                if have_ntlmssp && kticket == None {
+                if have_ntlmssp && kticket.is_none() {
                     SCLogDebug!("parsing expected NTLMSSP");
                     ntlmssp = parse_ntlmssp_blob(os);
                 }
@@ -145,17 +140,18 @@ fn parse_secblob_spnego(blob: &[u8]) -> Option<SpnegoRequest>
 
     let s = SpnegoRequest {
         krb: kticket,
-        ntlmssp: ntlmssp,
+        ntlmssp,
     };
     Some(s)
 }
 
-#[derive(Debug,PartialEq)]
+#[derive(Debug,PartialEq, Eq)]
 pub struct NtlmsspData {
     pub host: Vec<u8>,
     pub user: Vec<u8>,
     pub domain: Vec<u8>,
     pub version: Option<NTLMSSPVersion>,
+    pub warning: bool,
 }
 
 /// take in blob, search for the header and parse it
@@ -164,39 +160,34 @@ fn parse_ntlmssp_blob(blob: &[u8]) -> Option<NtlmsspData>
     let mut ntlmssp_data : Option<NtlmsspData> = None;
 
     SCLogDebug!("NTLMSSP {:?}", blob);
-    match parse_ntlmssp(blob) {
-        Ok((_, nd)) => {
-            SCLogDebug!("NTLMSSP TYPE {}/{} nd {:?}",
+    if let Ok((_, nd)) = parse_ntlmssp(blob) {
+        SCLogDebug!("NTLMSSP TYPE {}/{} nd {:?}",
                     nd.msg_type, &ntlmssp_type_string(nd.msg_type), nd);
-            match nd.msg_type {
-                NTLMSSP_NEGOTIATE => {
-                },
-                NTLMSSP_AUTH => {
-                    match parse_ntlm_auth_record(nd.data) {
-                        Ok((_, ad)) => {
-                            SCLogDebug!("auth data {:?}", ad);
-                            let mut host = ad.host.to_vec();
-                            host.retain(|&i|i != 0x00);
-                            let mut user = ad.user.to_vec();
-                            user.retain(|&i|i != 0x00);
-                            let mut domain = ad.domain.to_vec();
-                            domain.retain(|&i|i != 0x00);
-
-                            let d = NtlmsspData {
-                                host: host,
-                                user: user,
-                                domain: domain,
-                                version: ad.version,
-                            };
-                            ntlmssp_data = Some(d);
-                        },
-                        _ => {},
-                    }
-                },
-                _ => {},
-            }
-        },
-        _ => {},
+        match nd.msg_type {
+            NTLMSSP_NEGOTIATE => {
+            },
+            NTLMSSP_AUTH => {
+                if let Ok((_, ad)) = parse_ntlm_auth_record(nd.data) {
+                    SCLogDebug!("auth data {:?}", ad);
+                    let mut host = ad.host.to_vec();
+                    host.retain(|&i|i != 0x00);
+                    let mut user = ad.user.to_vec();
+                    user.retain(|&i|i != 0x00);
+                    let mut domain = ad.domain.to_vec();
+                    domain.retain(|&i|i != 0x00);
+                    
+                    let d = NtlmsspData {
+                        host,
+                        user,
+                        domain,
+                        warning: ad.warning,
+                        version: ad.version,
+                    };
+                    ntlmssp_data = Some(d);
+                }
+            },
+            _ => {},
+        }
     }
     return ntlmssp_data;
 }
@@ -236,5 +227,33 @@ pub fn parse_secblob(blob: &[u8]) -> Option<SpnegoRequest>
                 None => { None },
             }
         },
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_parse_secblob() {
+        // smb2.security_blob
+        let blob = hex::decode("a18202313082022da0030a0101a28202100482020c4e544c4d5353500003000000180018009c00000048014801b40000001e001e005800000008000800760000001e001e007e00000010001000fc010000158288e20a005a290000000fc6107a73184fb65fe684f6a1641464be4400450053004b0054004f0050002d0032004100450046004d003700470075007300650072004400450053004b0054004f0050002d0032004100450046004d003700470000000000000000000000000000000000000000000000000028a0c9f4e792c408913d2878feaa9a22010100000000000078a7ed218527d2010cf876f08a0b3bfa0000000002001e004400450053004b0054004f0050002d00560031004600410030005500510001001e004400450053004b0054004f0050002d00560031004600410030005500510004001e004400450053004b0054004f0050002d00560031004600410030005500510003001e004400450053004b0054004f0050002d0056003100460041003000550051000700080078a7ed218527d20106000400020000000800300030000000000000000100000000200000ad865b6d08a95d0e76a94e2ca013ab3f69c4fd945cca01b277700fd2b305ca010a001000000000000000000000000000000000000900280063006900660073002f003100390032002e003100360038002e003100390039002e003100330033000000000000000000000000005858824ec4a47b3b42ad3132ab84a5c3a31204100100000092302d756840453f00000000").unwrap();
+        let result = parse_secblob(&blob);
+        assert_eq!(
+            result,
+            Some(SpnegoRequest {
+                krb: None,
+                ntlmssp: Some(NtlmsspData {
+                    host: b"DESKTOP-2AEFM7G".to_vec(),
+                    user: b"user".to_vec(),
+                    domain: b"DESKTOP-2AEFM7G".to_vec(),
+                    version: Some(NTLMSSPVersion {
+                        ver_major: 10,
+                        ver_minor: 0,
+                        ver_build: 10586,
+                        ver_ntlm_rev: 15,
+                    },),
+                    warning: false,
+                }),
+            })
+        );
     }
 }

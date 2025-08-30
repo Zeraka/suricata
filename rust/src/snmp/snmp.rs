@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2020 Open Information Security Foundation
+/* Copyright (C) 2017-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,43 +17,40 @@
 
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
+use crate::direction::Direction;
+use crate::flow::Flow;
 use crate::snmp::snmp_parser::*;
-use crate::core;
-use crate::core::{AppProto,Flow,ALPROTO_UNKNOWN,ALPROTO_FAILED,STREAM_TOSERVER,STREAM_TOCLIENT};
+use crate::core::{self, *};
 use crate::applayer::{self, *};
+use super::log::snmp_log_json_response;
+use super::detect::detect_snmp_register;
 use std;
-use std::ffi::{CStr,CString};
-use std::mem::transmute;
+use std::ffi::CString;
 
-use crate::log::*;
-
+use asn1_rs::Oid;
 use der_parser::ber::BerObjectContent;
 use der_parser::der::parse_der_sequence;
-use der_parser::oid::Oid;
-use nom;
-use nom::IResult;
-use nom::error::ErrorKind;
+use nom7::{Err, IResult};
+use nom7::error::{ErrorKind, make_error};
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, AppProtoNewProtoFromString, EveJsonTxLoggerRegistrationData,
+    SCAppLayerParserRegisterLogger, SCAppLayerProtoDetectConfProtoDetectionEnabled,
+    SCOutputEvePreRegisterLogger, SCOutputJsonLogDirection, SCSigTablePreRegister, SCAppLayerParserConfParserEnabled,
+};
 
-#[repr(u32)]
-pub enum SNMPEvent {
-    MalformedData = 0,
+#[derive(AppLayerEvent)]
+enum SNMPEvent {
+    MalformedData,
     UnknownSecurityModel,
     VersionMismatch,
 }
 
-impl SNMPEvent {
-    fn from_i32(value: i32) -> Option<SNMPEvent> {
-        match value {
-            0 => Some(SNMPEvent::MalformedData),
-            1 => Some(SNMPEvent::UnknownSecurityModel),
-            _ => None,
-        }
-    }
-}
+#[derive(Default)]
+struct SNMPState<'a> {
+    state_data: AppLayerStateData,
 
-pub struct SNMPState<'a> {
     /// SNMP protocol version
-    pub version: u32,
+    version: u32,
 
     /// List of transactions for this session
     transactions: Vec<SNMPTransaction<'a>>,
@@ -62,7 +59,7 @@ pub struct SNMPState<'a> {
     tx_id: u64,
 }
 
-pub struct SNMPPduInfo<'a> {
+pub(super) struct SNMPPduInfo<'a> {
     pub pdu_type: PduType,
 
     pub err: ErrorStatus,
@@ -72,7 +69,7 @@ pub struct SNMPPduInfo<'a> {
     pub vars: Vec<Oid<'a>>,
 }
 
-pub struct SNMPTransaction<'a> {
+pub(super) struct SNMPTransaction<'a> {
     /// PDU version
     pub version: u32,
 
@@ -91,24 +88,18 @@ pub struct SNMPTransaction<'a> {
     /// The internal transaction id
     id: u64,
 
-    /// The detection engine state, if present
-    de_state: Option<*mut core::DetectEngineState>,
-
-    /// The events associated with this transaction
-    events: *mut core::AppLayerDecoderEvents,
-
     tx_data: applayer::AppLayerTxData,
 }
 
-
+impl Transaction for SNMPTransaction<'_> {
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
 
 impl<'a> SNMPState<'a> {
-    pub fn new() -> SNMPState<'a> {
-        SNMPState{
-            version: 0,
-            transactions: Vec::new(),
-            tx_id: 0,
-        }
+    fn new() -> SNMPState<'a> {
+        Default::default()
     }
 }
 
@@ -123,10 +114,22 @@ impl<'a> Default for SNMPPduInfo<'a> {
     }
 }
 
+impl<'a> State<SNMPTransaction<'a>> for SNMPState<'a> {
+    fn get_transaction_count(&self) -> usize {
+        self.transactions.len()
+    }
+
+    fn get_transaction_by_index(&self, index: usize) -> Option<&SNMPTransaction<'a>> {
+        self.transactions.get(index)
+    }
+}
+
 impl<'a> SNMPState<'a> {
     fn add_pdu_info(&mut self, pdu: &SnmpPdu<'a>, tx: &mut SNMPTransaction<'a>) {
-        let mut pdu_info = SNMPPduInfo::default();
-        pdu_info.pdu_type = pdu.pdu_type();
+        let mut pdu_info = SNMPPduInfo {
+            pdu_type: pdu.pdu_type(),
+            ..Default::default()
+        };
         match *pdu {
             SnmpPdu::Generic(ref pdu) => {
                 pdu_info.err = pdu.err;
@@ -134,7 +137,7 @@ impl<'a> SNMPState<'a> {
             SnmpPdu::Bulk(_) => {
             },
             SnmpPdu::TrapV1(ref t)    => {
-                pdu_info.trap_type = Some((t.generic_trap,t.enterprise.clone(),t.agent_addr.clone()));
+                pdu_info.trap_type = Some((t.generic_trap,t.enterprise.clone(),t.agent_addr));
             }
         }
 
@@ -144,21 +147,21 @@ impl<'a> SNMPState<'a> {
         tx.info = Some(pdu_info);
     }
 
-    fn handle_snmp_v12(&mut self, msg: SnmpMessage<'a>, _direction: u8) -> i32 {
-        let mut tx = self.new_tx();
+    fn handle_snmp_v12(&mut self, msg: SnmpMessage<'a>, _direction: Direction) -> i32 {
+        let mut tx = self.new_tx(_direction);
         // in the message, version is encoded as 0 (version 1) or 1 (version 2)
         if self.version != msg.version + 1 {
             SCLogDebug!("SNMP version mismatch: expected {}, received {}", self.version, msg.version+1);
             self.set_event_tx(&mut tx, SNMPEvent::VersionMismatch);
         }
         self.add_pdu_info(&msg.pdu, &mut tx);
-        tx.community = Some(msg.community.clone());
+        tx.community = Some(msg.community);
         self.transactions.push(tx);
         0
     }
 
-    fn handle_snmp_v3(&mut self, msg: SnmpV3Message<'a>, _direction: u8) -> i32 {
-        let mut tx = self.new_tx();
+    fn handle_snmp_v3(&mut self, msg: SnmpV3Message<'a>, _direction: Direction) -> i32 {
+        let mut tx = self.new_tx(_direction);
         if self.version != msg.version {
             SCLogDebug!("SNMP version mismatch: expected {}, received {}", self.version, msg.version);
             self.set_event_tx(&mut tx, SNMPEvent::VersionMismatch);
@@ -173,7 +176,7 @@ impl<'a> SNMPState<'a> {
         }
         match msg.security_params {
             SecurityParameters::USM(usm) => {
-                tx.usm = Some(usm.msg_user_name.clone());
+                tx.usm = Some(usm.msg_user_name);
             },
             _                            => {
                 self.set_event_tx(&mut tx, SNMPEvent::UnknownSecurityModel);
@@ -186,19 +189,18 @@ impl<'a> SNMPState<'a> {
     /// Parse an SNMP request message
     ///
     /// Returns 0 if successful, or -1 on error
-    fn parse(&mut self, i: &'a [u8], direction: u8) -> i32 {
+    fn parse(&mut self, i: &'a [u8], direction: Direction) -> i32 {
         if self.version == 0 {
-            match parse_pdu_enveloppe_version(i) {
-                Ok((_,x)) => self.version = x,
-                _         => (),
+            if let Ok((_, x)) = parse_pdu_envelope_version(i) {
+                self.version = x;
             }
         }
         match parse_snmp_generic_message(i) {
             Ok((_rem,SnmpGenericMessage::V1(msg))) |
             Ok((_rem,SnmpGenericMessage::V2(msg))) => self.handle_snmp_v12(msg, direction),
             Ok((_rem,SnmpGenericMessage::V3(msg))) => self.handle_snmp_v3(msg, direction),
-            Err(e) => {
-                SCLogDebug!("parse_snmp failed: {:?}", e);
+            Err(_e) => {
+                SCLogDebug!("parse_snmp failed: {:?}", _e);
                 self.set_event(SNMPEvent::MalformedData);
                 -1
             },
@@ -211,18 +213,18 @@ impl<'a> SNMPState<'a> {
         self.transactions.clear();
     }
 
-    fn new_tx(&mut self) -> SNMPTransaction<'a> {
+    fn new_tx(&mut self, direction: Direction) -> SNMPTransaction<'a> {
         self.tx_id += 1;
-        SNMPTransaction::new(self.version, self.tx_id)
+        SNMPTransaction::new(direction, self.version, self.tx_id)
     }
 
-    fn get_tx_by_id(&mut self, tx_id: u64) -> Option<&SNMPTransaction> {
+    fn get_tx_by_id(&mut self, tx_id: u64) -> Option<&SNMPTransaction<'_>> {
         self.transactions.iter().rev().find(|&tx| tx.id == tx_id + 1)
     }
 
     fn free_tx(&mut self, tx_id: u64) {
-        let tx = self.transactions.iter().position(|ref tx| tx.id == tx_id + 1);
-        debug_assert!(tx != None);
+        let tx = self.transactions.iter().position(|tx| tx.id == tx_id + 1);
+        debug_assert!(tx.is_some());
         if let Some(idx) = tx {
             let _ = self.transactions.remove(idx);
         }
@@ -231,288 +233,103 @@ impl<'a> SNMPState<'a> {
     /// Set an event. The event is set on the most recent transaction.
     fn set_event(&mut self, event: SNMPEvent) {
         if let Some(tx) = self.transactions.last_mut() {
-            let ev = event as u8;
-            core::sc_app_layer_decoder_events_set_event_raw(&mut tx.events, ev);
+            tx.tx_data.set_event(event as u8);
         }
     }
 
     /// Set an event on a specific transaction.
     fn set_event_tx(&self, tx: &mut SNMPTransaction, event: SNMPEvent) {
-        core::sc_app_layer_decoder_events_set_event_raw(&mut tx.events, event as u8);
-    }
-
-    // for use with the C API call StateGetTxIterator
-    pub fn get_tx_iterator(&mut self, min_tx_id: u64, state: &mut u64) ->
-        Option<(&SNMPTransaction, u64, bool)>
-    {
-        let mut index = *state as usize;
-        let len = self.transactions.len();
-
-        // find tx that is >= min_tx_id
-        while index < len {
-            let tx = &self.transactions[index];
-            if tx.id < min_tx_id + 1 {
-                index += 1;
-                continue;
-            }
-            *state = index as u64 + 1;
-            //SCLogDebug!("returning tx_id {} has_next? {} (len {} index {}), tx {:?}",
-            //        tx.id - 1, (len - index) > 1, len, index, tx);
-            return Some((tx, tx.id - 1, (len - index) > 1));
-        }
-        return None;
+        tx.tx_data.set_event(event as u8);
     }
 }
 
 impl<'a> SNMPTransaction<'a> {
-    pub fn new(version: u32, id: u64) -> SNMPTransaction<'a> {
+    fn new(direction: Direction, version: u32, id: u64) -> SNMPTransaction<'a> {
         SNMPTransaction {
             version,
             info: None,
             community: None,
             usm: None,
             encrypted: false,
-            id: id,
-            de_state: None,
-            events: std::ptr::null_mut(),
-            tx_data: applayer::AppLayerTxData::new(),
-        }
-    }
-
-    fn free(&mut self) {
-        if self.events != std::ptr::null_mut() {
-            core::sc_app_layer_decoder_events_free_events(&mut self.events);
+            id,
+            tx_data: applayer::AppLayerTxData::for_direction(direction),
         }
     }
 }
-
-impl<'a> Drop for SNMPTransaction<'a> {
-    fn drop(&mut self) {
-        self.free();
-    }
-}
-
-
-
-
-
 
 /// Returns *mut SNMPState
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_new() -> *mut std::os::raw::c_void {
+extern "C" fn snmp_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = SNMPState::new();
     let boxed = Box::new(state);
-    return unsafe{std::mem::transmute(boxed)};
+    return Box::into_raw(boxed) as *mut _;
 }
 
 /// Params:
 /// - state: *mut SNMPState as void pointer
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_free(state: *mut std::os::raw::c_void) {
-    // Just unbox...
-    let mut snmp_state: Box<SNMPState> = unsafe{std::mem::transmute(state)};
+extern "C" fn snmp_state_free(state: *mut std::os::raw::c_void) {
+    let mut snmp_state = unsafe{ Box::from_raw(state as *mut SNMPState) };
     snmp_state.free();
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_parse_request(_flow: *const core::Flow,
+unsafe extern "C" fn snmp_parse_request(_flow: *mut Flow,
                                        state: *mut std::os::raw::c_void,
-                                       _pstate: *mut std::os::raw::c_void,
-                                       input: *const u8,
-                                       input_len: u32,
+                                       _pstate: *mut AppLayerParserState,
+                                       stream_slice: StreamSlice,
                                        _data: *const std::os::raw::c_void,
-                                       _flags: u8) -> AppLayerResult {
-    let buf = build_slice!(input,input_len as usize);
+                                       ) -> AppLayerResult {
     let state = cast_pointer!(state,SNMPState);
-    state.parse(buf, STREAM_TOSERVER).into()
+    state.parse(stream_slice.as_slice(), Direction::ToServer).into()
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_parse_response(_flow: *const core::Flow,
+unsafe extern "C" fn snmp_parse_response(_flow: *mut Flow,
                                        state: *mut std::os::raw::c_void,
-                                       _pstate: *mut std::os::raw::c_void,
-                                       input: *const u8,
-                                       input_len: u32,
+                                       _pstate: *mut AppLayerParserState,
+                                       stream_slice: StreamSlice,
                                        _data: *const std::os::raw::c_void,
-                                       _flags: u8) -> AppLayerResult {
-    let buf = build_slice!(input,input_len as usize);
+                                       ) -> AppLayerResult {
     let state = cast_pointer!(state,SNMPState);
-    state.parse(buf, STREAM_TOCLIENT).into()
+    state.parse(stream_slice.as_slice(), Direction::ToClient).into()
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_tx(state: *mut std::os::raw::c_void,
+unsafe extern "C" fn snmp_state_get_tx(state: *mut std::os::raw::c_void,
                                       tx_id: u64)
                                       -> *mut std::os::raw::c_void
 {
     let state = cast_pointer!(state,SNMPState);
     match state.get_tx_by_id(tx_id) {
-        Some(tx) => unsafe{std::mem::transmute(tx)},
+        Some(tx) => tx as *const _ as *mut _,
         None     => std::ptr::null_mut(),
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_tx_count(state: *mut std::os::raw::c_void)
+unsafe extern "C" fn snmp_state_get_tx_count(state: *mut std::os::raw::c_void)
                                             -> u64
 {
     let state = cast_pointer!(state,SNMPState);
     state.tx_id
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_tx_free(state: *mut std::os::raw::c_void,
+unsafe extern "C" fn snmp_state_tx_free(state: *mut std::os::raw::c_void,
                                        tx_id: u64)
 {
     let state = cast_pointer!(state,SNMPState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_progress_completion_status(
-    _direction: u8)
-    -> std::os::raw::c_int
-{
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_snmp_tx_get_alstate_progress(_tx: *mut std::os::raw::c_void,
+extern "C" fn snmp_tx_get_alstate_progress(_tx: *mut std::os::raw::c_void,
                                                  _direction: u8)
                                                  -> std::os::raw::c_int
 {
     1
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_set_tx_detect_state(
-    tx: *mut std::os::raw::c_void,
-    de_state: &mut core::DetectEngineState) -> std::os::raw::c_int
-{
-    let tx = cast_pointer!(tx,SNMPTransaction);
-    tx.de_state = Some(de_state);
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_tx_detect_state(
-    tx: *mut std::os::raw::c_void)
-    -> *mut core::DetectEngineState
-{
-    let tx = cast_pointer!(tx,SNMPTransaction);
-    match tx.de_state {
-        Some(ds) => ds,
-        None => std::ptr::null_mut(),
-    }
-}
-
-
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_events(tx: *mut std::os::raw::c_void)
-                                           -> *mut core::AppLayerDecoderEvents
-{
-    let tx = cast_pointer!(tx, SNMPTransaction);
-    return tx.events;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_event_info_by_id(event_id: std::os::raw::c_int,
-                                                     event_name: *mut *const std::os::raw::c_char,
-                                                     event_type: *mut core::AppLayerEventType)
-                                                     -> i8
-{
-    if let Some(e) = SNMPEvent::from_i32(event_id as i32) {
-        let estr = match e {
-            SNMPEvent::MalformedData         => { "malformed_data\0" },
-            SNMPEvent::UnknownSecurityModel  => { "unknown_security_model\0" },
-            SNMPEvent::VersionMismatch       => { "version_mismatch\0" },
-        };
-        unsafe{
-            *event_name = estr.as_ptr() as *const std::os::raw::c_char;
-            *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        };
-        0
-    } else {
-        -1
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_event_info(event_name: *const std::os::raw::c_char,
-                                              event_id: *mut std::os::raw::c_int,
-                                              event_type: *mut core::AppLayerEventType)
-                                              -> std::os::raw::c_int
-{
-    if event_name == std::ptr::null() { return -1; }
-    let c_event_name: &CStr = unsafe { CStr::from_ptr(event_name) };
-    let event = match c_event_name.to_str() {
-        Ok(s) => {
-            match s {
-                "malformed_data"         => SNMPEvent::MalformedData as i32,
-                "unknown_security_model" => SNMPEvent::UnknownSecurityModel as i32,
-                "version_mismatch"       => SNMPEvent::VersionMismatch as i32,
-                _                        => -1, // unknown event
-            }
-        },
-        Err(_) => -1, // UTF-8 conversion failed
-    };
-    unsafe{
-        *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        *event_id = event as std::os::raw::c_int;
-    };
-    0
-}
-
-// for use with the C API call StateGetTxIterator
-#[no_mangle]
-pub extern "C" fn rs_snmp_state_get_tx_iterator(
-                                      state: &mut SNMPState,
-                                      min_tx_id: u64,
-                                      istate: &mut u64)
-                                      -> applayer::AppLayerGetTxIterTuple
-{
-    match state.get_tx_iterator(min_tx_id, istate) {
-        Some((tx, out_tx_id, has_next)) => {
-            let c_tx = unsafe { transmute(tx) };
-            let ires = applayer::AppLayerGetTxIterTuple::with_values(c_tx, out_tx_id, has_next);
-            return ires;
-        }
-        None => {
-            return applayer::AppLayerGetTxIterTuple::not_found();
-        }
-    }
-}
-
-// for use with the C API call StateGetTxIterator
-#[no_mangle]
-pub extern "C" fn rs_snmp_get_tx_iterator(_ipproto: u8,
-                                          _alproto: AppProto,
-                                          alstate: *mut std::os::raw::c_void,
-                                          min_tx_id: u64,
-                                          _max_tx_id: u64,
-                                          istate: &mut u64) -> applayer::AppLayerGetTxIterTuple
-{
-    let state = cast_pointer!(alstate,SNMPState);
-    match state.get_tx_iterator(min_tx_id, istate) {
-        Some((tx, out_tx_id, has_next)) => {
-            let c_tx = unsafe { transmute(tx) };
-            let ires = applayer::AppLayerGetTxIterTuple::with_values(c_tx, out_tx_id, has_next);
-            return ires;
-        }
-        None => {
-            return applayer::AppLayerGetTxIterTuple::not_found();
-        }
-    }
-}
-
-
-
-static mut ALPROTO_SNMP : AppProto = ALPROTO_UNKNOWN;
+pub(super) static mut ALPROTO_SNMP : AppProto = ALPROTO_UNKNOWN;
 
 // Read PDU sequence and extract version, if similar to SNMP definition
-fn parse_pdu_enveloppe_version(i:&[u8]) -> IResult<&[u8],u32> {
+fn parse_pdu_envelope_version(i:&[u8]) -> IResult<&[u8],u32> {
     match parse_der_sequence(i) {
         Ok((_,x))     => {
+            #[allow(clippy::single_match)]
             match x.content {
                 BerObjectContent::Sequence(ref v) => {
                     if v.len() == 3 {
@@ -527,85 +344,103 @@ fn parse_pdu_enveloppe_version(i:&[u8]) -> IResult<&[u8],u32> {
                 },
                 _ => ()
             };
-            Err(nom::Err::Error(error_position!(i, ErrorKind::Verify)))
+            Err(Err::Error(make_error(i, ErrorKind::Verify)))
         },
-        Err(nom::Err::Incomplete(i)) => Err(nom::Err::Incomplete(i)),
-        Err(nom::Err::Failure(_)) |
-        Err(nom::Err::Error(_))      => Err(nom::Err::Error(error_position!(i,ErrorKind::Verify)))
+        Err(Err::Incomplete(i)) => Err(Err::Incomplete(i)),
+        Err(Err::Failure(_)) |
+        Err(Err::Error(_))      => Err(Err::Error(make_error(i,ErrorKind::Verify)))
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_probing_parser(_flow: *const Flow,
+unsafe extern "C" fn snmp_probing_parser(_flow: *const Flow,
                                          _direction: u8,
                                          input:*const u8,
                                          input_len: u32,
                                          _rdir: *mut u8) -> AppProto {
+    if input.is_null() {
+        return ALPROTO_UNKNOWN;
+    }
     let slice = build_slice!(input,input_len as usize);
-    let alproto = unsafe{ ALPROTO_SNMP };
-    if slice.len() < 4 { return unsafe{ALPROTO_FAILED}; }
-    match parse_pdu_enveloppe_version(slice) {
-        Ok((_,_))                    => alproto,
-        Err(nom::Err::Incomplete(_)) => ALPROTO_UNKNOWN,
-        _                            => unsafe{ALPROTO_FAILED},
+    let alproto = ALPROTO_SNMP;
+    if slice.len() < 4 { return ALPROTO_UNKNOWN; }
+    match parse_pdu_envelope_version(slice) {
+        Ok((_,_))               => alproto,
+        Err(Err::Incomplete(_)) => ALPROTO_UNKNOWN,
+        _                       => ALPROTO_FAILED,
     }
 }
 
-export_tx_data_get!(rs_snmp_get_tx_data, SNMPTransaction);
+export_tx_data_get!(snmp_get_tx_data, SNMPTransaction);
+export_state_data_get!(snmp_get_state_data, SNMPState);
 
-const PARSER_NAME : &'static [u8] = b"snmp\0";
+const PARSER_NAME : &[u8] = b"snmp\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_register_snmp_parser() {
+pub unsafe extern "C" fn SCRegisterSnmpParser() {
+    let ip_proto_str = CString::new("udp").unwrap();
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(
+        ip_proto_str.as_ptr(),
+        PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
+    ) == 0
+    {
+        SCLogDebug!("Protocol detector and parser disabled for SNMP.");
+        return;
+    }
     let default_port = CString::new("161").unwrap();
     let mut parser = RustParser {
-        name               : PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
-        default_port       : default_port.as_ptr(),
-        ipproto            : core::IPPROTO_UDP,
-        probe_ts           : Some(rs_snmp_probing_parser),
-        probe_tc           : Some(rs_snmp_probing_parser),
-        min_depth          : 0,
-        max_depth          : 16,
-        state_new          : rs_snmp_state_new,
-        state_free         : rs_snmp_state_free,
-        tx_free            : rs_snmp_state_tx_free,
-        parse_ts           : rs_snmp_parse_request,
-        parse_tc           : rs_snmp_parse_response,
-        get_tx_count       : rs_snmp_state_get_tx_count,
-        get_tx             : rs_snmp_state_get_tx,
-        tx_get_comp_st     : rs_snmp_state_progress_completion_status,
-        tx_get_progress    : rs_snmp_tx_get_alstate_progress,
-        get_de_state       : rs_snmp_state_get_tx_detect_state,
-        set_de_state       : rs_snmp_state_set_tx_detect_state,
-        get_events         : Some(rs_snmp_state_get_events),
-        get_eventinfo      : Some(rs_snmp_state_get_event_info),
-        get_eventinfo_byid : Some(rs_snmp_state_get_event_info_by_id),
-        localstorage_new   : None,
-        localstorage_free  : None,
-        get_files          : None,
-        get_tx_iterator    : None,
-        get_tx_data        : rs_snmp_get_tx_data,
-        apply_tx_config    : None,
-        flags              : 0,
+        name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
+        default_port: default_port.as_ptr(),
+        ipproto: core::IPPROTO_UDP,
+        probe_ts: Some(snmp_probing_parser),
+        probe_tc: Some(snmp_probing_parser),
+        min_depth: 0,
+        max_depth: 16,
+        state_new: snmp_state_new,
+        state_free: snmp_state_free,
+        tx_free: snmp_state_tx_free,
+        parse_ts: snmp_parse_request,
+        parse_tc: snmp_parse_response,
+        get_tx_count: snmp_state_get_tx_count,
+        get_tx: snmp_state_get_tx,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
+        tx_get_progress: snmp_tx_get_alstate_progress,
+        get_eventinfo: Some(SNMPEvent::get_event_info),
+        get_eventinfo_byid: Some(SNMPEvent::get_event_info_by_id),
+        localstorage_new: None,
+        localstorage_free: None,
+        get_tx_files: None,
+        get_tx_iterator: Some(applayer::state_get_tx_iterator::<SNMPState, SNMPTransaction>),
+        get_tx_data: snmp_get_tx_data,
+        get_state_data: snmp_get_state_data,
+        apply_tx_config: None,
+        flags: 0,
+        get_frame_id_by_name: None,
+        get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
-    let ip_proto_str = CString::new("udp").unwrap();
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        // port 161
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
-        // store the allocated ID for the probe function
-        ALPROTO_SNMP = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-            let _ = AppLayerRegisterParser(&parser, alproto);
-        }
-        AppLayerParserRegisterGetTxIterator(core::IPPROTO_UDP as u8, alproto, rs_snmp_get_tx_iterator);
-        // port 162
-        let default_port_traps = CString::new("162").unwrap();
-        parser.default_port = default_port_traps.as_ptr();
-        let _ = AppLayerRegisterProtocolDetection(&parser, 1);
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-            let _ = AppLayerRegisterParser(&parser, alproto);
-        }
-    } else {
-        SCLogDebug!("Protocol detector and parser disabled for SNMP.");
+    ALPROTO_SNMP = AppProtoNewProtoFromString(PARSER_NAME.as_ptr() as *const std::os::raw::c_char);
+    let reg_data = EveJsonTxLoggerRegistrationData {
+        confname: b"eve-log.snmp\0".as_ptr() as *const std::os::raw::c_char,
+        logname: b"JsonSNMPLog\0".as_ptr() as *const std::os::raw::c_char,
+        alproto: ALPROTO_SNMP,
+        dir: SCOutputJsonLogDirection::LOG_DIR_PACKET as u8,
+        LogTx: Some(snmp_log_json_response),
+    };
+    SCOutputEvePreRegisterLogger(reg_data);
+    SCSigTablePreRegister(Some(detect_snmp_register));
+    // port 161
+    _ = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let _ = AppLayerRegisterParser(&parser, ALPROTO_SNMP);
     }
+    // port 162
+    let default_port_traps = CString::new("162").unwrap();
+    parser.default_port = default_port_traps.as_ptr();
+    let _ = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let _ = AppLayerRegisterParser(&parser, ALPROTO_SNMP);
+    }
+    SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_SNMP);
 }

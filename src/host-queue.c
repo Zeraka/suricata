@@ -25,7 +25,6 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "host-queue.h"
 #include "util-error.h"
 #include "util-debug.h"
@@ -40,11 +39,11 @@ HostQueue *HostQueueInit (HostQueue *q)
     return q;
 }
 
-HostQueue *HostQueueNew()
+HostQueue *HostQueueNew(void)
 {
     HostQueue *q = (HostQueue *)SCMalloc(sizeof(HostQueue));
     if (q == NULL) {
-        SCLogError(SC_ERR_FATAL, "Fatal error encountered in HostQueueNew. Exiting...");
+        SCLogError("Fatal error encountered in HostQueueNew. Exiting...");
         exit(EXIT_SUCCESS);
     }
     q = HostQueueInit(q);
@@ -132,13 +131,3 @@ Host *HostDequeue (HostQueue *q)
     HQLOCK_UNLOCK(q);
     return h;
 }
-
-uint32_t HostQueueLen(HostQueue *q)
-{
-    uint32_t len;
-    HQLOCK_LOCK(q);
-    len = q->len;
-    HQLOCK_UNLOCK(q);
-    return len;
-}
-

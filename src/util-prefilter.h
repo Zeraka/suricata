@@ -21,8 +21,10 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __UTIL_PREFILTER_H__
-#define __UTIL_PREFILTER_H__
+#ifndef SURICATA_UTIL_PREFILTER_H
+#define SURICATA_UTIL_PREFILTER_H
+
+#include "util-debug.h"
 
 /** \brief structure for storing potential rule matches
  *
@@ -41,6 +43,8 @@ typedef struct PrefilterRuleStore_ {
 
 } PrefilterRuleStore;
 
+#define PMQ_RESET(pmq) (pmq)->rule_id_array_cnt = 0
+
 /* Resize Signature ID array. Only called from MpmAddSids(). */
 int PrefilterAddSidsResize(PrefilterRuleStore *pmq, uint32_t new_size);
 
@@ -54,27 +58,32 @@ int PrefilterAddSidsResize(PrefilterRuleStore *pmq, uint32_t new_size);
  *  \param sids_size number of Signature IDs in sids array.
  *
  */
-static inline void
-PrefilterAddSids(PrefilterRuleStore *pmq, SigIntId *sids, uint32_t sids_size)
+static inline void PrefilterAddSids(
+        PrefilterRuleStore *pmq, const SigIntId *sids, uint32_t sids_size)
 {
-    if (sids_size == 0)
-        return;
-
-    uint32_t new_size = pmq->rule_id_array_cnt + sids_size;
-    if (new_size > pmq->rule_id_array_size) {
-        if (PrefilterAddSidsResize(pmq, new_size) == 0) {
-            // Failed to allocate larger memory for all the SIDS, but
-            // keep as many as we can.
-            sids_size = pmq->rule_id_array_size - pmq->rule_id_array_cnt;
+    if (sids_size > 0) {
+        uint32_t new_size = pmq->rule_id_array_cnt + sids_size;
+        if (new_size > pmq->rule_id_array_size) {
+            if (PrefilterAddSidsResize(pmq, new_size) == 0) {
+                // Failed to allocate larger memory for all the SIDS, but
+                // keep as many as we can.
+                sids_size = pmq->rule_id_array_size - pmq->rule_id_array_cnt;
+            }
         }
+        SCLogDebug("Adding %u sids", sids_size);
+        // Add SIDs for this pattern to the end of the array
+        SigIntId *ptr = pmq->rule_id_array + pmq->rule_id_array_cnt;
+        SigIntId *end = ptr + sids_size;
+        do {
+            *ptr++ = *sids++;
+        } while (ptr != end);
+        pmq->rule_id_array_cnt += sids_size;
     }
-    SCLogDebug("Adding %u sids", sids_size);
-    // Add SIDs for this pattern to the end of the array
-    SigIntId *ptr = pmq->rule_id_array + pmq->rule_id_array_cnt;
-    SigIntId *end = ptr + sids_size;
-    do {
-        *ptr++ = *sids++;
-    } while (ptr != end);
-    pmq->rule_id_array_cnt += sids_size;
 }
-#endif /* __UTIL_PREFILTER_H__ */
+
+int PmqSetup(PrefilterRuleStore *);
+void PmqReset(PrefilterRuleStore *);
+void PmqCleanup(PrefilterRuleStore *);
+void PmqFree(PrefilterRuleStore *);
+
+#endif /* SURICATA_UTIL_PREFILTER_H */

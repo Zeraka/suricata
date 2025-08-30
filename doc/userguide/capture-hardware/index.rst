@@ -8,3 +8,6 @@ Using Capture Hardware
    myricom
    ebpf-xdp
    netmap
+   af-xdp
+   dpdk
+   pcap-file

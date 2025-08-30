@@ -18,7 +18,7 @@ generate alerts based on rules. **suricata** will generate traffic logs.
 
 When used with live traffic **suricata** can be passive or active. Active
 modes are: inline in a L2 bridge setup, inline with L3 integration with
-host filewall (NFQ, IPFW, WinDivert), or out of band using active responses.
+host firewall (NFQ, IPFW, WinDivert), or out of band using active responses.
 
 OPTIONS
 --------------
@@ -84,8 +84,8 @@ NOTES
 
 * Suricata Home Page
 
-    https://suricata-ids.org/
+    https://suricata.io/
 
 * Suricata Support Page
 
-    https://suricata-ids.org/support/
+    https://suricata.io/support/

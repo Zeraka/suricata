@@ -30,9 +30,8 @@
  * uses "somevar", internally "somevar_sc_atomic__" is used.
  */
 
-
-#ifndef __UTIL_ATOMIC_H__
-#define __UTIL_ATOMIC_H__
+#ifndef SURICATA_UTIL_ATOMIC_H
+#define SURICATA_UTIL_ATOMIC_H
 
 #if HAVE_STDATOMIC_H==1
 
@@ -77,6 +76,12 @@
  **/
 #define SC_ATOMIC_DECL_AND_INIT(type, name) \
     _Atomic(type) (name ## _sc_atomic__) = 0
+
+/**
+ *  \brief wrapper for declaring an atomic variable and initializing it
+ *  to a specific value
+ **/
+#define SC_ATOMIC_DECL_AND_INIT_WITH_VAL(type, name, val) _Atomic(type)(name##_sc_atomic__) = val
 
 /**
  *  \brief wrapper for initializing an atomic variable.
@@ -292,6 +297,12 @@
     extern type name ## _sc_atomic__
 
 /**
+ *  \brief wrapper for declaring an atomic variable and initializing it
+ *  to a specific value
+ **/
+#define SC_ATOMIC_DECL_AND_INIT_WITH_VAL(type, name, val) type name##_sc_atomic__ = val
+
+/**
  *  \brief wrapper for declaring an atomic variable and initializing it.
  **/
 #define SC_ATOMIC_DECL_AND_INIT(type, name) \
@@ -381,5 +392,4 @@
 
 void SCAtomicRegisterTests(void);
 
-#endif /* __UTIL_ATOMIC_H__ */
-
+#endif /* SURICATA_UTIL_ATOMIC_H */

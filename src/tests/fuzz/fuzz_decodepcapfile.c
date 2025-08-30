@@ -1,10 +1,11 @@
 /**
  * @file
  * @author Philippe Antoine <contact@catenacyber.fr>
- * fuzz target for AppLayerProtoDetectGetProto
+ * fuzz target for TMM_DECODEPCAPFILE
  */
 
 #include "suricata-common.h"
+#include "suricata.h"
 #include "app-layer-detect-proto.h"
 #include "defrag.h"
 #include "tm-modules.h"
@@ -12,6 +13,8 @@
 #include "source-pcap-file.h"
 #include "util-unittest-helper.h"
 #include "conf-yaml-loader.h"
+#include "util-time.h"
+#include "util-conf.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -28,6 +31,7 @@ pcap-file:\n\
 
 ThreadVars *tv;
 DecodeThreadVars *dtv;
+SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -39,18 +43,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         setenv("SC_LOG_FILE", "/dev/null", 0);
 
         InitGlobal();
-        run_mode = RUNMODE_PCAP_FILE;
+        SCRunmodeSet(RUNMODE_PCAP_FILE);
 
         //redirect logs to /tmp
         ConfigSetLogDirectory("/tmp/");
         //disables checksums validation for fuzzing
-        if (ConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
             abort();
         }
 
         PostConfLoadedSetup(&surifuzz);
 
-        RunModeInitialize();
+        RunModeInitializeThreadSettings();
         TimeModeSetOffline();
         PcapFileGlobalInit();
 
@@ -74,7 +78,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         tmm_modules[TMM_DECODEPCAPFILE].ThreadInit(tv, NULL, (void **) &dtv);
         (void)SC_ATOMIC_SET(tv->tm_slots->slot_next->slot_data, dtv);
 
+        extern uint32_t max_pending_packets;
+        max_pending_packets = 128;
         PacketPoolInit();
+        SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
 
         initialized = 1;
     }

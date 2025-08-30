@@ -34,6 +34,7 @@
 #include "util-random.h"
 #include "util-misc.h"
 #include "util-byte.h"
+#include "util-validate.h"
 
 #include "host-queue.h"
 
@@ -96,11 +97,6 @@ uint64_t HostGetMemuse(void)
     return memuse;
 }
 
-uint32_t HostSpareQueueGetSize(void)
-{
-    return HostQueueLen(&host_spare_q);
-}
-
 void HostMoveToSpare(Host *h)
 {
     HostEnqueue(&host_spare_q, h);
@@ -114,11 +110,9 @@ Host *HostAlloc(void)
     }
     (void) SC_ATOMIC_ADD(host_memuse, g_host_size);
 
-    Host *h = SCMalloc(g_host_size);
+    Host *h = SCCalloc(1, g_host_size);
     if (unlikely(h == NULL))
         goto error;
-
-    memset(h, 0x00, g_host_size);
 
     SCMutexInit(&h->m, NULL);
     SC_ATOMIC_INIT(h->use_cnt);
@@ -156,12 +150,13 @@ error:
 void HostClearMemory(Host *h)
 {
     if (h->iprep != NULL) {
-        SCFree(h->iprep);
-        h->iprep = NULL;
+        SRepFreeHostData(h);
     }
 
     if (HostStorageSize() > 0)
         HostFreeStorage(h);
+
+    BUG_ON(SC_ATOMIC_GET(h->use_cnt) > 0);
 }
 
 #define HOST_DEFAULT_HASHSIZE 4096
@@ -170,11 +165,13 @@ void HostClearMemory(Host *h)
 
 /** \brief initialize the configuration
  *  \warning Not thread safe */
-void HostInitConfig(char quiet)
+void HostInitConfig(bool quiet)
 {
     SCLogDebug("initializing host engine...");
-    if (HostStorageSize() > 0)
-        g_host_size = sizeof(Host) + HostStorageSize();
+    if (HostStorageSize() > 0) {
+        DEBUG_VALIDATE_BUG_ON(sizeof(Host) + HostStorageSize() > UINT16_MAX);
+        g_host_size = (uint16_t)(sizeof(Host) + HostStorageSize());
+    }
 
     memset(&host_config,  0, sizeof(host_config));
     //SC_ATOMIC_INIT(flow_flags);
@@ -195,28 +192,25 @@ void HostInitConfig(char quiet)
     uint32_t configval = 0;
 
     /** set config values for memcap, prealloc and hash_size */
-    if ((ConfGetValue("host.memcap", &conf_val)) == 1)
-    {
+    if ((SCConfGet("host.memcap", &conf_val)) == 1) {
         uint64_t host_memcap = 0;
         if (ParseSizeStringU64(conf_val, &host_memcap) < 0) {
-            SCLogError(SC_ERR_SIZE_PARSE, "Error parsing host.memcap "
+            SCLogError("Error parsing host.memcap "
                        "from conf file - %s.  Killing engine",
-                       conf_val);
+                    conf_val);
             exit(EXIT_FAILURE);
         } else {
             SC_ATOMIC_SET(host_config.memcap, host_memcap);
         }
     }
-    if ((ConfGetValue("host.hash-size", &conf_val)) == 1)
-    {
+    if ((SCConfGet("host.hash-size", &conf_val)) == 1) {
         if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             host_config.hash_size = configval;
         }
     }
 
-    if ((ConfGetValue("host.prealloc", &conf_val)) == 1)
-    {
+    if ((SCConfGet("host.prealloc", &conf_val)) == 1) {
         if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             host_config.prealloc = configval;
@@ -231,18 +225,17 @@ void HostInitConfig(char quiet)
     /* alloc hash memory */
     uint64_t hash_size = host_config.hash_size * sizeof(HostHashRow);
     if (!(HOST_CHECK_MEMCAP(hash_size))) {
-        SCLogError(SC_ERR_HOST_INIT, "allocating host hash failed: "
-                "max host memcap is smaller than projected hash size. "
-                "Memcap: %"PRIu64", Hash table size %"PRIu64". Calculate "
-                "total hash size by multiplying \"host.hash-size\" with %"PRIuMAX", "
-                "which is the hash bucket size.", SC_ATOMIC_GET(host_config.memcap), hash_size,
-                (uintmax_t)sizeof(HostHashRow));
+        SCLogError("allocating host hash failed: "
+                   "max host memcap is smaller than projected hash size. "
+                   "Memcap: %" PRIu64 ", Hash table size %" PRIu64 ". Calculate "
+                   "total hash size by multiplying \"host.hash-size\" with %" PRIuMAX ", "
+                   "which is the hash bucket size.",
+                SC_ATOMIC_GET(host_config.memcap), hash_size, (uintmax_t)sizeof(HostHashRow));
         exit(EXIT_FAILURE);
     }
     host_hash = SCMallocAligned(host_config.hash_size * sizeof(HostHashRow), CLS);
     if (unlikely(host_hash == NULL)) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in HostInitConfig. Exiting...");
+        FatalError("Fatal error encountered in HostInitConfig. Exiting...");
     }
     memset(host_hash, 0, host_config.hash_size * sizeof(HostHashRow));
 
@@ -252,7 +245,7 @@ void HostInitConfig(char quiet)
     }
     (void) SC_ATOMIC_ADD(host_memuse, (host_config.hash_size * sizeof(HostHashRow)));
 
-    if (quiet == FALSE) {
+    if (!quiet) {
         SCLogConfig("allocated %"PRIu64" bytes of memory for the host hash... "
                   "%" PRIu32 " buckets of size %" PRIuMAX "",
                   SC_ATOMIC_GET(host_memuse), host_config.hash_size,
@@ -262,29 +255,28 @@ void HostInitConfig(char quiet)
     /* pre allocate hosts */
     for (i = 0; i < host_config.prealloc; i++) {
         if (!(HOST_CHECK_MEMCAP(g_host_size))) {
-            SCLogError(SC_ERR_HOST_INIT, "preallocating hosts failed: "
-                    "max host memcap reached. Memcap %"PRIu64", "
-                    "Memuse %"PRIu64".", SC_ATOMIC_GET(host_config.memcap),
+            SCLogError("preallocating hosts failed: "
+                       "max host memcap reached. Memcap %" PRIu64 ", "
+                       "Memuse %" PRIu64 ".",
+                    SC_ATOMIC_GET(host_config.memcap),
                     ((uint64_t)SC_ATOMIC_GET(host_memuse) + g_host_size));
             exit(EXIT_FAILURE);
         }
 
         Host *h = HostAlloc();
         if (h == NULL) {
-            SCLogError(SC_ERR_HOST_INIT, "preallocating host failed: %s", strerror(errno));
+            SCLogError("preallocating host failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
         HostEnqueue(&host_spare_q,h);
     }
 
-    if (quiet == FALSE) {
+    if (!quiet) {
         SCLogConfig("preallocated %" PRIu32 " hosts of size %" PRIu16 "",
                 host_spare_q.len, g_host_size);
         SCLogConfig("host memory usage: %"PRIu64" bytes, maximum: %"PRIu64,
                 SC_ATOMIC_GET(host_memuse), SC_ATOMIC_GET(host_config.memcap));
     }
-
-    return;
 }
 
 /** \brief print some host stats
@@ -295,9 +287,8 @@ void HostPrintStats (void)
     SCLogPerf("hostbits added: %" PRIu32 ", removed: %" PRIu32 ", max memory usage: %" PRIu32 "",
         hostbits_added, hostbits_removed, hostbits_memuse_max);
 #endif /* HOSTBITS_STATS */
-    SCLogPerf("host memory usage: %"PRIu64" bytes, maximum: %"PRIu64,
-            SC_ATOMIC_GET(host_memuse), SC_ATOMIC_GET(host_config.memcap));
-    return;
+    SCLogPerf("host memory usage: %" PRIu64 " bytes, maximum: %" PRIu64, SC_ATOMIC_GET(host_memuse),
+            SC_ATOMIC_GET(host_config.memcap));
 }
 
 /** \brief shutdown the flow engine
@@ -311,7 +302,6 @@ void HostShutdown(void)
 
     /* free spare queue */
     while((h = HostDequeue(&host_spare_q))) {
-        BUG_ON(SC_ATOMIC_GET(h->use_cnt) > 0);
         HostFree(h);
     }
 
@@ -332,7 +322,6 @@ void HostShutdown(void)
     }
     (void) SC_ATOMIC_SUB(host_memuse, host_config.hash_size * sizeof(HostHashRow));
     HostQueueDestroy(&host_spare_q);
-    return;
 }
 
 /** \brief Cleanup the host engine
@@ -342,14 +331,11 @@ void HostShutdown(void)
  */
 void HostCleanup(void)
 {
-    Host *h;
-    uint32_t u;
-
     if (host_hash != NULL) {
-        for (u = 0; u < host_config.hash_size; u++) {
-            h = host_hash[u].head;
+        for (uint32_t u = 0; u < host_config.hash_size; u++) {
             HostHashRow *hb = &host_hash[u];
             HRLOCK_LOCK(hb);
+            Host *h = host_hash[u].head;
             while (h) {
                 if ((SC_ATOMIC_GET(h->use_cnt) > 0) && (h->iprep != NULL)) {
                     /* iprep is attached to host only clear local storage */
@@ -376,8 +362,6 @@ void HostCleanup(void)
             HRLOCK_UNLOCK(hb);
         }
     }
-
-    return;
 }
 
 /* calculate the hash key for this packet
@@ -402,14 +386,17 @@ static inline uint32_t HostGetKey(Address *a)
     return key;
 }
 
-/* Since two or more hosts can have the same hash key, we need to compare
- * the flow with the current flow key. */
-#define CMP_HOST(h,a) \
-    (CMP_ADDR(&(h)->a, (a)))
-
 static inline int HostCompare(Host *h, Address *a)
 {
-    return CMP_HOST(h, a);
+    if (h->a.family == a->family) {
+        switch (a->family) {
+            case AF_INET:
+                return (h->a.addr_data32[0] == a->addr_data32[0]);
+            case AF_INET6:
+                return CMP_ADDR(&h->a, a);
+        }
+    }
+    return 0;
 }
 
 /**
@@ -457,7 +444,7 @@ static Host *HostGetNew(Address *a)
     } else {
         /* host has been recycled before it went into the spare queue */
 
-        /* host is initialized (recylced) but *unlocked* */
+        /* host is initialized (recycled) but *unlocked* */
     }
 
     (void) SC_ATOMIC_ADD(host_counter, 1);
@@ -731,4 +718,3 @@ void HostRegisterUnittests(void)
 {
     RegisterHostStorageTests();
 }
-

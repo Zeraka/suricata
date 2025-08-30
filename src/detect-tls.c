@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011-2012 ANSSI
+ * Copyright (C) 2022 Open Information Security Foundation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,11 +36,11 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
 #include "detect-parse.h"
+#include "detect-content.h"
 
 #include "detect-engine.h"
 #include "detect-engine-mpm.h"
@@ -57,6 +58,7 @@
 
 #include "app-layer-ssl.h"
 #include "detect-tls.h"
+#include "detect-tls-cert-fingerprint.h"
 
 #include "stream-tcp.h"
 
@@ -83,9 +85,6 @@ static int DetectTlsIssuerDNMatch (DetectEngineThreadCtx *,
 static int DetectTlsIssuerDNSetup (DetectEngineCtx *, Signature *, const char *);
 static void DetectTlsIssuerDNFree(DetectEngineCtx *, void *);
 
-static int DetectTlsFingerprintMatch (DetectEngineThreadCtx *,
-        Flow *, uint8_t, void *, void *,
-        const Signature *, const SigMatchCtx *);
 static int DetectTlsFingerprintSetup (DetectEngineCtx *, Signature *, const char *);
 static void DetectTlsFingerprintFree(DetectEngineCtx *, void *);
 
@@ -94,66 +93,61 @@ static int DetectTlsStorePostMatch (DetectEngineThreadCtx *det_ctx,
         Packet *, const Signature *s, const SigMatchCtx *unused);
 
 static int g_tls_cert_list_id = 0;
-
-static int InspectTlsCert(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *txv, uint64_t tx_id)
-{
-    return DetectEngineInspectGenericList(tv, de_ctx, det_ctx, s, smd,
-                                          f, flags, alstate, txv, tx_id);
-}
+static int g_tls_cert_fingerprint_list_id = 0;
 
 /**
  * \brief Registration function for keyword: tls.version
  */
 void DetectTlsRegister (void)
 {
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].name = "tls.subject";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].desc = "match TLS/SSL certificate Subject field";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].url = "/rules/tls-keywords.html#tls-subject";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].AppLayerTxMatch = DetectTlsSubjectMatch;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].Setup = DetectTlsSubjectSetup;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].Free  = DetectTlsSubjectFree;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].alternative = DETECT_AL_TLS_CERT_SUBJECT;
+    sigmatch_table[DETECT_TLS_SUBJECT].name = "tls.subject";
+    sigmatch_table[DETECT_TLS_SUBJECT].desc = "match TLS/SSL certificate Subject field";
+    sigmatch_table[DETECT_TLS_SUBJECT].url = "/rules/tls-keywords.html#tls-subject";
+    sigmatch_table[DETECT_TLS_SUBJECT].AppLayerTxMatch = DetectTlsSubjectMatch;
+    sigmatch_table[DETECT_TLS_SUBJECT].Setup = DetectTlsSubjectSetup;
+    sigmatch_table[DETECT_TLS_SUBJECT].Free = DetectTlsSubjectFree;
+    sigmatch_table[DETECT_TLS_SUBJECT].flags = SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_SUBJECT].alternative = DETECT_TLS_CERT_SUBJECT;
 
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].name = "tls.issuerdn";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].desc = "match TLS/SSL certificate IssuerDN field";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].url = "/rules/tls-keywords.html#tls-issuerdn";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].AppLayerTxMatch = DetectTlsIssuerDNMatch;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].Setup = DetectTlsIssuerDNSetup;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].Free  = DetectTlsIssuerDNFree;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].alternative = DETECT_AL_TLS_CERT_ISSUER;
+    sigmatch_table[DETECT_TLS_ISSUERDN].name = "tls.issuerdn";
+    sigmatch_table[DETECT_TLS_ISSUERDN].desc = "match TLS/SSL certificate IssuerDN field";
+    sigmatch_table[DETECT_TLS_ISSUERDN].url = "/rules/tls-keywords.html#tls-issuerdn";
+    sigmatch_table[DETECT_TLS_ISSUERDN].AppLayerTxMatch = DetectTlsIssuerDNMatch;
+    sigmatch_table[DETECT_TLS_ISSUERDN].Setup = DetectTlsIssuerDNSetup;
+    sigmatch_table[DETECT_TLS_ISSUERDN].Free = DetectTlsIssuerDNFree;
+    sigmatch_table[DETECT_TLS_ISSUERDN].flags =
+            SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_ISSUERDN].alternative = DETECT_TLS_CERT_ISSUER;
 
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].name = "tls.fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].desc = "match TLS/SSL certificate SHA1 fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].url = "/rules/tls-keywords.html#tls-fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].AppLayerTxMatch = DetectTlsFingerprintMatch;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].Free  = DetectTlsFingerprintFree;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].alternative = DETECT_AL_TLS_CERT_FINGERPRINT;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].name = "tls.fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].desc = "match TLS/SSL certificate SHA1 fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].url = "/rules/tls-keywords.html#tls-fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].Free = DetectTlsFingerprintFree;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].flags =
+            SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].alternative = DETECT_TLS_CERT_FINGERPRINT;
 
-    sigmatch_table[DETECT_AL_TLS_STORE].name = "tls_store";
-    sigmatch_table[DETECT_AL_TLS_STORE].alias = "tls.store";
-    sigmatch_table[DETECT_AL_TLS_STORE].desc = "store TLS/SSL certificate on disk";
-    sigmatch_table[DETECT_AL_TLS_STORE].url = "/rules/tls-keywords.html#tls-store";
-    sigmatch_table[DETECT_AL_TLS_STORE].Match = DetectTlsStorePostMatch;
-    sigmatch_table[DETECT_AL_TLS_STORE].Setup = DetectTlsStoreSetup;
-    sigmatch_table[DETECT_AL_TLS_STORE].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_STORE].name = "tls_store";
+    sigmatch_table[DETECT_TLS_STORE].alias = "tls.store";
+    sigmatch_table[DETECT_TLS_STORE].desc = "store TLS/SSL certificate on disk";
+    sigmatch_table[DETECT_TLS_STORE].url = "/rules/tls-keywords.html#tls-store";
+    sigmatch_table[DETECT_TLS_STORE].Match = DetectTlsStorePostMatch;
+    sigmatch_table[DETECT_TLS_STORE].Setup = DetectTlsStoreSetup;
+    sigmatch_table[DETECT_TLS_STORE].flags |= SIGMATCH_NOOPT;
 
     DetectSetupParseRegexes(PARSE_REGEX, &subject_parse_regex);
     DetectSetupParseRegexes(PARSE_REGEX, &issuerdn_parse_regex);
     DetectSetupParseRegexes(PARSE_REGEX_FINGERPRINT, &fingerprint_parse_regex);
 
     g_tls_cert_list_id = DetectBufferTypeRegister("tls_cert");
+    g_tls_cert_fingerprint_list_id = DetectBufferTypeRegister("tls.cert_fingerprint");
 
-    DetectAppLayerInspectEngineRegister("tls_cert",
-            ALPROTO_TLS, SIG_FLAG_TOCLIENT, TLS_STATE_CERT_READY,
-            InspectTlsCert);
+    DetectAppLayerInspectEngineRegister("tls_cert", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
+            TLS_STATE_SERVER_CERT_DONE, DetectEngineInspectGenericList, NULL);
+
+    DetectAppLayerInspectEngineRegister("tls_cert", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+            TLS_STATE_CLIENT_CERT_DONE, DetectEngineInspectGenericList, NULL);
 }
 
 /**
@@ -225,25 +219,25 @@ static int DetectTlsSubjectMatch (DetectEngineThreadCtx *det_ctx,
 static DetectTlsData *DetectTlsSubjectParse (DetectEngineCtx *de_ctx, const char *str, bool negate)
 {
     DetectTlsData *tls = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2_len;
     const char *str_ptr;
     char *orig = NULL;
     char *tmp_str;
     uint32_t flag = 0;
 
-    ret = DetectParsePcreExec(&subject_parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&subject_parse_regex, &match, str, 0, 0);
     if (ret != 2) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid tls.subject option");
+        SCLogError("invalid tls.subject option");
         goto error;
     }
 
     if (negate)
         flag = DETECT_CONTENT_NEGATED;
 
-    res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+    int res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+        SCLogError("pcre2_substring_get_bynumber failed");
         goto error;
     }
 
@@ -258,7 +252,7 @@ static DetectTlsData *DetectTlsSubjectParse (DetectEngineCtx *de_ctx, const char
     if (unlikely(orig == NULL)) {
         goto error;
     }
-    pcre_free_substring(str_ptr);
+    pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
 
     tmp_str=orig;
 
@@ -273,6 +267,7 @@ static DetectTlsData *DetectTlsSubjectParse (DetectEngineCtx *de_ctx, const char
         goto error;
     }
 
+    pcre2_match_data_free(match);
     SCFree(orig);
 
     SCLogDebug("will look for TLS subject %s", tls->subject);
@@ -280,6 +275,9 @@ static DetectTlsData *DetectTlsSubjectParse (DetectEngineCtx *de_ctx, const char
     return tls;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     if (orig != NULL)
         SCFree(orig);
     if (tls != NULL)
@@ -302,9 +300,8 @@ error:
 static int DetectTlsSubjectSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     DetectTlsData *tls = NULL;
-    SigMatch *sm = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     tls = DetectTlsSubjectParse(de_ctx, str, s->init_data->negated);
@@ -313,21 +310,16 @@ static int DetectTlsSubjectSetup (DetectEngineCtx *de_ctx, Signature *s, const c
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TLS_SUBJECT, (SigMatchCtx *)tls, g_tls_cert_list_id) == NULL) {
         goto error;
-
-    sm->type = DETECT_AL_TLS_SUBJECT;
-    sm->ctx = (void *)tls;
-
-    SigMatchAppendSMToList(s, sm, g_tls_cert_list_id);
+    }
     return 0;
 
 error:
     if (tls != NULL)
         DetectTlsSubjectFree(de_ctx, tls);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 
 }
@@ -416,25 +408,25 @@ static int DetectTlsIssuerDNMatch (DetectEngineThreadCtx *det_ctx,
 static DetectTlsData *DetectTlsIssuerDNParse(DetectEngineCtx *de_ctx, const char *str, bool negate)
 {
     DetectTlsData *tls = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2_len;
     const char *str_ptr;
     char *orig = NULL;
     char *tmp_str;
     uint32_t flag = 0;
 
-    ret = DetectParsePcreExec(&issuerdn_parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&issuerdn_parse_regex, &match, str, 0, 0);
     if (ret != 2) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid tls.issuerdn option");
+        SCLogError("invalid tls.issuerdn option");
         goto error;
     }
 
     if (negate)
         flag = DETECT_CONTENT_NEGATED;
 
-    res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+    int res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+        SCLogError("pcre2_substring_get_bynumber failed");
         goto error;
     }
 
@@ -449,7 +441,7 @@ static DetectTlsData *DetectTlsIssuerDNParse(DetectEngineCtx *de_ctx, const char
     if (unlikely(orig == NULL)) {
         goto error;
     }
-    pcre_free_substring(str_ptr);
+    pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
 
     tmp_str=orig;
 
@@ -467,11 +459,15 @@ static DetectTlsData *DetectTlsIssuerDNParse(DetectEngineCtx *de_ctx, const char
 
     SCFree(orig);
 
+    pcre2_match_data_free(match);
     SCLogDebug("Will look for TLS issuerdn %s", tls->issuerdn);
 
     return tls;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     if (orig != NULL)
         SCFree(orig);
     if (tls != NULL)
@@ -494,9 +490,8 @@ error:
 static int DetectTlsIssuerDNSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     DetectTlsData *tls = NULL;
-    SigMatch *sm = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     tls = DetectTlsIssuerDNParse(de_ctx, str, s->init_data->negated);
@@ -505,21 +500,16 @@ static int DetectTlsIssuerDNSetup (DetectEngineCtx *de_ctx, Signature *s, const 
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TLS_ISSUERDN, (SigMatchCtx *)tls, g_tls_cert_list_id) == NULL) {
         goto error;
-
-    sm->type = DETECT_AL_TLS_ISSUERDN;
-    sm->ctx = (void *)tls;
-
-    SigMatchAppendSMToList(s, sm, g_tls_cert_list_id);
+    }
     return 0;
 
 error:
     if (tls != NULL)
         DetectTlsIssuerDNFree(de_ctx, tls);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 
 }
@@ -545,129 +535,6 @@ static void DetectTlsIssuerDNFree(DetectEngineCtx *de_ctx, void *ptr)
  * \retval pointer to DetectTlsData on success
  * \retval NULL on failure
  */
-static DetectTlsData *DetectTlsFingerprintParse (DetectEngineCtx *de_ctx, const char *str, bool negate)
-{
-    DetectTlsData *tls = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
-    const char *str_ptr;
-    char *orig;
-    char *tmp_str;
-    uint32_t flag = 0;
-
-    ret = DetectParsePcreExec(&fingerprint_parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
-    if (ret != 2) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid tls.fingerprint option");
-        goto error;
-    }
-
-    if (negate)
-        flag = DETECT_CONTENT_NEGATED;
-
-    res = pcre_get_substring((char *)str, ov, MAX_SUBSTRINGS, 1, &str_ptr);
-    if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
-        goto error;
-    }
-
-    /* We have a correct id option */
-    tls = SCMalloc(sizeof(DetectTlsData));
-    if (unlikely(tls == NULL))
-        goto error;
-    tls->fingerprint = NULL;
-    tls->flags = flag;
-
-    orig = SCStrdup((char*)str_ptr);
-    if (unlikely(orig == NULL)) {
-        goto error;
-    }
-    pcre_free_substring(str_ptr);
-
-    tmp_str=orig;
-
-    /* Let's see if we need to escape "'s */
-    if (tmp_str[0] == '"')
-    {
-        tmp_str[strlen(tmp_str) - 1] = '\0';
-        tmp_str += 1;
-    }
-
-    tls->fingerprint = SCStrdup(tmp_str);
-    if (tls->fingerprint == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to allocate fingerprint");
-    }
-
-    SCFree(orig);
-
-    SCLogDebug("will look for TLS fingerprint %s", tls->fingerprint);
-
-    return tls;
-
-error:
-    if (tls != NULL)
-        DetectTlsFingerprintFree(de_ctx, tls);
-    return NULL;
-
-}
-/**
- * \brief match the specified fingerprint on a tls session
- *
- * \param t pointer to thread vars
- * \param det_ctx pointer to the pattern matcher thread
- * \param p pointer to the current packet
- * \param m pointer to the sigmatch that we will cast into DetectTlsData
- *
- * \retval 0 no match
- * \retval 1 match
- */
-static int DetectTlsFingerprintMatch (DetectEngineThreadCtx *det_ctx,
-        Flow *f, uint8_t flags, void *state, void *txv,
-        const Signature *s, const SigMatchCtx *m)
-{
-    SCEnter();
-    const DetectTlsData *tls_data = (const DetectTlsData *)m;
-    SSLState *ssl_state = (SSLState *)state;
-    if (ssl_state == NULL) {
-        SCLogDebug("no tls state, no match");
-        SCReturnInt(0);
-    }
-
-    int ret = 0;
-
-    SSLStateConnp *connp = NULL;
-    if (flags & STREAM_TOSERVER) {
-        connp = &ssl_state->client_connp;
-    } else {
-        connp = &ssl_state->server_connp;
-    }
-
-    if (connp->cert0_fingerprint != NULL) {
-        SCLogDebug("TLS: Fingerprint is [%s], looking for [%s]\n",
-                   connp->cert0_fingerprint,
-                   tls_data->fingerprint);
-
-        if (tls_data->fingerprint &&
-            (strstr(connp->cert0_fingerprint,
-                    tls_data->fingerprint) != NULL)) {
-            if (tls_data->flags & DETECT_CONTENT_NEGATED) {
-                ret = 0;
-            } else {
-                ret = 1;
-
-            }
-        } else {
-            if (tls_data->flags & DETECT_CONTENT_NEGATED) {
-                ret = 1;
-            } else {
-                ret = 0;
-            }
-        }
-    } else {
-        ret = 0;
-    }
-
-    SCReturnInt(ret);
-}
 
 /**
  * \brief this function is used to add the parsed "fingerprint" option
@@ -682,35 +549,15 @@ static int DetectTlsFingerprintMatch (DetectEngineThreadCtx *det_ctx,
  */
 static int DetectTlsFingerprintSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    DetectTlsData *tls = NULL;
-    SigMatch *sm = NULL;
+    if (DetectContentSetup(de_ctx, s, str) < 0) {
+        return -1;
+    }
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (DetectEngineContentModifierBufferSetup(de_ctx, s, NULL, DETECT_TLS_CERT_FINGERPRINT,
+                g_tls_cert_fingerprint_list_id, ALPROTO_TLS) < 0)
         return -1;
 
-    tls = DetectTlsFingerprintParse(de_ctx, str, s->init_data->negated);
-    if (tls == NULL)
-        goto error;
-
-    /* Okay so far so good, lets get this into a SigMatch
-     * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_AL_TLS_FINGERPRINT;
-    sm->ctx = (void *)tls;
-
-    SigMatchAppendSMToList(s, sm, g_tls_cert_list_id);
     return 0;
-
-error:
-    if (tls != NULL)
-        DetectTlsFingerprintFree(de_ctx, tls);
-    if (sm != NULL)
-        SCFree(sm);
-    return -1;
-
 }
 
 /**
@@ -721,8 +568,6 @@ error:
 static void DetectTlsFingerprintFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     DetectTlsData *id_d = (DetectTlsData *)ptr;
-    if (id_d->fingerprint)
-        SCFree(id_d->fingerprint);
     SCFree(id_d);
 }
 
@@ -739,19 +584,16 @@ static void DetectTlsFingerprintFree(DetectEngineCtx *de_ctx, void *ptr)
  */
 static int DetectTlsStoreSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    SigMatch *sm = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        return -1;
-
-    sm->type = DETECT_AL_TLS_STORE;
     s->flags |= SIG_FLAG_TLSSTORE;
 
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_STORE, NULL, DETECT_SM_LIST_POSTMATCH) ==
+            NULL) {
+        return -1;
+    }
     return 0;
 }
 
@@ -770,6 +612,14 @@ static int DetectTlsStorePostMatch (DetectEngineThreadCtx *det_ctx,
         SCReturnInt(0);
     }
 
-    ssl_state->server_connp.cert_log_flag |= SSL_TLS_LOG_PEM;
+    SSLStateConnp *connp;
+
+    if (PKT_IS_TOSERVER(p)) {
+        connp = &ssl_state->client_connp;
+    } else {
+        connp = &ssl_state->server_connp;
+    }
+
+    connp->cert_log_flag |= SSL_TLS_LOG_PEM;
     SCReturnInt(1);
 }

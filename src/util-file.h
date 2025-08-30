@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2011 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,16 +22,25 @@
  *
  */
 
-#ifndef __UTIL_FILE_H__
-#define __UTIL_FILE_H__
-
-#ifdef HAVE_NSS
-#include <sechash.h>
-#endif
+#ifndef SURICATA_UTIL_FILE_H
+#define SURICATA_UTIL_FILE_H
 
 #include "conf.h"
-
 #include "util-streaming-buffer.h"
+#include "flow.h"
+
+/* Hack: Pulling rust.h to get the SCSha256 causes all sorts of problems with
+ *   header include orders, which is something we'll have to resolve as we provide
+ *   more functionality via Rust. But this lets me continue with replacing nss
+ *   without fighting the headers at this time. */
+typedef struct SCSha256 SCSha256;
+#define SC_SHA256_LEN 32
+
+typedef struct SCSha1 SCSha1;
+#define SC_SHA1_LEN 20
+
+typedef struct SCMd5 SCMd5;
+#define SC_MD5_LEN 16
 
 #define FILE_TRUNCATED  BIT_U16(0)
 #define FILE_NOMAGIC    BIT_U16(1)
@@ -49,6 +58,13 @@
 #define FILE_USE_DETECT BIT_U16(13) /**< use content_inspected tracker */
 #define FILE_HAS_GAPS   BIT_U16(15)
 
+// to be used instead of PATH_MAX which depends on the OS
+#define SC_FILENAME_MAX 4096
+
+#define FILEDATA_CONTENT_LIMIT            100000
+#define FILEDATA_CONTENT_INSPECT_MIN_SIZE 32768
+#define FILEDATA_CONTENT_INSPECT_WINDOW   4096
+
 typedef enum FileState_ {
     FILE_STATE_NONE = 0,    /**< no state */
     FILE_STATE_OPENED,      /**< flow file is opened */
@@ -65,7 +81,6 @@ typedef struct File_ {
     uint16_t name_len;
     FileState state;
     StreamingBuffer *sb;
-    uint64_t txid;                  /**< tx this file is part of */
     uint32_t file_track_id;         /**< id used by protocol parser */
     uint32_t file_store_id;         /**< id used in store file name file.<id> */
     int fd;                         /**< file descriptor for filestore, not
@@ -75,14 +90,12 @@ typedef struct File_ {
     char *magic;
 #endif
     struct File_ *next;
-#ifdef HAVE_NSS
-    HASHContext *md5_ctx;
-    uint8_t md5[MD5_LENGTH];
-    HASHContext *sha1_ctx;
-    uint8_t sha1[SHA1_LENGTH];
-    HASHContext *sha256_ctx;
-    uint8_t sha256[SHA256_LENGTH];
-#endif
+    SCMd5 *md5_ctx;
+    uint8_t md5[SC_MD5_LEN];
+    SCSha1 *sha1_ctx;
+    uint8_t sha1[SC_SHA1_LEN];
+    SCSha256 *sha256_ctx;
+    uint8_t sha256[SC_SHA256_LEN];
     uint64_t content_inspected;     /**< used in pruning if FILE_USE_DETECT
                                      *   flag is set */
     uint64_t content_stored;
@@ -103,9 +116,9 @@ typedef struct FileContainer_ {
 } FileContainer;
 
 FileContainer *FileContainerAlloc(void);
-void FileContainerFree(FileContainer *);
+void FileContainerFree(FileContainer *, const StreamingBufferConfig *cfg);
 
-void FileContainerRecycle(FileContainer *);
+void FileContainerRecycle(FileContainer *, const StreamingBufferConfig *cfg);
 
 void FileContainerAdd(FileContainer *, File *);
 
@@ -144,11 +157,11 @@ int FileOpenFileWithId(FileContainer *, const StreamingBufferConfig *,
  *  \retval 0 ok
  *  \retval -1 error
  */
-int FileCloseFile(FileContainer *, const uint8_t *data, uint32_t data_len,
-        uint16_t flags);
-int FileCloseFileById(FileContainer *, uint32_t track_id,
+int FileCloseFile(FileContainer *, const StreamingBufferConfig *sbcfg, const uint8_t *data,
+        uint32_t data_len, uint16_t flags);
+int FileCloseFileById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len, uint16_t flags);
-int FileCloseFilePtr(File *ff, const uint8_t *data,
+int FileCloseFilePtr(File *ff, const StreamingBufferConfig *sbcfg, const uint8_t *data,
         uint32_t data_len, uint16_t flags);
 
 /**
@@ -162,10 +175,11 @@ int FileCloseFilePtr(File *ff, const uint8_t *data,
  *  \retval 0 ok
  *  \retval -1 error
  */
-int FileAppendData(FileContainer *, const uint8_t *data, uint32_t data_len);
-int FileAppendDataById(FileContainer *, uint32_t track_id,
+int FileAppendData(FileContainer *, const StreamingBufferConfig *sbcfg, const uint8_t *data,
+        uint32_t data_len);
+int FileAppendDataById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len);
-int FileAppendGAPById(FileContainer *ffc, uint32_t track_id,
+int FileAppendGAPById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len);
 
 void FileSetInspectSizes(File *file, const uint32_t win, const uint32_t min);
@@ -190,24 +204,14 @@ int FileSetRange(FileContainer *, uint64_t start, uint64_t end);
 int FileStore(File *);
 
 /**
- *  \brief Set the TX id for a file
- *
- *  \param ff The file to store
- *  \param txid the tx id
- */
-int FileSetTx(File *, uint64_t txid);
-void FileContainerSetTx(FileContainer *ffc, uint64_t tx_id);
-
-/**
  *  \brief disable file storing for a transaction
  *
  *  \param f flow
+ *  \param direction STREAM_TOSERVER or STREAM_TOCLIENT
+ *  \param tx transaction pointer
  *  \param tx_id transaction id
  */
-void FileDisableStoringForTransaction(Flow *f, uint8_t direction, uint64_t tx_id);
-
-void FlowFileDisableStoringForTransaction(struct Flow_ *f, uint64_t tx_id);
-void FilePrune(FileContainer *ffc);
+void FileDisableStoringForTransaction(Flow *f, const uint8_t direction, void *tx, uint64_t tx_id);
 
 void FileForceFilestoreEnable(void);
 int FileForceFilestore(void);
@@ -228,19 +232,24 @@ int FileForceSha256(void);
 
 void FileUpdateFlowFileFlags(Flow *f, uint16_t set_file_flags, uint8_t direction);
 
-void FileForceHashParseCfg(ConfNode *);
+void FileForceHashParseCfg(SCConfNode *);
 
 void FileForceTrackingEnable(void);
 
-void FileStoreAllFiles(FileContainer *);
-void FileStoreAllFilesForTx(FileContainer *, uint64_t);
 void FileStoreFileById(FileContainer *fc, uint32_t);
-
-void FileTruncateAllOpenFiles(FileContainer *);
 
 uint64_t FileDataSize(const File *file);
 uint64_t FileTrackedSize(const File *file);
 
+uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction);
 uint16_t FileFlowToFlags(const Flow *flow, uint8_t direction);
 
-#endif /* __UTIL_FILE_H__ */
+#ifdef DEBUG
+void FilePrintFlags(const File *file);
+#else
+#define FilePrintFlags(file)
+#endif
+
+void FilesPrune(FileContainer *fc, const StreamingBufferConfig *sbcfg, const bool trunc);
+
+#endif /* SURICATA_UTIL_FILE_H */

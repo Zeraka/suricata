@@ -21,8 +21,8 @@
  * \author Breno Silva Pinto <breno.silva@gmail.com>
  */
 
-#ifndef __DECODE_PPP_H__
-#define __DECODE_PPP_H__
+#ifndef SURICATA_DECODE_PPP_H
+#define SURICATA_DECODE_PPP_H
 
 /** Point to Point Protocol RFC1331 - Supported tyes */
 #define PPP_IP         0x0021       /* Internet Protocol */
@@ -51,7 +51,7 @@
 #define PPP_DECNETCP   0x8027       /* DECnet Control Protocol */
 #define PPP_APPLECP    0x8029       /* Appletalk Control Protocol */
 #define PPP_IPXCP      0x802b       /* Novell IPX Control Protocol */
-#define PPP_STIICP     0x8033       /* Strean Protocol Control Protocol */
+#define PPP_STIICP     0x8033       /* Stream Protocol Control Protocol */
 #define PPP_VINESCP    0x8035       /* Banyan Vines Control Protocol */
 #define PPP_IPV6CP     0x8057       /* IPv6 Control Protocol */
 #define PPP_MPLSCP     0x8281       /* rfc 3022 */
@@ -59,6 +59,9 @@
 #define PPP_PAP        0xc023       /* Password Authentication Protocol */
 #define PPP_LQM        0xc025       /* Link Quality Monitoring */
 #define PPP_CHAP       0xc223       /* Challenge Handshake Authentication Protocol */
+#define PPP_CCP        0x80fd       /* Compression Control Protocol */
+#define PPP_CBCP       0xc029       /* Callback Control Protocol CBCP */
+#define PPP_COMP_DGRAM 0x00fd       /* Compressed datagram */
 
 /** PPP Packet header */
 typedef struct PPPHdr_ {
@@ -72,5 +75,4 @@ typedef struct PPPHdr_ {
 
 void DecodePPPRegisterTests(void);
 
-#endif /* __DECODE_PPP_H__ */
-
+#endif /* SURICATA_DECODE_PPP_H */

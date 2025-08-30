@@ -21,8 +21,11 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __UTIL_EBPF_H__
-#define __UTIL_EBPF_H__
+#ifndef SURICATA_UTIL_EBPF_H
+#define SURICATA_UTIL_EBPF_H
+
+#include "flow-bypass.h"
+#include "conf.h"
 
 #ifdef HAVE_PACKET_EBPF
 
@@ -31,7 +34,6 @@
 #define XDP_FLAGS_DRV_MODE		(1U << 2)
 #define XDP_FLAGS_HW_MODE		(1U << 3)
 
-#include "flow-bypass.h"
 
 struct flowv4_keys {
     __be32 src;
@@ -43,6 +45,7 @@ struct flowv4_keys {
     __u8 ip_proto:1;
     __u16 vlan0:15;
     __u16 vlan1;
+    __u16 vlan2;
 };
 
 struct flowv6_keys {
@@ -55,6 +58,7 @@ struct flowv6_keys {
     __u8 ip_proto:1;
     __u16 vlan0:15;
     __u16 vlan1;
+    __u16 vlan2;
 };
 
 struct pair {
@@ -78,14 +82,11 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
                  int *val, struct ebpf_timeout_config *config);
 int EBPFSetupXDP(const char *iface, int fd, uint8_t flags);
 
-int EBPFCheckBypassedFlowTimeout(ThreadVars *th_v, struct flows_stats *bypassstats,
-                                        struct timespec *curtime,
-                                        void *data);
 int EBPFCheckBypassedFlowCreate(ThreadVars *th_v, struct timespec *curtime, void *data);
 
 void EBPFRegisterExtension(void);
 
-void EBPFBuildCPUSet(ConfNode *node, char *iface);
+void EBPFBuildCPUSet(SCConfNode *node, char *iface);
 
 int EBPFSetPeerIface(const char *iface, const char *out_iface);
 
@@ -94,10 +95,6 @@ bool EBPFBypassUpdate(Flow *f, void *data, time_t tsec);
 void EBPFBypassFree(void *data);
 
 void EBPFDeleteKey(int fd, void *key);
-
-#ifdef BUILD_UNIX_SOCKET
-TmEcode EBPFGetBypassedStats(json_t *cmd, json_t *answer, void *data);
-#endif
 
 #define __bpf_percpu_val_align  __attribute__((__aligned__(8)))
 

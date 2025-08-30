@@ -34,6 +34,7 @@
 #include "util-pool-thread.h"
 #include "util-unittest.h"
 #include "util-debug.h"
+#include "util-validate.h"
 
 /**
  *  \brief per thread Pool, initialization function
@@ -44,14 +45,18 @@ PoolThread *PoolThreadInit(int threads, uint32_t size, uint32_t prealloc_size,
         uint32_t elt_size,  void *(*Alloc)(void), int (*Init)(void *, void *),
         void *InitData,  void (*Cleanup)(void *), void (*Free)(void *))
 {
+    sc_errno = SC_OK;
+
     if (threads <= 0) {
         SCLogDebug("error");
+        sc_errno = SC_EINVAL;
         return NULL;
     }
 
     PoolThread *pt = SCCalloc(1, sizeof(*pt));
     if (unlikely(pt == NULL)) {
         SCLogDebug("memory alloc error");
+        sc_errno = SC_ENOMEM;
         goto error;
     }
 
@@ -59,6 +64,7 @@ PoolThread *PoolThreadInit(int threads, uint32_t size, uint32_t prealloc_size,
     pt->array = SCMalloc(threads * sizeof(PoolThreadElement));
     if (pt->array == NULL) {
         SCLogDebug("memory alloc error");
+        sc_errno = SC_ENOMEM;
         goto error;
     }
     pt->size = threads;
@@ -92,7 +98,7 @@ error:
 int PoolThreadExpand(PoolThread *pt)
 {
     if (pt == NULL || pt->array == NULL || pt->size == 0) {
-        SCLogError(SC_ERR_POOL_INIT, "pool grow failed");
+        SCLogError("pool grow failed");
         return -1;
     }
 
@@ -103,7 +109,7 @@ int PoolThreadExpand(PoolThread *pt)
     if (ptmp == NULL) {
         SCFree(pt->array);
         pt->array = NULL;
-        SCLogError(SC_ERR_POOL_INIT, "pool grow failed");
+        SCLogError("pool grow failed");
         return -1;
     }
     pt->array = ptmp;
@@ -133,7 +139,7 @@ int PoolThreadExpand(PoolThread *pt)
             settings.Cleanup, settings.Free);
     SCMutexUnlock(&e->lock);
     if (e->pool == NULL) {
-        SCLogError(SC_ERR_POOL_INIT, "pool grow failed");
+        SCLogError("pool grow failed");
         return -1;
     }
 
@@ -177,7 +183,7 @@ void *PoolThreadGetById(PoolThread *pt, uint16_t id)
     data = PoolGet(e->pool);
     SCMutexUnlock(&e->lock);
     if (data) {
-        PoolThreadReserved *did = data;
+        PoolThreadId *did = data;
         *did = id;
     }
 
@@ -186,7 +192,7 @@ void *PoolThreadGetById(PoolThread *pt, uint16_t id)
 
 void PoolThreadReturn(PoolThread *pt, void *data)
 {
-    PoolThreadReserved *id = data;
+    PoolThreadId *id = data;
 
     if (pt == NULL || *id >= pt->size)
         return;
@@ -199,9 +205,30 @@ void PoolThreadReturn(PoolThread *pt, void *data)
     SCMutexUnlock(&e->lock);
 }
 
+void PoolThreadLock(PoolThread *pt, PoolThreadId id)
+{
+    DEBUG_VALIDATE_BUG_ON(pt == NULL || id >= pt->size);
+    PoolThreadElement *e = &pt->array[id];
+    SCMutexLock(&e->lock);
+}
+
+void PoolThreadReturnRaw(PoolThread *pt, PoolThreadId id, void *data)
+{
+    DEBUG_VALIDATE_BUG_ON(pt == NULL || id >= pt->size);
+    PoolThreadElement *e = &pt->array[id];
+    PoolReturn(e->pool, data);
+}
+
+void PoolThreadUnlock(PoolThread *pt, PoolThreadId id)
+{
+    DEBUG_VALIDATE_BUG_ON(pt == NULL || id >= pt->size);
+    PoolThreadElement *e = &pt->array[id];
+    SCMutexUnlock(&e->lock);
+}
+
 #ifdef UNITTESTS
 struct PoolThreadTestData {
-    PoolThreadReserved res;
+    PoolThreadId res;
     int abc;
 };
 

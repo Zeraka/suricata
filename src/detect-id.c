@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
@@ -94,16 +93,18 @@ void DetectIdRegister (void)
 static int DetectIdMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
                           const Signature *s, const SigMatchCtx *ctx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     const DetectIdData *id_d = (const DetectIdData *)ctx;
 
     /**
      * To match a ipv4 packet with a "id" rule
      */
-    if (!PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p)) {
+    if (!PacketIsIPv4(p)) {
         return 0;
     }
 
-    if (id_d->id == IPV4_GET_IPID(p)) {
+    const IPV4Hdr *ip4h = PacketGetIPv4(p);
+    if (id_d->id == IPV4_GET_RAW_IPID(ip4h)) {
         SCLogDebug("IPV4 Proto and matched with ip_id: %u.\n",
                     id_d->id);
         return 1;
@@ -122,27 +123,28 @@ static int DetectIdMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
  */
 static DetectIdData *DetectIdParse (const char *idstr)
 {
-    uint32_t temp;
+    uint16_t temp;
     DetectIdData *id_d = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2len;
+    pcre2_match_data *match = NULL;
 
-    ret = DetectParsePcreExec(&parse_regex, idstr, 0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, &match, idstr, 0, 0);
 
     if (ret < 1 || ret > 3) {
-        SCLogError(SC_ERR_INVALID_VALUE, "invalid id option '%s'. The id option "
-                    "value must be in the range %u - %u",
-                    idstr, DETECT_IPID_MIN, DETECT_IPID_MAX);
-        return NULL;
+        SCLogError("invalid id option '%s'. The id option "
+                   "value must be in the range %u - %u",
+                idstr, DETECT_IPID_MIN, DETECT_IPID_MAX);
+        goto error;
     }
 
     char copy_str[128] = "";
     char *tmp_str;
-    res = pcre_copy_substring((char *)idstr, ov, MAX_SUBSTRINGS, 1,
-            copy_str, sizeof(copy_str));
+    pcre2len = sizeof(copy_str);
+    res = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)copy_str, &pcre2len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
-        return NULL;
+        SCLogError("pcre2_substring_copy_bynumber failed");
+        goto error;
     }
     tmp_str = copy_str;
 
@@ -154,21 +156,27 @@ static DetectIdData *DetectIdParse (const char *idstr)
     }
 
     /* ok, fill the id data */
-    if (StringParseU32RangeCheck(&temp, 10, 0, (const char *)tmp_str,
-                                 DETECT_IPID_MIN, DETECT_IPID_MAX) < 0) {
-        SCLogError(SC_ERR_INVALID_VALUE, "invalid id option '%s'", tmp_str);
-        return NULL;
+    if (StringParseUint16(&temp, 10, 0, (const char *)tmp_str) <= 0) {
+        SCLogError("invalid id option '%s'", tmp_str);
+        goto error;
     }
 
     /* We have a correct id option */
     id_d = SCMalloc(sizeof(DetectIdData));
     if (unlikely(id_d == NULL))
-        return NULL;
+        goto error;
 
     id_d->id = temp;
 
     SCLogDebug("detect-id: will look for ip_id: %u\n", id_d->id);
+    pcre2_match_data_free(match);
     return id_d;
+
+error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
+    return NULL;
 }
 
 /**
@@ -185,7 +193,6 @@ static DetectIdData *DetectIdParse (const char *idstr)
 int DetectIdSetup (DetectEngineCtx *de_ctx, Signature *s, const char *idstr)
 {
     DetectIdData *id_d = NULL;
-    SigMatch *sm = NULL;
 
     id_d = DetectIdParse(idstr);
     if (id_d == NULL)
@@ -193,16 +200,11 @@ int DetectIdSetup (DetectEngineCtx *de_ctx, Signature *s, const char *idstr)
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_ID, (SigMatchCtx *)id_d, DETECT_SM_LIST_MATCH) ==
+            NULL) {
         DetectIdFree(de_ctx, id_d);
         return -1;
     }
-
-    sm->type = DETECT_ID;
-    sm->ctx = (SigMatchCtx *)id_d;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
     return 0;
 }
@@ -223,17 +225,19 @@ void DetectIdFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketIdMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+
     const PrefilterPacketHeaderCtx *ctx = pectx;
 
-    if (!PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p)) {
+    if (!PacketIsIPv4(p)) {
         return;
     }
 
-    if (PrefilterPacketHeaderExtraMatch(ctx, p) == FALSE)
+    if (!PrefilterPacketHeaderExtraMatch(ctx, p))
         return;
 
-    if (IPV4_GET_IPID(p) == ctx->v1.u16[0])
-    {
+    const IPV4Hdr *ip4h = PacketGetIPv4(p);
+    if (ctx->v1.u16[0] == IPV4_GET_RAW_IPID(ip4h)) {
         SCLogDebug("packet matches IP id %u", ctx->v1.u16[0]);
         PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
     }
@@ -251,16 +255,14 @@ PrefilterPacketIdCompare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectIdData *a = smctx;
     if (v.u16[0] == a->id)
-        return TRUE;
-    return FALSE;
+        return true;
+    return false;
 }
 
 static int PrefilterSetupId(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ID,
-        PrefilterPacketIdSet,
-        PrefilterPacketIdCompare,
-        PrefilterPacketIdMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ID, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketIdSet, PrefilterPacketIdCompare, PrefilterPacketIdMatch);
 }
 
 static bool PrefilterIdIsPrefilterable(const Signature *s)
@@ -269,10 +271,10 @@ static bool PrefilterIdIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_ID:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 #ifdef UNITTESTS /* UNITTESTS */
@@ -283,14 +285,14 @@ static bool PrefilterIdIsPrefilterable(const Signature *s)
  */
 static int DetectIdTestParse01 (void)
 {
-    DetectIdData *id_d = NULL;
-    id_d = DetectIdParse(" 35402 ");
-    if (id_d != NULL &&id_d->id==35402) {
-        DetectIdFree(NULL, id_d);
-        return 1;
-    }
+    DetectIdData *id_d = DetectIdParse(" 35402 ");
 
-    return 0;
+    FAIL_IF_NULL(id_d);
+    FAIL_IF_NOT(id_d->id == 35402);
+
+    DetectIdFree(NULL, id_d);
+
+    PASS;
 }
 
 /**
@@ -300,14 +302,11 @@ static int DetectIdTestParse01 (void)
  */
 static int DetectIdTestParse02 (void)
 {
-    DetectIdData *id_d = NULL;
-    id_d = DetectIdParse("65537");
-    if (id_d == NULL) {
-        DetectIdFree(NULL, id_d);
-        return 1;
-    }
+    DetectIdData *id_d = DetectIdParse("65537");
 
-    return 0;
+    FAIL_IF_NOT_NULL(id_d);
+
+    PASS;
 }
 
 /**
@@ -317,14 +316,11 @@ static int DetectIdTestParse02 (void)
  */
 static int DetectIdTestParse03 (void)
 {
-    DetectIdData *id_d = NULL;
-    id_d = DetectIdParse("12what?");
-    if (id_d == NULL) {
-        DetectIdFree(NULL, id_d);
-        return 1;
-    }
+    DetectIdData *id_d = DetectIdParse("12what?");
 
-    return 0;
+    FAIL_IF_NOT_NULL(id_d);
+
+    PASS;
 }
 
 /**
@@ -333,15 +329,15 @@ static int DetectIdTestParse03 (void)
  */
 static int DetectIdTestParse04 (void)
 {
-    DetectIdData *id_d = NULL;
     /* yep, look if we trim blank spaces correctly and ignore "'s */
-    id_d = DetectIdParse(" \"35402\" ");
-    if (id_d != NULL &&id_d->id==35402) {
-        DetectIdFree(NULL, id_d);
-        return 1;
-    }
+    DetectIdData *id_d = DetectIdParse(" \"35402\" ");
 
-    return 0;
+    FAIL_IF_NULL(id_d);
+    FAIL_IF_NOT(id_d->id == 35402);
+
+    DetectIdFree(NULL, id_d);
+
+    PASS;
 }
 
 /**
@@ -350,7 +346,6 @@ static int DetectIdTestParse04 (void)
  */
 static int DetectIdTestMatch01(void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint16_t buflen = strlen((char *)buf);
     Packet *p[3];
@@ -358,17 +353,18 @@ static int DetectIdTestMatch01(void)
     p[1] = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_UDP);
     p[2] = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_ICMP);
 
-    if (p[0] == NULL || p[1] == NULL ||p[2] == NULL)
-        goto end;
+    FAIL_IF_NULL(p[0]);
+    FAIL_IF_NULL(p[1]);
+    FAIL_IF_NULL(p[2]);
 
     /* TCP IP id = 1234 */
-    p[0]->ip4h->ip_id = htons(1234);
+    p[0]->l3.hdrs.ip4h->ip_id = htons(1234);
 
     /* UDP IP id = 5678 */
-    p[1]->ip4h->ip_id = htons(5678);
+    p[1]->l3.hdrs.ip4h->ip_id = htons(5678);
 
     /* UDP IP id = 91011 */
-    p[2]->ip4h->ip_id = htons(5101);
+    p[2]->l3.hdrs.ip4h->ip_id = htons(5101);
 
     const char *sigs[3];
     sigs[0]= "alert ip any any -> any any (msg:\"Testing id 1\"; id:1234; sid:1;)";
@@ -385,11 +381,11 @@ static int DetectIdTestMatch01(void)
                               /* packet 2 should not match */
                               {0, 0, 1} };
 
-    result = UTHGenericTest(p, 3, sigs, sid, (uint32_t *) results, 3);
+    FAIL_IF_NOT(UTHGenericTest(p, 3, sigs, sid, (uint32_t *)results, 3));
 
     UTHFreePackets(p, 3);
-end:
-    return result;
+
+    PASS;
 }
 
 /**

@@ -23,7 +23,7 @@
  * Chained hash table implementation
  *
  * The 'Free' pointer can be used to have the API free your
- * hashed data. If it's NULL it's the callers responsebility
+ * hashed data. If it's NULL it's the callers responsibility
  */
 
 #include "suricata-common.h"
@@ -32,24 +32,29 @@
 #include "util-debug.h"
 #include "util-memcmp.h"
 
-HashListTable* HashListTableInit(uint32_t size, uint32_t (*Hash)(struct HashListTable_ *, void *, uint16_t), char (*Compare)(void *, uint16_t, void *, uint16_t), void (*Free)(void *)) {
-
+HashListTable *HashListTableInit(uint32_t size,
+        uint32_t (*Hash)(struct HashListTable_ *, void *, uint16_t),
+        char (*Compare)(void *, uint16_t, void *, uint16_t), void (*Free)(void *))
+{
+    sc_errno = SC_OK;
     HashListTable *ht = NULL;
 
     if (size == 0) {
+        sc_errno = SC_EINVAL;
         goto error;
     }
 
     if (Hash == NULL) {
-        //printf("ERROR: HashListTableInit no Hash function\n");
+        sc_errno = SC_EINVAL;
         goto error;
     }
 
     /* setup the filter */
-    ht = SCMalloc(sizeof(HashListTable));
-    if (unlikely(ht == NULL))
-    goto error;
-    memset(ht,0,sizeof(HashListTable));
+    ht = SCCalloc(1, sizeof(HashListTable));
+    if (unlikely(ht == NULL)) {
+        sc_errno = SC_ENOMEM;
+        goto error;
+    }
     ht->array_size = size;
     ht->Hash = Hash;
     ht->Free = Free;
@@ -60,10 +65,11 @@ HashListTable* HashListTableInit(uint32_t size, uint32_t (*Hash)(struct HashList
         ht->Compare = HashListTableDefaultCompare;
 
     /* setup the bitarray */
-    ht->array = SCMalloc(ht->array_size * sizeof(HashListTableBucket *));
-    if (ht->array == NULL)
+    ht->array = SCCalloc(ht->array_size, sizeof(HashListTableBucket *));
+    if (ht->array == NULL) {
+        sc_errno = SC_ENOMEM;
         goto error;
-    memset(ht->array,0,ht->array_size * sizeof(HashListTableBucket *));
+    }
 
     ht->listhead = NULL;
     ht->listtail = NULL;
@@ -105,14 +111,6 @@ void HashListTableFree(HashListTable *ht)
     SCFree(ht);
 }
 
-void HashListTablePrint(HashListTable *ht)
-{
-    printf("\n----------- Hash Table Stats ------------\n");
-    printf("Buckets:               %" PRIu32 "\n", ht->array_size);
-    printf("Hash function pointer: %p\n", ht->Hash);
-    printf("-----------------------------------------\n");
-}
-
 int HashListTableAdd(HashListTable *ht, void *data, uint16_t datalen)
 {
     if (ht == NULL || data == NULL)
@@ -122,10 +120,9 @@ int HashListTableAdd(HashListTable *ht, void *data, uint16_t datalen)
 
     SCLogDebug("ht %p hash %"PRIu32"", ht, hash);
 
-    HashListTableBucket *hb = SCMalloc(sizeof(HashListTableBucket));
+    HashListTableBucket *hb = SCCalloc(1, sizeof(HashListTableBucket));
     if (unlikely(hb == NULL))
         goto error;
-    memset(hb, 0, sizeof(HashListTableBucket));
     hb->data = data;
     hb->size = datalen;
     hb->bucknext = NULL;

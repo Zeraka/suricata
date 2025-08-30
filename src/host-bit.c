@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -38,7 +38,7 @@
 #include "util-unittest.h"
 #include "host-storage.h"
 
-static int host_bit_id = -1;                /**< Host storage id for bits */
+static HostStorageId host_bit_id = { .id = -1 }; /**< Host storage id for bits */
 
 static void HostBitFreeAll(void *store)
 {
@@ -49,8 +49,8 @@ static void HostBitFreeAll(void *store)
 void HostBitInitCtx(void)
 {
     host_bit_id = HostStorageRegister("bit", sizeof(void *), NULL, HostBitFreeAll);
-    if (host_bit_id == -1) {
-        FatalError(SC_ERR_FATAL, "Can't initiate host storage for bits");
+    if (host_bit_id.id == -1) {
+        FatalError("Can't initiate host storage for bits");
     }
 }
 
@@ -64,13 +64,13 @@ int HostHasHostBits(Host *host)
 
 /** \retval 1 host timed out wrt xbits
   * \retval 0 host still has active (non-expired) xbits */
-int HostBitsTimedoutCheck(Host *h, struct timeval *ts)
+int HostBitsTimedoutCheck(Host *h, SCTime_t ts)
 {
     GenericVar *gv = HostGetStorageById(h, host_bit_id);
     for ( ; gv != NULL; gv = gv->next) {
         if (gv->type == DETECT_XBITS) {
             XBit *xb = (XBit *)gv;
-            if (xb->expire > (uint32_t)ts->tv_sec)
+            if (SCTIME_CMP_GT(xb->expire, ts))
                 return 0;
         }
     }
@@ -91,7 +91,7 @@ static XBit *HostBitGet(Host *h, uint32_t idx)
 }
 
 /* add a flowbit to the flow */
-static void HostBitAdd(Host *h, uint32_t idx, uint32_t expire)
+static void HostBitAdd(Host *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = HostBitGet(h, idx);
     if (fb == NULL) {
@@ -128,7 +128,7 @@ static void HostBitRemove(Host *h, uint32_t idx)
     }
 }
 
-void HostBitSet(Host *h, uint32_t idx, uint32_t expire)
+void HostBitSet(Host *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = HostBitGet(h, idx);
     if (fb == NULL) {
@@ -144,7 +144,7 @@ void HostBitUnset(Host *h, uint32_t idx)
     }
 }
 
-void HostBitToggle(Host *h, uint32_t idx, uint32_t expire)
+void HostBitToggle(Host *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = HostBitGet(h, idx);
     if (fb != NULL) {
@@ -154,11 +154,11 @@ void HostBitToggle(Host *h, uint32_t idx, uint32_t expire)
     }
 }
 
-int HostBitIsset(Host *h, uint32_t idx, uint32_t ts)
+int HostBitIsset(Host *h, uint32_t idx, SCTime_t ts)
 {
     XBit *fb = HostBitGet(h, idx);
     if (fb != NULL) {
-        if (fb->expire < ts) {
+        if (SCTIME_CMP_LT(fb->expire, ts)) {
             HostBitRemove(h,idx);
             return 0;
         }
@@ -167,14 +167,14 @@ int HostBitIsset(Host *h, uint32_t idx, uint32_t ts)
     return 0;
 }
 
-int HostBitIsnotset(Host *h, uint32_t idx, uint32_t ts)
+int HostBitIsnotset(Host *h, uint32_t idx, SCTime_t ts)
 {
     XBit *fb = HostBitGet(h, idx);
     if (fb == NULL) {
         return 1;
     }
 
-    if (fb->expire < ts) {
+    if (SCTIME_CMP_LT(fb->expire, ts)) {
         HostBitRemove(h,idx);
         return 1;
     }
@@ -206,12 +206,12 @@ static int HostBitTest01 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 0);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(0));
 
     XBit *fb = HostBitGet(h,0);
     if (fb != NULL)
@@ -227,7 +227,7 @@ static int HostBitTest02 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
@@ -246,12 +246,12 @@ static int HostBitTest03 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 30);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(30));
 
     XBit *fb = HostBitGet(h,0);
     if (fb == NULL) {
@@ -279,15 +279,15 @@ static int HostBitTest04 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 30);
-    HostBitAdd(h, 1, 30);
-    HostBitAdd(h, 2, 30);
-    HostBitAdd(h, 3, 30);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(30));
 
     XBit *fb = HostBitGet(h,0);
     if (fb != NULL)
@@ -303,15 +303,15 @@ static int HostBitTest05 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 30);
-    HostBitAdd(h, 1, 30);
-    HostBitAdd(h, 2, 30);
-    HostBitAdd(h, 3, 30);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(30));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(30));
 
     XBit *fb = HostBitGet(h,1);
     if (fb != NULL)
@@ -327,15 +327,15 @@ static int HostBitTest06 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,2);
     if (fb != NULL)
@@ -351,15 +351,15 @@ static int HostBitTest07 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,3);
     if (fb != NULL)
@@ -375,15 +375,15 @@ static int HostBitTest08 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,0);
     if (fb == NULL)
@@ -408,15 +408,15 @@ static int HostBitTest09 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,1);
     if (fb == NULL)
@@ -441,15 +441,15 @@ static int HostBitTest10 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,2);
     if (fb == NULL)
@@ -474,15 +474,15 @@ static int HostBitTest11 (void)
 {
     int ret = 0;
 
-    HostInitConfig(TRUE);
+    HostInitConfig(true);
     Host *h = HostAlloc();
     if (h == NULL)
         goto end;
 
-    HostBitAdd(h, 0, 90);
-    HostBitAdd(h, 1, 90);
-    HostBitAdd(h, 2, 90);
-    HostBitAdd(h, 3, 90);
+    HostBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    HostBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = HostBitGet(h,3);
     if (fb == NULL)

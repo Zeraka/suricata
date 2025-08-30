@@ -142,16 +142,18 @@ FragBitsMatch(const uint8_t pbits, const uint8_t modifier,
 static int DetectFragBitsMatch (DetectEngineThreadCtx *det_ctx,
         Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
-    if (!ctx || !PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p))
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+    if (!ctx || !PacketIsIPv4(p))
         return 0;
 
     uint8_t fragbits = 0;
     const DetectFragBitsData *de = (const DetectFragBitsData *)ctx;
-    if(IPV4_GET_MF(p))
+    const IPV4Hdr *ip4h = PacketGetIPv4(p);
+    if (IPV4_GET_RAW_FLAG_MF(ip4h))
         fragbits |= FRAGBITS_HAVE_MF;
-    if(IPV4_GET_DF(p))
+    if (IPV4_GET_RAW_FLAG_DF(ip4h))
         fragbits |= FRAGBITS_HAVE_DF;
-    if(IPV4_GET_RF(p))
+    if (IPV4_GET_RAW_FLAG_RF(ip4h))
         fragbits |= FRAGBITS_HAVE_RF;
 
     return FragBitsMatch(fragbits, de->modifier, de->fragbits);
@@ -169,23 +171,24 @@ static int DetectFragBitsMatch (DetectEngineThreadCtx *det_ctx,
 static DetectFragBitsData *DetectFragBitsParse (const char *rawstr)
 {
     DetectFragBitsData *de = NULL;
-    int ret = 0, found = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int found = 0, res = 0;
+    size_t pcre2_len;
     const char *str_ptr = NULL;
     char *args[2] = { NULL, NULL};
     char *ptr;
     int i;
+    pcre2_match_data *match = NULL;
 
-    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, &match, rawstr, 0, 0);
     if (ret < 1) {
-        SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
+        SCLogError("pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
         goto error;
     }
 
     for (i = 0; i < (ret - 1); i++) {
-        res = pcre_get_substring((char *)rawstr, ov, MAX_SUBSTRINGS, i + 1, &str_ptr);
+        res = SC_Pcre2SubstringGet(match, i + 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed %d", res);
             goto error;
         }
 
@@ -193,15 +196,13 @@ static DetectFragBitsData *DetectFragBitsParse (const char *rawstr)
     }
 
     if (args[1] == NULL) {
-        SCLogError(SC_ERR_INVALID_VALUE, "invalid value");
+        SCLogError("invalid value");
         goto error;
     }
 
-    de = SCMalloc(sizeof(DetectFragBitsData));
+    de = SCCalloc(1, sizeof(DetectFragBitsData));
     if (unlikely(de == NULL))
         goto error;
-
-    memset(de,0,sizeof(DetectFragBitsData));
 
     /** First parse args[0] */
 
@@ -253,14 +254,18 @@ static DetectFragBitsData *DetectFragBitsParse (const char *rawstr)
 
     for (i = 0; i < 2; i++) {
         if (args[i] != NULL)
-            SCFree(args[i]);
+            pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
     }
+    pcre2_match_data_free(match);
     return de;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     for (i = 0; i < 2; i++) {
         if (args[i] != NULL)
-            SCFree(args[i]);
+            pcre2_substring_free((PCRE2_UCHAR8 *)args[i]);
     }
     if (de != NULL)
         SCFree(de);
@@ -282,20 +287,15 @@ error:
 static int DetectFragBitsSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
     DetectFragBitsData *de = NULL;
-    SigMatch *sm = NULL;
 
     de = DetectFragBitsParse(rawstr);
     if (de == NULL)
         return -1;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_FRAGBITS, (SigMatchCtx *)de, DETECT_SM_LIST_MATCH) == NULL) {
         goto error;
-
-    sm->type = DETECT_FRAGBITS;
-    sm->ctx = (SigMatchCtx *)de;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
@@ -321,17 +321,19 @@ static void DetectFragBitsFree(DetectEngineCtx *de_ctx, void *de_ptr)
 static void
 PrefilterPacketFragBitsMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     const PrefilterPacketHeaderCtx *ctx = pectx;
 
-    if (!PKT_IS_IPV4(p) || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv4(p))
         return;
 
     uint8_t fragbits = 0;
-    if (IPV4_GET_MF(p))
+    const IPV4Hdr *ip4h = PacketGetIPv4(p);
+    if (IPV4_GET_RAW_FLAG_MF(ip4h))
         fragbits |= FRAGBITS_HAVE_MF;
-    if (IPV4_GET_DF(p))
+    if (IPV4_GET_RAW_FLAG_DF(ip4h))
         fragbits |= FRAGBITS_HAVE_DF;
-    if (IPV4_GET_RF(p))
+    if (IPV4_GET_RAW_FLAG_RF(ip4h))
         fragbits |= FRAGBITS_HAVE_RF;
 
     if (FragBitsMatch(fragbits, ctx->v1.u8[0], ctx->v1.u8[1]))
@@ -355,17 +357,16 @@ PrefilterPacketFragBitsCompare(PrefilterPacketHeaderValue v, void *smctx)
     if (v.u8[0] == fb->modifier &&
         v.u8[1] == fb->fragbits)
     {
-        return TRUE;
+        return true;
     }
-    return FALSE;
+    return false;
 }
 
 static int PrefilterSetupFragBits(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FRAGBITS,
-        PrefilterPacketFragBitsSet,
-        PrefilterPacketFragBitsCompare,
-        PrefilterPacketFragBitsMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FRAGBITS, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketFragBitsSet, PrefilterPacketFragBitsCompare,
+            PrefilterPacketFragBitsMatch);
 }
 
 static bool PrefilterFragBitsIsPrefilterable(const Signature *s)
@@ -374,10 +375,10 @@ static bool PrefilterFragBitsIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_FRAGBITS:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 /*
@@ -385,10 +386,13 @@ static bool PrefilterFragBitsIsPrefilterable(const Signature *s)
  */
 
 #ifdef UNITTESTS
+#include "util-unittest-helper.h"
+#include "packet.h"
+
 /**
  * \test FragBitsTestParse01 is a test for a  valid fragbits value
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int FragBitsTestParse01 (void)
@@ -406,7 +410,7 @@ static int FragBitsTestParse01 (void)
 /**
  * \test FragBitsTestParse02 is a test for an invalid fragbits value
  *
- *  \retval 1 on succces
+ *  \retval 1 on success
  *  \retval 0 on failure
  */
 static int FragBitsTestParse02 (void)
@@ -467,22 +471,17 @@ static int FragBitsTestParse03 (void)
         0x0b ,0xc0 ,0x9f ,0x00 ,0x01 ,0x00 ,0x01 ,0x00,
         0x00 ,0x0e ,0x10 ,0x00 ,0x04 ,0x81 ,0x6f ,0x0b,
         0x51};
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF(unlikely(p == NULL));
     ThreadVars tv;
     DecodeThreadVars dtv;
-    IPV4Hdr ipv4h;
     int ret = 0;
     DetectFragBitsData *de = NULL;
     SigMatch *sm = NULL;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
-    memset(&ipv4h, 0, sizeof(IPV4Hdr));
-    dtv.app_tctx = AppLayerGetCtxThread(&tv);
-
-    p->ip4h = &ipv4h;
+    dtv.app_tctx = AppLayerGetCtxThread();
 
     FlowInitConfig(FLOW_QUIET);
 
@@ -554,27 +553,21 @@ static int FragBitsTestParse04 (void)
         0x0b ,0xc0 ,0x9f ,0x00 ,0x01 ,0x00 ,0x01 ,0x00,
         0x00 ,0x0e ,0x10 ,0x00 ,0x04 ,0x81 ,0x6f ,0x0b,
         0x51};
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF(unlikely(p == NULL));
     ThreadVars tv;
     DecodeThreadVars dtv;
-    IPV4Hdr ipv4h;
     int ret = 0;
     DetectFragBitsData *de = NULL;
     SigMatch *sm = NULL;
 
     memset(&tv, 0, sizeof(ThreadVars));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
-    memset(&ipv4h, 0, sizeof(IPV4Hdr));
-    dtv.app_tctx = AppLayerGetCtxThread(&tv);
-
-    p->ip4h = &ipv4h;
+    dtv.app_tctx = AppLayerGetCtxThread();
 
     FlowInitConfig(FLOW_QUIET);
 
     DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth));
-
 
     de = DetectFragBitsParse("!D");
 
@@ -592,7 +585,7 @@ static int FragBitsTestParse04 (void)
     FAIL_IF(ret);
     SCFree(de);
     SCFree(sm);
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;

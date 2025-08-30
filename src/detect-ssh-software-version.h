@@ -21,16 +21,10 @@
  * \author Pablo Rincon <pablo.rincon.crespo@gmail.com>
  */
 
-#ifndef __DETECT_SSH_SOFTWARE_VERSION_H__
-#define __DETECT_SSH_SOFTWARE_VERSION_H__
-
-typedef struct DetectSshSoftwareVersionData_ {
-    uint8_t *software_ver; /** ssh version to match */
-    uint16_t len; /** ssh version length to match */
-} DetectSshSoftwareVersionData;
+#ifndef SURICATA_DETECT_SSH_SOFTWARE_VERSION_H
+#define SURICATA_DETECT_SSH_SOFTWARE_VERSION_H
 
 /* prototypes */
 void DetectSshSoftwareVersionRegister(void);
 
-#endif /* __DETECT_SSH_SOFTWARE_VERSION_H__ */
-
+#endif /* SURICATA_DETECT_SSH_SOFTWARE_VERSION_H */

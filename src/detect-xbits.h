@@ -21,8 +21,8 @@
  *  \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_XBITS_H__
-#define __DETECT_XBITS_H__
+#ifndef SURICATA_DETECT_XBITS_H
+#define SURICATA_DETECT_XBITS_H
 
 #define DETECT_XBITS_CMD_SET      0
 #define DETECT_XBITS_CMD_TOGGLE   1
@@ -30,12 +30,11 @@
 #define DETECT_XBITS_CMD_ISNOTSET 3
 #define DETECT_XBITS_CMD_ISSET    4
 #define DETECT_XBITS_CMD_NOALERT  5
-#define DETECT_XBITS_CMD_MAX      6
 
 #define DETECT_XBITS_TRACK_IPSRC  0
 #define DETECT_XBITS_TRACK_IPDST  1
 #define DETECT_XBITS_TRACK_IPPAIR 2
-#define DETECT_XBITS_TRACK_FLOW   3
+#define DETECT_XBITS_TRACK_TX     3
 
 #define DETECT_XBITS_EXPIRE_DEFAULT 30
 
@@ -51,4 +50,4 @@ typedef struct DetectXbitsData_ {
 /* prototypes */
 void DetectXbitsRegister (void);
 
-#endif /* __DETECT_XBITS_H__ */
+#endif /* SURICATA_DETECT_XBITS_H */

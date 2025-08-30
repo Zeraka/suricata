@@ -25,11 +25,12 @@
  */
 
 #include "suricata-common.h"
+#include "thread-storage.h"
 #include "util-unittest.h"
-#include "debug.h"
 #include "util-debug.h"
 #include "threads.h"
 
+thread_local char t_thread_name[THREAD_NAME_LEN + 1];
 #ifdef UNITTESTS /* UNIT TESTS */
 
 /**
@@ -59,7 +60,7 @@ static int ThreadMacrosTest01Mutex(void)
  * ==31156==    by 0x532E8A: UtRunTests (util-unittest.c:182)
  * ==31156==    by 0x4065C3: main (suricata.c:789)
  *
- * To me this is a false positve, as the whole point of "trylock" is to see
+ * To me this is a false positive, as the whole point of "trylock" is to see
  * if a spinlock is actually locked.
  *
  */
@@ -149,5 +150,6 @@ void ThreadMacrosRegisterTests(void)
     UtRegisterTest("ThreadMacrosTest03RWLocks", ThreadMacrosTest03RWLocks);
     UtRegisterTest("ThreadMacrosTest04RWLocks", ThreadMacrosTest04RWLocks);
 //    UtRegisterTest("ThreadMacrosTest05RWLocks", ThreadMacrosTest05RWLocks);
+    RegisterThreadStorageTests();
 #endif /* UNIT TESTS */
 }

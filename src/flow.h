@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,23 +21,26 @@
  *  \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __FLOW_H__
-#define __FLOW_H__
+#ifndef SURICATA_FLOW_H
+#define SURICATA_FLOW_H
+
+/* forward declaration for macset include */
+typedef struct FlowStorageId FlowStorageId;
 
 #include "decode.h"
+#include "util-time.h"
+#include "util-exception-policy.h"
+#include "util-exception-policy-types.h"
 #include "util-var.h"
-#include "util-atomic.h"
-#include "util-device.h"
-#include "detect-tag.h"
-#include "util-macset.h"
 #include "util-optimize.h"
+#include "util-validate.h"
+#include "app-layer-protos.h"
 
 /* Part of the flow structure, so we declare it here.
  * The actual declaration is in app-layer-parser.c */
 typedef struct AppLayerParserState_ AppLayerParserState;
 
-#define FLOW_QUIET      TRUE
-#define FLOW_VERBOSE    FALSE
+#define FLOW_QUIET true
 
 #define TOSERVER 0
 #define TOCLIENT 1
@@ -48,16 +51,18 @@ typedef struct AppLayerParserState_ AppLayerParserState;
 #define FLOW_TO_SRC_SEEN                BIT_U32(0)
 /** At least one packet from the destination address was seen */
 #define FLOW_TO_DST_SEEN                BIT_U32(1)
-/** Don't return this from the flow hash. It has been replaced. */
-#define FLOW_TCP_REUSED                 BIT_U32(2)
 
-/** Flow was inspected against IP-Only sigs in the toserver direction */
-#define FLOW_TOSERVER_IPONLY_SET        BIT_U32(3)
-/** Flow was inspected against IP-Only sigs in the toclient direction */
-#define FLOW_TOCLIENT_IPONLY_SET        BIT_U32(4)
+/** next packet in toclient direction will act on updated app-layer state */
+#define FLOW_TC_APP_UPDATE_NEXT BIT_U32(2)
 
-/** Packet belonging to this flow should not be inspected at all */
-#define FLOW_NOPACKET_INSPECTION        BIT_U32(5)
+/** Flow is marked an elephant flow */
+#define FLOW_IS_ELEPHANT BIT_U32(3)
+
+/** All packets in this flow should be accepted */
+#define FLOW_ACTION_ACCEPT BIT_U32(4)
+
+// vacancy bit 5
+
 /** Packet payloads belonging to this flow should not be inspected */
 #define FLOW_NOPAYLOAD_INSPECTION       BIT_U32(6)
 
@@ -108,6 +113,15 @@ typedef struct AppLayerParserState_ AppLayerParserState;
 /** Indicate that the flow did trigger an expectation creation */
 #define FLOW_HAS_EXPECTATION            BIT_U32(27)
 
+/** All packets in this flow should be passed */
+#define FLOW_ACTION_PASS BIT_U32(28)
+
+#define FLOW_TS_APP_UPDATED BIT_U32(29)
+#define FLOW_TC_APP_UPDATED BIT_U32(30)
+
+/** next packet in toserver direction will act on updated app-layer state */
+#define FLOW_TS_APP_UPDATE_NEXT BIT_U32(31)
+
 /* File flags */
 
 #define FLOWFILE_INIT                   0
@@ -131,22 +145,18 @@ typedef struct AppLayerParserState_ AppLayerParserState;
 #define FLOWFILE_NO_SHA256_TS           BIT_U16(8)
 #define FLOWFILE_NO_SHA256_TC           BIT_U16(9)
 
-/** no size tracking of files in this flow */
-#define FLOWFILE_NO_SIZE_TS             BIT_U16(10)
-#define FLOWFILE_NO_SIZE_TC             BIT_U16(11)
+// vacancy(2)
 
-#define FLOWFILE_NONE_TS (FLOWFILE_NO_MAGIC_TS | \
-                          FLOWFILE_NO_STORE_TS | \
-                          FLOWFILE_NO_MD5_TS   | \
-                          FLOWFILE_NO_SHA1_TS  | \
-                          FLOWFILE_NO_SHA256_TS| \
-                          FLOWFILE_NO_SIZE_TS)
-#define FLOWFILE_NONE_TC (FLOWFILE_NO_MAGIC_TC | \
-                          FLOWFILE_NO_STORE_TC | \
-                          FLOWFILE_NO_MD5_TC   | \
-                          FLOWFILE_NO_SHA1_TC  | \
-                          FLOWFILE_NO_SHA256_TC| \
-                          FLOWFILE_NO_SIZE_TC)
+/** store files in the flow */
+#define FLOWFILE_STORE_TS BIT_U16(12)
+#define FLOWFILE_STORE_TC BIT_U16(13)
+
+#define FLOWFILE_NONE_TS                                                                           \
+    (FLOWFILE_NO_MAGIC_TS | FLOWFILE_NO_STORE_TS | FLOWFILE_NO_MD5_TS | FLOWFILE_NO_SHA1_TS |      \
+            FLOWFILE_NO_SHA256_TS)
+#define FLOWFILE_NONE_TC                                                                           \
+    (FLOWFILE_NO_MAGIC_TC | FLOWFILE_NO_STORE_TC | FLOWFILE_NO_MD5_TC | FLOWFILE_NO_SHA1_TC |      \
+            FLOWFILE_NO_SHA256_TC)
 #define FLOWFILE_NONE    (FLOWFILE_NONE_TS|FLOWFILE_NONE_TC)
 
 #define FLOW_IS_IPV4(f) \
@@ -177,64 +187,55 @@ typedef struct AppLayerParserState_ AppLayerParserState;
  *
  * We set the rest of the struct to 0 so we can
  * prevent using memset. */
-#define FLOW_SET_IPV4_SRC_ADDR_FROM_PACKET(p, a) do {             \
-        (a)->addr_data32[0] = (uint32_t)(p)->ip4h->s_ip_src.s_addr; \
-        (a)->addr_data32[1] = 0;                                  \
-        (a)->addr_data32[2] = 0;                                  \
-        (a)->addr_data32[3] = 0;                                  \
+#define FLOW_SET_IPV4_SRC_ADDR_FROM_PACKET(ip4h, a)                                                \
+    do {                                                                                           \
+        (a)->addr_data32[0] = (uint32_t)(ip4h)->s_ip_src.s_addr;                                   \
+        (a)->addr_data32[1] = 0;                                                                   \
+        (a)->addr_data32[2] = 0;                                                                   \
+        (a)->addr_data32[3] = 0;                                                                   \
     } while (0)
 
-#define FLOW_SET_IPV4_DST_ADDR_FROM_PACKET(p, a) do {             \
-        (a)->addr_data32[0] = (uint32_t)(p)->ip4h->s_ip_dst.s_addr; \
-        (a)->addr_data32[1] = 0;                                  \
-        (a)->addr_data32[2] = 0;                                  \
-        (a)->addr_data32[3] = 0;                                  \
-    } while (0)
-
-/* clear the address structure by setting all fields to 0 */
-#define FLOW_CLEAR_ADDR(a) do {  \
-        (a)->addr_data32[0] = 0; \
-        (a)->addr_data32[1] = 0; \
-        (a)->addr_data32[2] = 0; \
-        (a)->addr_data32[3] = 0; \
+#define FLOW_SET_IPV4_DST_ADDR_FROM_PACKET(ip4h, a)                                                \
+    do {                                                                                           \
+        (a)->addr_data32[0] = (uint32_t)(ip4h)->s_ip_dst.s_addr;                                   \
+        (a)->addr_data32[1] = 0;                                                                   \
+        (a)->addr_data32[2] = 0;                                                                   \
+        (a)->addr_data32[3] = 0;                                                                   \
     } while (0)
 
 /* Set the IPv6 addressesinto the Addrs of the Packet.
  * Make sure p->ip6h is initialized and validated. */
-#define FLOW_SET_IPV6_SRC_ADDR_FROM_PACKET(p, a) do {   \
-        (a)->addr_data32[0] = (p)->ip6h->s_ip6_src[0];  \
-        (a)->addr_data32[1] = (p)->ip6h->s_ip6_src[1];  \
-        (a)->addr_data32[2] = (p)->ip6h->s_ip6_src[2];  \
-        (a)->addr_data32[3] = (p)->ip6h->s_ip6_src[3];  \
+#define FLOW_SET_IPV6_SRC_ADDR_FROM_PACKET(ip6h, a)                                                \
+    do {                                                                                           \
+        (a)->addr_data32[0] = (ip6h)->s_ip6_src[0];                                                \
+        (a)->addr_data32[1] = (ip6h)->s_ip6_src[1];                                                \
+        (a)->addr_data32[2] = (ip6h)->s_ip6_src[2];                                                \
+        (a)->addr_data32[3] = (ip6h)->s_ip6_src[3];                                                \
     } while (0)
 
-#define FLOW_SET_IPV6_DST_ADDR_FROM_PACKET(p, a) do {   \
-        (a)->addr_data32[0] = (p)->ip6h->s_ip6_dst[0];  \
-        (a)->addr_data32[1] = (p)->ip6h->s_ip6_dst[1];  \
-        (a)->addr_data32[2] = (p)->ip6h->s_ip6_dst[2];  \
-        (a)->addr_data32[3] = (p)->ip6h->s_ip6_dst[3];  \
+#define FLOW_SET_IPV6_DST_ADDR_FROM_PACKET(ip6h, a)                                                \
+    do {                                                                                           \
+        (a)->addr_data32[0] = (ip6h)->s_ip6_dst[0];                                                \
+        (a)->addr_data32[1] = (ip6h)->s_ip6_dst[1];                                                \
+        (a)->addr_data32[2] = (ip6h)->s_ip6_dst[2];                                                \
+        (a)->addr_data32[3] = (ip6h)->s_ip6_dst[3];                                                \
     } while (0)
 
 /* pkt flow flags */
 #define FLOW_PKT_TOSERVER               0x01
 #define FLOW_PKT_TOCLIENT               0x02
 #define FLOW_PKT_ESTABLISHED            0x04
-#define FLOW_PKT_TOSERVER_IPONLY_SET    0x08
-#define FLOW_PKT_TOCLIENT_IPONLY_SET    0x10
-#define FLOW_PKT_TOSERVER_FIRST         0x20
-#define FLOW_PKT_TOCLIENT_FIRST         0x40
+#define FLOW_PKT_TOSERVER_FIRST         0x08
+#define FLOW_PKT_TOCLIENT_FIRST         0x10
 /** last pseudo packet in the flow. Can be used to trigger final clean,
  *  logging, etc. */
-#define FLOW_PKT_LAST_PSEUDO            0x80
+#define FLOW_PKT_LAST_PSEUDO 0x20
 
-#define FLOW_END_FLAG_STATE_NEW         0x01
-#define FLOW_END_FLAG_STATE_ESTABLISHED 0x02
-#define FLOW_END_FLAG_STATE_CLOSED      0x04
-#define FLOW_END_FLAG_EMERGENCY         0x08
-#define FLOW_END_FLAG_TIMEOUT           0x10
-#define FLOW_END_FLAG_FORCED            0x20
-#define FLOW_END_FLAG_SHUTDOWN          0x40
-#define FLOW_END_FLAG_STATE_BYPASSED    0x80
+#define FLOW_END_FLAG_EMERGENCY 0x01
+#define FLOW_END_FLAG_TIMEOUT   0x02
+#define FLOW_END_FLAG_FORCED    0x04
+#define FLOW_END_FLAG_SHUTDOWN  0x08
+#define FLOW_END_FLAG_TCPREUSE  0x10
 
 /** Mutex or RWLocks for the flow. */
 //#define FLOWLOCK_RWLOCK
@@ -283,15 +284,14 @@ typedef struct FlowCnf_
 {
     uint32_t hash_rand;
     uint32_t hash_size;
-    uint32_t max_flows;
     uint32_t prealloc;
 
     uint32_t timeout_new;
     uint32_t timeout_est;
 
-    uint32_t emerg_timeout_new;
-    uint32_t emerg_timeout_est;
     uint32_t emergency_recovery;
+
+    enum ExceptionPolicy memcap_policy;
 
     SC_ATOMIC_DECLARE(uint64_t, memcap);
 } FlowConfig;
@@ -303,7 +303,8 @@ typedef struct FlowKey_
     Port sp, dp;
     uint8_t proto;
     uint8_t recursion_level;
-    uint16_t vlan_id[2];
+    uint16_t livedev_id;
+    uint16_t vlan_id[VLAN_MAX_LAYERS];
 } FlowKey;
 
 typedef struct FlowAddress_ {
@@ -318,12 +319,12 @@ typedef struct FlowAddress_ {
 #define addr_data16 address.address_un_data16
 #define addr_data8  address.address_un_data8
 
-typedef unsigned short FlowRefCount;
-
 typedef unsigned short FlowStateType;
 
 /** Local Thread ID */
 typedef uint16_t FlowThreadId;
+
+#include "util-storage.h"
 
 /**
  *  \brief Flow data structure.
@@ -354,6 +355,10 @@ typedef struct Flow_
             uint8_t type;   /**< icmp type */
             uint8_t code;   /**< icmp code */
         } icmp_s;
+
+        struct {
+            uint32_t spi; /**< esp spi */
+        } esp;
     };
     union {
         Port dp;        /**< tcp/udp destination port */
@@ -364,13 +369,7 @@ typedef struct Flow_
     };
     uint8_t proto;
     uint8_t recursion_level;
-    uint16_t vlan_id[2];
-    /** how many references exist to this flow *right now*
-     *
-     *  On receiving a packet the counter is incremented while the flow
-     *  bucked is locked, which is also the case on timeout pruning.
-     */
-    FlowRefCount use_cnt;
+    uint16_t vlan_id[VLAN_MAX_LAYERS];
 
     uint8_t vlan_idx;
 
@@ -383,11 +382,6 @@ typedef struct Flow_
         uint8_t ffr;
     };
 
-    /** timestamp in seconds of the moment this flow will timeout
-     *  according to the timeout policy. Does *not* take emergency
-     *  mode into account. */
-    uint32_t timeout_at;
-
     /** Thread ID for the stream/detect portion of this flow */
     FlowThreadId thread_id[2];
 
@@ -398,16 +392,14 @@ typedef struct Flow_
     /** flow hash - the flow hash before hash table size mod. */
     uint32_t flow_hash;
 
+    /** timeout in seconds by policy, add to Flow::lastts to get actual time this times out.
+     * Ignored in emergency mode. */
+    uint32_t timeout_policy;
+
     /* time stamp of last update (last packet). Set/updated under the
      * flow and flow hash row locks, safe to read under either the
      * flow lock or flow hash row lock. */
-    struct timeval lastts;
-
-    /* end of flow "header" */
-
-    /** timeout policy value in seconds to add to the lastts.tv_sec
-     *  when a packet has been received. */
-    uint32_t timeout_policy;
+    SCTime_t lastts;
 
     FlowStateType flow_state;
 
@@ -469,6 +461,9 @@ typedef struct Flow_
     uint8_t min_ttl_toclient;
     uint8_t max_ttl_toclient;
 
+    /** which exception policies were applied, if any */
+    uint8_t applied_exception_policy;
+
     /** application level storage ptrs.
      *
      */
@@ -487,12 +482,14 @@ typedef struct Flow_
 
     struct FlowBucket_ *fb;
 
-    struct timeval startts;
+    SCTime_t startts;
 
     uint32_t todstpktcnt;
     uint32_t tosrcpktcnt;
     uint64_t todstbytecnt;
     uint64_t tosrcbytecnt;
+
+    Storage storage[];
 } Flow;
 
 enum FlowState {
@@ -504,6 +501,11 @@ enum FlowState {
     FLOW_STATE_CAPTURE_BYPASSED,
 #endif
 };
+#ifdef CAPTURE_OFFLOAD
+#define FLOW_STATE_SIZE 5
+#else
+#define FLOW_STATE_SIZE 4
+#endif
 
 typedef struct FlowProtoTimeout_ {
     uint32_t new_timeout;
@@ -538,15 +540,14 @@ typedef struct FlowLookupStruct_ // TODO name
 } FlowLookupStruct;
 
 /** \brief prepare packet for a life with flow
- *  Set PKT_WANTS_FLOW flag to incidate workers should do a flow lookup
+ *  Set PKT_WANTS_FLOW flag to indicate workers should do a flow lookup
  *  and calc the hash value to be used in the lookup and autofp flow
  *  balancing. */
 void FlowSetupPacket(Packet *p);
 void FlowHandlePacket (ThreadVars *, FlowLookupStruct *, Packet *);
-void FlowInitConfig (char);
-void FlowPrintQueueInfo (void);
+void FlowInitConfig(bool);
+void FlowReset(void);
 void FlowShutdown(void);
-void FlowSetIPOnlyFlag(Flow *, int);
 void FlowSetHasAlertsFlag(Flow *);
 int FlowHasAlerts(const Flow *);
 void FlowSetChangeProtoFlag(Flow *);
@@ -554,15 +555,9 @@ void FlowUnsetChangeProtoFlag(Flow *);
 int FlowChangeProto(Flow *);
 void FlowSwap(Flow *);
 
-void FlowRegisterTests (void);
-int FlowSetProtoTimeout(uint8_t ,uint32_t ,uint32_t ,uint32_t);
-int FlowSetProtoEmergencyTimeout(uint8_t ,uint32_t ,uint32_t ,uint32_t);
-int FlowSetProtoFreeFunc (uint8_t , void (*Free)(void *));
-void FlowUpdateQueue(Flow *);
+void FlowRegisterTests(void);
+int FlowSetProtoFreeFunc(uint8_t, void (*Free)(void *));
 
-int FlowUpdateSpareFlows(void);
-
-static inline void FlowSetNoPacketInspectionFlag(Flow *);
 static inline void FlowSetNoPayloadInspectionFlag(Flow *);
 
 int FlowGetPacketDirection(const Flow *, const Packet *);
@@ -574,26 +569,26 @@ void FlowUpdateState(Flow *f, enum FlowState s);
 int FlowSetMemcap(uint64_t size);
 uint64_t FlowGetMemcap(void);
 uint64_t FlowGetMemuse(void);
+enum ExceptionPolicy FlowGetMemcapExceptionPolicy(void);
 
-int GetFlowBypassInfoID(void);
+FlowStorageId GetFlowBypassInfoID(void);
 void RegisterFlowBypassInfo(void);
 
 void FlowGetLastTimeAsParts(Flow *flow, uint64_t *secs, uint64_t *usecs);
+uint32_t FlowGetFlags(Flow *flow);
+uint16_t FlowGetSourcePort(Flow *flow);
+uint16_t FlowGetDestinationPort(Flow *flow);
 
 /** ----- Inline functions ----- */
 
-/** \brief Set the No Packet Inspection Flag without locking the flow.
- *
- * \param f Flow to set the flag in
- */
-static inline  void FlowSetNoPacketInspectionFlag(Flow *f)
+static inline AppProto FlowGetAppProtocol(const Flow *f)
 {
-    SCEnter();
+    return f->alproto;
+}
 
-    SCLogDebug("flow %p", f);
-    f->flags |= FLOW_NOPACKET_INSPECTION;
-
-    SCReturn;
+static inline void *FlowGetAppState(const Flow *f)
+{
+    return f->alstate;
 }
 
 /** \brief Set the No payload inspection Flag without locking the flow.
@@ -610,45 +605,15 @@ static inline void FlowSetNoPayloadInspectionFlag(Flow *f)
     SCReturn;
 }
 
-/**
- *  \brief increase the use count of a flow
- *
- *  \param f flow to decrease use count for
- */
-static inline void FlowIncrUsecnt(Flow *f)
-{
-    if (f == NULL)
-        return;
-
-    f->use_cnt++;
-}
-
-/**
- *  \brief decrease the use count of a flow
- *
- *  \param f flow to decrease use count for
- */
-static inline void FlowDecrUsecnt(Flow *f)
-{
-    if (f == NULL)
-        return;
-
-    f->use_cnt--;
-}
-
-/** \brief Reference the flow, bumping the flows use_cnt
+/** \brief Reference the flow
  *  \note This should only be called once for a destination
  *        pointer */
 static inline void FlowReference(Flow **d, Flow *f)
 {
     if (likely(f != NULL)) {
-#ifdef DEBUG_VALIDATION
-        BUG_ON(*d == f);
-#else
+        DEBUG_VALIDATE_BUG_ON(*d == f);
         if (*d == f)
             return;
-#endif
-        FlowIncrUsecnt(f);
         *d = f;
     }
 }
@@ -656,42 +621,33 @@ static inline void FlowReference(Flow **d, Flow *f)
 static inline void FlowDeReference(Flow **d)
 {
     if (likely(*d != NULL)) {
-        FlowDecrUsecnt(*d);
         *d = NULL;
     }
 }
 
 /** \brief create a flow id that is as unique as possible
- *  \retval flow_id signed 64bit id
- *  \note signed because of the signedness of json_integer_t in
- *        the json output
+ *  \retval flow_id unsigned 64bit id
  */
-static inline int64_t FlowGetId(const Flow *f)
+static inline uint64_t FlowGetId(const Flow *f)
 {
-    int64_t id = (int64_t)f->flow_hash << 31 |
-        (int64_t)(f->startts.tv_sec & 0x0000FFFF) << 16 |
-        (int64_t)(f->startts.tv_usec & 0x0000FFFF);
-    /* reduce to 51 bits as Javascript and even JSON often seem to
+    uint64_t id = (uint64_t)(SCTIME_SECS(f->startts) & 0xFFFF) << 48 |
+                  (uint64_t)(SCTIME_USECS(f->startts) & 0xFFFF) << 32 | (uint64_t)f->flow_hash;
+    /* reduce to 51 bits as JavaScript and even JSON often seem to
      * max out there. */
     id &= 0x7ffffffffffffLL;
     return id;
 }
 
-static inline void FlowSetEndFlags(Flow *f)
+static inline bool FlowIsBypassed(const Flow *f)
 {
-    const int state = f->flow_state;
-    if (state == FLOW_STATE_NEW)
-        f->flow_end_flags |= FLOW_END_FLAG_STATE_NEW;
-    else if (state == FLOW_STATE_ESTABLISHED)
-        f->flow_end_flags |= FLOW_END_FLAG_STATE_ESTABLISHED;
-    else if (state == FLOW_STATE_CLOSED)
-        f->flow_end_flags |= FLOW_END_FLAG_STATE_CLOSED;
-    else if (state == FLOW_STATE_LOCAL_BYPASSED)
-        f->flow_end_flags |= FLOW_END_FLAG_STATE_BYPASSED;
+    if (
 #ifdef CAPTURE_OFFLOAD
-    else if (state == FLOW_STATE_CAPTURE_BYPASSED)
-        f->flow_end_flags = FLOW_END_FLAG_STATE_BYPASSED;
+            f->flow_state == FLOW_STATE_CAPTURE_BYPASSED ||
 #endif
+            f->flow_state == FLOW_STATE_LOCAL_BYPASSED) {
+        return true;
+    }
+    return false;
 }
 
 int FlowClearMemory(Flow *,uint8_t );
@@ -702,4 +658,4 @@ uint8_t FlowGetDisruptionFlags(const Flow *f, uint8_t flags);
 
 void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars *dtv);
 
-#endif /* __FLOW_H__ */
+#endif /* SURICATA_FLOW_H */

@@ -16,6 +16,12 @@ import sys
 import os
 import shlex
 import re
+import subprocess
+import datetime
+
+# Set 'today'. This will be used as the man page date. If an empty
+# string todays date will be used.
+today = os.environ.get('RELEASE_DATE', '')
 
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
 
@@ -50,7 +56,8 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Suricata'
-copyright = u'2016-2019, OISF'
+end_year = datetime.datetime.now().date().year
+copyright = u'2016-{}, OISF'.format(end_year)
 author = u'OISF'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -64,7 +71,7 @@ try:
     version = os.environ.get('version', None)
     if not version:
         version = re.search(
-            "AC_INIT\(\[suricata\],\s*\[(.*)?\]\)",
+            r"AC_INIT\(\[suricata\],\s*\[(.*)?\]\)",
             open("../../configure.ac").read()).groups()[0]
     if not version:
         version = "unknown"
@@ -77,7 +84,7 @@ release = version
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = 'en'
 
 # There are two options for replacing |today|: either, you set today to some
 # non-false value, then it is used:
@@ -131,19 +138,22 @@ if not on_rtd:
     try:
         import sphinx_rtd_theme
         html_theme = 'sphinx_rtd_theme'
-        html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
     except:
         html_theme = 'default'
-    def setup(app):
-        app.add_stylesheet('css/suricata.css')
 else:
-    html_context = {
-        'css_files': [
-            'https://media.readthedocs.org/css/sphinx_rtd_theme.css',
-            'https://media.readthedocs.org/css/readthedocs-doc-embed.css',
-            '_static/css/suricata.css',
-        ],
-    }
+    html_theme = 'sphinx_rtd_theme'
+
+# Add in our own stylesheet.
+def setup(app):
+    if hasattr(app, 'add_css_file'):
+        app.add_css_file('css/suricata.css')
+    else:
+        app.add_stylesheet('css/suricata.css')
+
+    # Build generated pages if they don't exist. For example, when on
+    # RTD and we're build from git instead of a distribution package.
+    if not os.path.exists("./_generated"):
+        os.system("./generate-evedoc.sh")
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -332,3 +342,11 @@ rst_epilog = """
     "sysconfdir": os.getenv("sysconfdir", "/etc"),
     "localstatedir": os.getenv("localstatedir", "/var"),
 }
+
+# Custom code generate some documentation.
+# evedoc = "./evedoc.py"
+# eve_schema = "../../etc/schema.json"
+# os.makedirs("_generated", exist_ok=True)
+# subprocess.call([evedoc, "--output", "_generated/eve-index.rst", eve_schema])
+# for proto in ["quic", "pgsql"]:
+#     subprocess.call([evedoc, "--output", "_generated/{}.rst".format(proto), "--object", proto, eve_schema])

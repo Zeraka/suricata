@@ -27,8 +27,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __UTIL_POOL_H__
-#define __UTIL_POOL_H__
+#ifndef SURICATA_UTIL_POOL_H
+#define SURICATA_UTIL_POOL_H
 
 #define POOL_BUCKET_PREALLOCATED    (1 << 0)
 
@@ -74,15 +74,13 @@ typedef struct Pool_ {
 /* prototypes */
 Pool* PoolInit(uint32_t, uint32_t, uint32_t, void *(*Alloc)(void), int (*Init)(void *, void *), void *, void (*Cleanup)(void *), void (*Free)(void *));
 void PoolFree(Pool *);
-void PoolPrint(Pool *);
-void PoolPrintSaturation(Pool *p);
 
 void *PoolGet(Pool *);
 void PoolReturn(Pool *, void *);
 
 void PoolRegisterTests(void);
 
-#endif /* __UTIL_POOL_H__ */
+#endif /* SURICATA_UTIL_POOL_H */
 
 /**
  * @}

@@ -6,7 +6,7 @@ Installation
 Before Suricata can be used it has to be installed. Suricata can be installed
 on various distributions using binary packages: :ref:`install-binary-packages`.
 
-For people familiar with compiling their own software, the Source method is
+For people familiar with compiling their own software, the `Source method` is
 recommended.
 
 Advanced users can check the advanced guides, see :ref:`install-advanced`.
@@ -16,10 +16,13 @@ Source
 
 Installing from the source distribution files gives the most control over the Suricata installation.
 
+The Suricata source distribution files should be verified before building
+the source, see :doc:`verifying-source-files`.
+
 Basic steps::
 
-    tar xzvf suricata-5.0.0.tar.gz
-    cd suricata-5.0.0
+    tar xzvf suricata-7.0.0.tar.gz
+    cd suricata-7.0.0
     ./configure
     make
     make install
@@ -49,124 +52,159 @@ Common configure options
 
     Setups Suricata for logging into /var/log/suricata/. Default ``/usr/local/var/log/suricata``
 
-.. option:: --enable-lua
-
-    Enables Lua support for detection and output.
-
 .. option:: --enable-geoip
 
     Enables GeoIP support for detection.
 
+.. option:: --enable-dpdk
 
-Dependencies
-^^^^^^^^^^^^
+    Enables `DPDK <https://www.dpdk.org/>`_ packet capture method.
 
-For Suricata's compilation you'll need the following libraries and their development headers installed:
-
-  libpcap, libpcre, libmagic, zlib, libyaml
-
-The following tools are required:
-
-  make gcc (or clang) pkg-config
-
-For full features, also add:
-
-  libjansson, libnss, libgeoip, liblua5.1, libhiredis, libevent
-
-Rust support:
-
-  rustc, cargo
-
-  Not every distro provides Rust packages yet. Rust can also be installed
-  directly from the Rust project itself:
-  https://www.rust-lang.org/en-US/install.html
+Dependencies and compilation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Ubuntu/Debian
 """""""""""""
 
-Minimal::
+.. note:: The following instructions require ``sudo`` to be installed.
 
-    apt-get install libpcre3 libpcre3-dbg libpcre3-dev build-essential libpcap-dev   \
-                    libyaml-0-2 libyaml-dev pkg-config zlib1g zlib1g-dev \
-                    make libmagic-dev
+.. literalinclude:: ../../scripts/docs-ubuntu-debian-minimal-build.sh
+    :caption: Minimal dependencies for Ubuntu/Debian
+    :language: bash
+    :start-after: # install-guide-documentation tag start: Minimal dependencies
+    :end-before: # install-guide-documentation tag end: Minimal dependencies
 
-Recommended::
+CentOS, AlmaLinux, RockyLinux, Fedora, etc
+""""""""""""""""""""""""""""""""""""""""""
 
-    apt-get install libpcre3 libpcre3-dbg libpcre3-dev build-essential libpcap-dev   \
-                    libnet1-dev libyaml-0-2 libyaml-dev pkg-config zlib1g zlib1g-dev \
-                    libcap-ng-dev libcap-ng0 make libmagic-dev libjansson-dev        \
-                    libnss3-dev libgeoip-dev liblua5.1-dev libhiredis-dev libevent-dev \
-                    python-yaml rustc cargo
+.. note:: The following instructions require ``sudo`` to be installed.
 
-Extra for iptables/nftables IPS integration::
+To install all minimal dependencies, it is required to enable extra package
+repository in most distros. You can enable it possibly by
+one of the following ways::
 
-    apt-get install libnetfilter-queue-dev libnetfilter-queue1  \
-                    libnetfilter-log-dev libnetfilter-log1      \
-                    libnfnetlink-dev libnfnetlink0
+    sudo dnf -y update
+    sudo dnf -y install epel-release dnf-plugins-core
+    # AlmaLinux 8 / RockyLinux 8
+    sudo dnf config-manager --set-enabled powertools
+    # AlmaLinux 9 / RockyLinux 9
+    sudo dnf config-manager --set-enable crb
+    # Oracle Linux 8
+    sudo dnf config-manager --set-enable ol8_codeready_builder
+    # Oracle Linux 9
+    sudo dnf config-manager --set-enable ol9_codeready_builder
 
-For Rust support::
+.. literalinclude:: ../../scripts/docs-almalinux9-minimal-build.sh
+    :caption: Minimal dependencies for RPM-based distributions
+    :language: bash
+    :start-after: # install-guide-documentation tag start: Minimal RPM-based dependencies
+    :end-before: # install-guide-documentation tag end: Minimal RPM-based dependencies
 
-    apt-get install rustc cargo
+Windows
+"""""""
+
+For building and installing from source on Windows, see :doc:`install/windows`.
+
+Compilation
+"""""""""""
+
+Follow these steps from your Suricata directory::
+
+    ./configure # you may want to add additional parameters here
+    # ./configure --help to get all available parameters
+    # j is for adding concurrency to make; the number indicates how much 
+    # concurrency so choose a number that is suitable for your build system
+    make -j8 
+    make install # to install your Suricata compiled binary
+    # make install-full - installs configuration and rulesets as well
+
+Rust support
+""""""""""""
+
+  Rust packages can be found in package managers but some distributions
+  don't provide Rust or provide outdated Rust packages.
+  In case of insufficient version you can install Rust directly
+  from the Rust project itself::
+
+    1) Install Rust https://www.rust-lang.org/en-US/install.html
+    2) Install cbindgen - if the cbindgen is not found in the repository
+       or the cbindgen version is lower than required, it can be
+       alternatively installed as: cargo install --force cbindgen
+    3) Make sure the cargo path is within your PATH environment
+       echo 'export PATH="~/.cargo/bin:${PATH}"' >> ~/.bashrc
+       export PATH="~/.cargo/bin:${PATH}"
+
+Auto-Setup
+^^^^^^^^^^
+
+You can also use the available auto-setup features of Suricata:
+
+::
+
+    ./configure && make && sudo make install-conf
+
+*make install-conf* would do the regular "make install" and then it would automatically
+create/setup all the necessary directories and ``suricata.yaml`` for you.
+
+::
+
+    ./configure && make && sudo make install-rules
+
+*make install-rules* would do the regular "make install" and then it would automatically
+download and set up the latest ruleset from Emerging Threats available for Suricata.
+
+::
+
+    ./configure && make && sudo make install-full
+
+*make install-full* would combine everything mentioned above (install-conf and install-rules)
+and will present you with a ready-to-run (configured and set-up) Suricata.
 
 .. _install-binary-packages:
 
 Binary packages
 ---------------
 
-Ubuntu
-^^^^^^
+.. toctree::
+   :maxdepth: 1
 
-For Ubuntu, the OISF maintains a PPA ``suricata-stable`` that always contains the latest stable release.
+   install/ubuntu
+   install/debian
+   install/rpm
+   install/other
 
-To use it::
+Suricata is available on various distributions as binary
+packages. These offer a convenient way to install and manage Suricata
+without compiling from source.
 
-    sudo add-apt-repository ppa:oisf/suricata-stable
-    sudo apt-get update
-    sudo apt-get install suricata
+**For Ubuntu systems**:
 
-Debian
-^^^^^^
+    See :doc:`install/ubuntu` for detailed instructions on
+    installing from PPA repositories.
 
-In Debian 9 (stretch) and later do::
+**For Debian systems**:
 
-    sudo apt-get install suricata
+    See :doc:`install/debian` for detailed instructions on
+    installing from official repositories and backports.
 
-In the "stable" version of Debian, Suricata is usually not available in the
-latest version. A more recent version is often available from Debian backports,
-if it can be built there.
+**For RPM-based distributions (CentOS, AlmaLinux, RockyLinux, Fedora, etc)**:
 
-To use backports, the backports repository for the current stable
-distribution needs to be added to the system-wide sources list.
-For Debian 10 (buster), for instance, run the following as root::
+    See :doc:`install/rpm` for detailed instructions on
+    installing from COPR repositories.
 
-    echo "deb http://http.debian.net/debian buster-backports main" > \
-        /etc/apt/sources.list.d/backports.list
-    apt-get update
-    apt-get install suricata -t buster-backports
+**For other distributions**:
 
-Fedora
-^^^^^^
-
-::
-
-    dnf install suricata
-
-RHEL/CentOS
-^^^^^^^^^^^
-
-For RedHat Enterprise Linux 7 and CentOS 7 the EPEL repository can be used.
-
-::
-
-    yum install epel-release
-    yum install suricata
-
+    See :doc:`install/other` for installation instructions
+    for Arch Linux and other distributions.
 
 .. _install-advanced:
 
 Advanced Installation
 ---------------------
 
-Various installation guides for installing from GIT and for other operating systems are maintained at:
-https://redmine.openinfosecfoundation.org/projects/suricata/wiki/Suricata_Installation
+If you are using Ubuntu, you can follow
+:doc:`devguide/codebase/installation-from-git`.
 
+For other various installation guides for installing from GIT and for other operating
+systems, please check (bear in mind that those may be somewhat outdated):
+https://redmine.openinfosecfoundation.org/projects/suricata/wiki/Suricata_Installation

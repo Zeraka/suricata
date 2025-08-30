@@ -21,20 +21,19 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __THREADVARS_H__
-#define __THREADVARS_H__
+#ifndef SURICATA_THREADVARS_H
+#define SURICATA_THREADVARS_H
 
-#include "util-affinity.h"
 #include "tm-queues.h"
 #include "counters.h"
-#include "threads.h"
 #include "packet-queue.h"
 #include "util-atomic.h"
+#include "util-storage.h"
 
 struct TmSlot_;
 
 /** Thread flags set and read by threads to control the threads */
-#define THV_USE                 BIT_U32(0)  /** thread is in use */
+// bit 0 vacant
 #define THV_INIT_DONE           BIT_U32(1)  /** thread initialization done */
 #define THV_PAUSE               BIT_U32(2)  /** signal thread to pause itself */
 #define THV_PAUSED              BIT_U32(3)  /** the thread is paused atm */
@@ -46,14 +45,15 @@ struct TmSlot_;
 #define THV_DEINIT              BIT_U32(7)
 #define THV_RUNNING_DONE        BIT_U32(8)  /** thread has completed running and is entering
                                          * the de-init phase */
-#define THV_KILL_PKTACQ         BIT_U32(9)  /**< flag thread to stop packet acq */
+#define THV_REQ_FLOW_LOOP       BIT_U32(9)  /**< request thread to enter flow timeout loop */
 #define THV_FLOW_LOOP           BIT_U32(10) /**< thread is in flow shutdown loop */
 
 /** signal thread's capture method to create a fake packet to force through
- *  the engine. This is to force timely handling of maintenance taks like
+ *  the engine. This is to force timely handling of maintenance tasks like
  *  rule reloads even if no packets are read by the capture method. */
 #define THV_CAPTURE_INJECT_PKT  BIT_U32(11)
 #define THV_DEAD                BIT_U32(12) /**< thread has been joined with pthread_join() */
+#define THV_RUNNING             BIT_U32(13) /**< thread is running */
 
 /** \brief Per thread variable structure */
 typedef struct ThreadVars_ {
@@ -80,7 +80,7 @@ typedef struct ThreadVars_ {
     uint8_t tmm_flags;
 
     uint8_t cap_flags; /**< Flags to indicate the capabilities of all the
-                            TmModules resgitered under this thread */
+                            TmModules registered under this thread */
     uint8_t inq_id;
     uint8_t outq_id;
 
@@ -106,8 +106,10 @@ typedef struct ThreadVars_ {
     void *outctx;
     void (*tmqh_out)(struct ThreadVars_ *, struct Packet_ *);
 
-    /** queue for decoders to temporarily store extra packets they
-     *  generate. */
+    /** Queue for decoders to temporarily store extra packets they
+     *  generate. These packets are generated as part of the tunnel
+     *  handling, and are processed directly after the "real" packet
+     *  from the current position in the pipeline. */
     PacketQueueNoLock decode_pq;
 
     /** Stream packet queue for flow time out injection. Either a pointer to the
@@ -132,7 +134,12 @@ typedef struct ThreadVars_ {
     SCCtrlCondT *ctrl_cond;
 
     struct FlowQueue_ *flow_queue;
+    bool break_loop;
 
+    /** Interface-specific thread affinity */
+    char *iface_name;
+
+    Storage storage[];
 } ThreadVars;
 
 /** Thread setup flags: */
@@ -140,4 +147,4 @@ typedef struct ThreadVars_ {
 #define THREAD_SET_PRIORITY     0x02 /** Real time priority */
 #define THREAD_SET_AFFTYPE      0x04 /** Priority and affinity */
 
-#endif /* __THREADVARS_H__ */
+#endif /* SURICATA_THREADVARS_H */

@@ -8,7 +8,7 @@ type DetectEngineCtx, Signature;
 
 func(DetectEngineCtx *de_ctx, Signature *s, char *str) {
 ...
-SigMatchAppendSMToList(s, ...)@p1;
+SCSigMatchAppendSMToList(s, ...)@p1;
 ...
 if (s->alproto != E1 && ...) {
 ...
@@ -21,6 +21,6 @@ goto error;
 @script:python@
 p1 << siginit.p1;
 @@
-print "SigMatch added at %s:%s but error handling can cause it to be freed later." % (p1[0].file, p1[0].line)
+print("SigMatch added at %s:%s but error handling can cause it to be freed later." % (p1[0].file, p1[0].line))
 import sys
 sys.exit(1)

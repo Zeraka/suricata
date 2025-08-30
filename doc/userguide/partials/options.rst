@@ -12,6 +12,22 @@
 
    Path to configuration file.
 
+.. option:: --include <path>
+
+   Additional configuration files to include. Multiple additional
+   configuration files can be provided and will be included in the
+   order specified on the command line.  These additional configuration
+   files are loaded as if they existed at the end of the main
+   configuration file.
+
+   Example including one additional file::
+
+     --include /etc/suricata/other.yaml
+
+   Example including more than one additional file::
+
+     --include /etc/suricata/other.yaml --include /etc/suricata/extra.yaml
+
 .. option:: -T
 
    Test configuration.
@@ -35,11 +51,15 @@
 
 .. Basic input options.
 
+.. _cmdline-option-r:
+
 .. option:: -r <path>
 
    Run in pcap offline mode (replay mode) reading files from pcap file. If
    <path> specifies a directory, all files in that directory will be processed
    in order of modified time maintaining flow state between files.
+
+.. _cmdline-option-pcap-file-continuous:
 
 .. option:: --pcap-file-continuous
 
@@ -47,11 +67,16 @@
    interrupted. This is useful with directories to add new files and not reset
    flow state between files.
 
+.. _cmdline-option-pcap-file-recursive:
+
 .. option:: --pcap-file-recursive
+
    Used with the -r option when the path provided is a directory.  This option
    enables recursive traversal into subdirectories to a maximum depth of 255.
    This option cannot be combined with --pcap-file-continuous.  Symlinks are
    ignored.
+
+.. _cmdline-option-pcap-file-delete:
 
 .. option:: --pcap-file-delete
 
@@ -59,6 +84,13 @@
    after they have been processed. This is useful with pcap-file-continuous to
    continuously feed files to a directory and have them cleaned up when done. If
    this option is not set, pcap files will not be deleted after processing.
+
+.. _cmdline-option-pcap-file-buffer-size:
+
+.. option:: --pcap-file-buffer-size <value>
+
+   Set read buffer size using ``setvbuf`` to speed up pcap reading. Valid values
+   are 4 KiB to 64 MiB. Default value is 128 KiB. Supported on Linux only.
 
 .. option::  -i <interface>
 
@@ -79,6 +111,12 @@
    supplied, the list of devices from the af-packet section in the
    yaml is used.
 
+.. option:: --af-xdp[=<device>]
+
+   Enable capture of packet using AF_XDP on Linux. If no device is
+   supplied, the list of devices from the af-xdp section in the
+   yaml is used.
+
 .. option:: -q <queue id>
 
    Run inline of the NFQUEUE queue ID provided. May be provided
@@ -91,10 +129,16 @@
    With the -s option you can set a file with signatures, which will
    be loaded together with the rules set in the yaml.
 
+   It is possible to use globbing when specifying rules files.
+   For example, ``-s '/path/to/rules/*.rules'``
+
 .. option:: -S <filename.rules>
 
    With the -S option you can set a file with signatures, which will
    be loaded exclusively, regardless of the rules set in the yaml.
+
+   It is possible to use globbing when specifying rules files.
+   For example, ``-S '/path/to/rules/*.rules'``
 
 .. option:: -l <directory>
 
@@ -124,9 +168,13 @@
    For more information about runmodes see :doc:`Runmodes
    </performance/runmodes>` in the user guide.
 
+.. _cmdline-option-F:
+
 .. option:: -F <bpf filter file>
 
    Use BPF filter from file.
+
+.. _cmdline-option-k:
 
 .. option:: -k [all|none]
 
@@ -153,9 +201,31 @@
 
    Exit with a failure when errors are encountered loading signatures.
 
+.. option:: --strict-rule-keywords[=all|<keyword>|<keywords(csv)]
+
+   Applies to: classtype, reference and app-layer-event.
+
+   By default missing reference or classtype values are warnings and
+   not errors. Additionally, loading outdated app-layer-event events are
+   also not treated as errors, but as warnings instead.
+
+   If this option is enabled these warnings are considered errors.
+
+   If no value, or the value 'all', is specified, the option applies to
+   all of the keywords above. Alternatively, a comma separated list can
+   be supplied with the keyword names it should apply to.
+
 .. option:: --disable-detection
 
    Disable the detection engine.
+
+.. option:: --disable-hashing
+
+   Disable support for hash algorithms such as md5, sha1 and sha256.
+
+   By default hashing is enabled. Disabling hashing will also disable some
+   Suricata features such as the filestore, ja3, and rule keywords that use hash
+   algorithms.
 
 .. Information options.
    
@@ -192,10 +262,25 @@
 .. option:: --set <key>=<value>
 
    Set a configuration value. Useful for overriding basic
-   configuration parameters in the configuration. For example, to
-   change the default log directory::
+   configuration parameters. For example, to change the default log
+   directory::
 
      --set default-log-dir=/var/tmp
+
+   This option cannot be used to add new entries to a list in the
+   configuration file, such as a new output. It can only be used to
+   modify a value in a list that already exists.
+
+   For example, to disable the ``eve-log`` in the default
+   configuration file::
+
+     --set outputs.1.eve-log.enabled=no
+
+   Also note that the index values may change as the ``suricata.yaml``
+   is updated.
+
+   See the output of ``--dump-config`` for existing values that could
+   be modified with their index.
 
 .. option:: --engine-analysis
 

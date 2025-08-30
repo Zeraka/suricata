@@ -38,54 +38,54 @@
 
 #include "util-debug.h"
 
-static int DetectRawbytesSetup (DetectEngineCtx *, Signature *, const char *);
+static int DetectRawbytesSetup(DetectEngineCtx *, Signature *, const char *);
 
-void DetectRawbytesRegister (void)
+void DetectRawbytesRegister(void)
 {
     sigmatch_table[DETECT_RAWBYTES].name = "rawbytes";
+    sigmatch_table[DETECT_RAWBYTES].desc =
+            "dummy keyword to be compatible with snort signatures without effect";
+    sigmatch_table[DETECT_RAWBYTES].url = "/rules/payload-keywords.html#rawbytes";
     sigmatch_table[DETECT_RAWBYTES].Setup = DetectRawbytesSetup;
     sigmatch_table[DETECT_RAWBYTES].flags |= SIGMATCH_NOOPT;
 }
 
-static int DetectRawbytesSetup (DetectEngineCtx *de_ctx, Signature *s, const char *nullstr)
+static int DetectRawbytesSetup(DetectEngineCtx *de_ctx, Signature *s, const char *nullstr)
 {
     SCEnter();
 
     if (nullstr != NULL) {
-        SCLogError(SC_ERR_INVALID_VALUE, "rawbytes has no value");
+        SCLogError("rawbytes has no value");
         SCReturnInt(-1);
     }
 
     if (s->init_data->list != DETECT_SM_LIST_NOTSET) {
-        SCLogError(SC_ERR_RAWBYTES_BUFFER, "\"rawbytes\" cannot be combined "
-                "with the \"%s\" sticky buffer",
-                DetectBufferTypeGetNameById(de_ctx, s->init_data->list));
+        SCLogError("\"rawbytes\" cannot be combined "
+                   "with the \"%s\" sticky buffer",
+                DetectEngineBufferTypeGetNameById(de_ctx, s->init_data->list));
         SCReturnInt(-1);
     }
 
-    SigMatch *pm = DetectGetLastSMByListId(s, DETECT_SM_LIST_PMATCH,
-        DETECT_CONTENT, -1);
+    SigMatch *pm = DetectGetLastSMByListId(s, DETECT_SM_LIST_PMATCH, DETECT_CONTENT, -1);
     if (pm == NULL) {
-        SCLogError(SC_ERR_RAWBYTES_MISSING_CONTENT, "\"rawbytes\" needs a preceding content option");
+        SCLogError("\"rawbytes\" needs a preceding content option");
         SCReturnInt(-1);
     }
 
     switch (pm->type) {
-        case DETECT_CONTENT:
-        {
+        case DETECT_CONTENT: {
             DetectContentData *cd = (DetectContentData *)pm->ctx;
             if (cd->flags & DETECT_CONTENT_RAWBYTES) {
-                SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple rawbytes modifiers for the same content. ");
+                SCLogError("can't use multiple rawbytes modifiers for the same content. ");
                 SCReturnInt(-1);
             }
             cd->flags |= DETECT_CONTENT_RAWBYTES;
             break;
         }
         default:
-            SCLogError(SC_ERR_RAWBYTES_MISSING_CONTENT, "\"rawbytes\" needs a preceding content option");
+            SCLogError("\"rawbytes\" needs a preceding content option");
             SCReturnInt(-1);
     }
 
     SCReturnInt(0);
 }
-

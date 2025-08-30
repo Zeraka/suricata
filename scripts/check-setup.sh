@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/usr/bin/env bash
 
 set -e
 
@@ -7,14 +7,6 @@ tmpdir=$(mktemp -d)
 trap "rm -rf ${tmpdir}" EXIT
 
 (cd .. && tar cf - $(git ls-files)) | (cd ${tmpdir} && tar xf -)
-
-if [ -e ../libhtp ]; then
-    (cd ../libhtp && git archive --format=tar --prefix=libhtp/ HEAD) | \
-	(cd ${tmpdir} && tar xvf -)
-else
-    echo "error: this script required bundled libhtp..."
-    exit 1
-fi
 
 cd ${tmpdir}
 

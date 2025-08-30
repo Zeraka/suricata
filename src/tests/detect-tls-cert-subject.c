@@ -22,6 +22,10 @@
  *
  */
 
+#include "detect-engine-build.h"
+#include "detect-engine-alert.h"
+#include "app-layer-parser.h"
+
 /**
  * \test Test that a signature containing a tls.cert_subject is correctly parsed
  *       and that the keyword is registered.
@@ -30,18 +34,18 @@ static int DetectTlsSubjectTest01(void)
 {
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
-
     de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx, "alert tls any any -> any any "
-                               "(msg:\"Testing tls.cert_subject\"; "
-                               "tls.cert_subject; content:\"test\"; sid:1;)");
-    FAIL_IF_NULL(de_ctx->sig_list);
+
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tls any any -> any any "
+                                                 "(msg:\"Testing tls.cert_subject\"; "
+                                                 "tls.cert_subject; content:\"test\"; sid:1;)");
+    FAIL_IF_NULL(s);
 
     /* sm should not be in the MATCH list */
-    SigMatch *sm = de_ctx->sig_list->sm_lists[DETECT_SM_LIST_MATCH];
+    SigMatch *sm = s->init_data->smlists[DETECT_SM_LIST_MATCH];
     FAIL_IF_NOT_NULL(sm);
 
-    sm = de_ctx->sig_list->sm_lists[g_tls_cert_subject_buffer_id];
+    sm = DetectBufferGetFirstSigMatch(s, g_tls_cert_subject_buffer_id);
     FAIL_IF_NULL(sm);
 
     FAIL_IF(sm->type != DETECT_CONTENT);
@@ -299,7 +303,7 @@ static int DetectTlsSubjectTest02(void)
     p3->flowflags |= FLOW_PKT_ESTABLISHED;
     p3->pcap_cnt = 3;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -356,7 +360,7 @@ static int DetectTlsSubjectTest02(void)
     if (de_ctx != NULL)
         DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     UTHFreePacket(p1);
     UTHFreePacket(p2);

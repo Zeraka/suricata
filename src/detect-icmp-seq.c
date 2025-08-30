@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,12 +24,12 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine-prefilter-common.h"
+#include "detect-engine-build.h"
 
 #include "detect-icmp-seq.h"
 
@@ -76,11 +76,8 @@ static inline bool GetIcmpSeq(Packet *p, uint16_t *seq)
 {
     uint16_t seqn;
 
-    if (PKT_IS_PSEUDOPKT(p))
-        return FALSE;
-
-    if (PKT_IS_ICMPV4(p)) {
-        switch (ICMPV4_GET_TYPE(p)){
+    if (PacketIsICMPv4(p)) {
+        switch (p->icmp_s.type) {
             case ICMP_ECHOREPLY:
             case ICMP_ECHO:
             case ICMP_TIMESTAMP:
@@ -97,11 +94,10 @@ static inline bool GetIcmpSeq(Packet *p, uint16_t *seq)
                 break;
             default:
                 SCLogDebug("Packet has no seq field");
-                return FALSE;
+                return false;
         }
-    } else if (PKT_IS_ICMPV6(p)) {
-
-        switch (ICMPV6_GET_TYPE(p)) {
+    } else if (PacketIsICMPv6(p)) {
+        switch (ICMPV6_GET_TYPE(PacketGetICMPv6(p))) {
             case ICMP6_ECHO_REQUEST:
             case ICMP6_ECHO_REPLY:
                 SCLogDebug("ICMPV6_GET_SEQ(p) %"PRIu16" (network byte order), "
@@ -112,15 +108,15 @@ static inline bool GetIcmpSeq(Packet *p, uint16_t *seq)
                 break;
             default:
                 SCLogDebug("Packet has no seq field");
-                return FALSE;
+                return false;
         }
     } else {
         SCLogDebug("Packet not ICMPV4 nor ICMPV6");
-        return FALSE;
+        return false;
     }
 
     *seq = seqn;
-    return TRUE;
+    return true;
 }
 
 /**
@@ -137,9 +133,10 @@ static inline bool GetIcmpSeq(Packet *p, uint16_t *seq)
 static int DetectIcmpSeqMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     uint16_t seqn;
 
-    if (GetIcmpSeq(p, &seqn) == FALSE)
+    if (!GetIcmpSeq(p, &seqn))
         return 0;
 
     const DetectIcmpSeqData *iseq = (const DetectIcmpSeqData *)ctx;
@@ -162,21 +159,22 @@ static DetectIcmpSeqData *DetectIcmpSeqParse (DetectEngineCtx *de_ctx, const cha
 {
     DetectIcmpSeqData *iseq = NULL;
     char *substr[3] = {NULL, NULL, NULL};
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2_len;
     int i;
     const char *str_ptr;
 
-    ret = DetectParsePcreExec(&parse_regex, icmpseqstr, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, icmpseqstr, 0, 0);
     if (ret < 1 || ret > 4) {
-        SCLogError(SC_ERR_PCRE_MATCH,"Parse error %s", icmpseqstr);
+        SCLogError("Parse error %s", icmpseqstr);
         goto error;
     }
 
     for (i = 1; i < ret; i++) {
-        res = pcre_get_substring((char *)icmpseqstr, ov, MAX_SUBSTRINGS, i, &str_ptr);
+        res = SC_Pcre2SubstringGet(match, i, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING,"pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
         substr[i-1] = (char *)str_ptr;
@@ -190,33 +188,40 @@ static DetectIcmpSeqData *DetectIcmpSeqParse (DetectEngineCtx *de_ctx, const cha
 
     if (substr[0] != NULL && strlen(substr[0]) != 0) {
         if (substr[2] == NULL) {
-            SCLogError(SC_ERR_MISSING_QUOTE,"Missing quote in input");
+            SCLogError("Missing quote in input");
             goto error;
         }
     } else {
         if (substr[2] != NULL) {
-            SCLogError(SC_ERR_MISSING_QUOTE,"Missing quote in input");
+            SCLogError("Missing quote in input");
             goto error;
         }
     }
 
     uint16_t seq = 0;
     if (StringParseUint16(&seq, 10, 0, substr[1]) < 0) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "specified icmp seq %s is not "
-                                        "valid", substr[1]);
+        SCLogError("specified icmp seq %s is not "
+                   "valid",
+                substr[1]);
         goto error;
     }
     iseq->seq = htons(seq);
 
     for (i = 0; i < 3; i++) {
-        if (substr[i] != NULL) SCFree(substr[i]);
+        if (substr[i] != NULL)
+            pcre2_substring_free((PCRE2_UCHAR8 *)substr[i]);
     }
 
+    pcre2_match_data_free(match);
     return iseq;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     for (i = 0; i < 3; i++) {
-        if (substr[i] != NULL) SCFree(substr[i]);
+        if (substr[i] != NULL)
+            pcre2_substring_free((PCRE2_UCHAR8 *)substr[i]);
     }
     if (iseq != NULL) DetectIcmpSeqFree(de_ctx, iseq);
     return NULL;
@@ -236,24 +241,21 @@ error:
 static int DetectIcmpSeqSetup (DetectEngineCtx *de_ctx, Signature *s, const char *icmpseqstr)
 {
     DetectIcmpSeqData *iseq = NULL;
-    SigMatch *sm = NULL;
 
     iseq = DetectIcmpSeqParse(de_ctx, icmpseqstr);
     if (iseq == NULL) goto error;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL) goto error;
-
-    sm->type = DETECT_ICMP_SEQ;
-    sm->ctx = (SigMatchCtx *)iseq;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ICMP_SEQ, (SigMatchCtx *)iseq, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
+    s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
 
 error:
-    if (iseq != NULL) DetectIcmpSeqFree(de_ctx, iseq);
-    if (sm != NULL) SCFree(sm);
+    if (iseq != NULL)
+        DetectIcmpSeqFree(de_ctx, iseq);
     return -1;
 
 }
@@ -274,11 +276,12 @@ void DetectIcmpSeqFree (DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketIcmpSeqMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    const PrefilterPacketHeaderCtx *ctx = pectx;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
+    const PrefilterPacketHeaderCtx *ctx = pectx;
     uint16_t seqn;
 
-    if (GetIcmpSeq(p, &seqn) == FALSE)
+    if (!GetIcmpSeq(p, &seqn))
         return;
 
     if (seqn == ctx->v1.u16[0])
@@ -300,16 +303,14 @@ PrefilterPacketIcmpSeqCompare(PrefilterPacketHeaderValue v, void *smctx)
 {
     const DetectIcmpSeqData *a = smctx;
     if (v.u16[0] == a->seq)
-        return TRUE;
-    return FALSE;
+        return true;
+    return false;
 }
 
 static int PrefilterSetupIcmpSeq(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ICMP_SEQ,
-        PrefilterPacketIcmpSeqSet,
-        PrefilterPacketIcmpSeqCompare,
-        PrefilterPacketIcmpSeqMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ICMP_SEQ, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketIcmpSeqSet, PrefilterPacketIcmpSeqCompare, PrefilterPacketIcmpSeqMatch);
 }
 
 static bool PrefilterIcmpSeqIsPrefilterable(const Signature *s)
@@ -318,15 +319,16 @@ static bool PrefilterIcmpSeqIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_ICMP_SEQ:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 #ifdef UNITTESTS
 #include "detect-engine.h"
 #include "detect-engine-mpm.h"
+#include "detect-engine-alert.h"
 
 /**
  * \test DetectIcmpSeqParseTest01 is a test for setting a valid icmp_seq value
@@ -335,11 +337,10 @@ static int DetectIcmpSeqParseTest01 (void)
 {
     DetectIcmpSeqData *iseq = NULL;
     iseq = DetectIcmpSeqParse(NULL, "300");
-    if (iseq != NULL && htons(iseq->seq) == 300) {
-        DetectIcmpSeqFree(NULL, iseq);
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NULL(iseq);
+    FAIL_IF_NOT(htons(iseq->seq) == 300);
+    DetectIcmpSeqFree(NULL, iseq);
+    PASS;
 }
 
 /**
@@ -350,11 +351,10 @@ static int DetectIcmpSeqParseTest02 (void)
 {
     DetectIcmpSeqData *iseq = NULL;
     iseq = DetectIcmpSeqParse(NULL, "  300  ");
-    if (iseq != NULL && htons(iseq->seq) == 300) {
-        DetectIcmpSeqFree(NULL, iseq);
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NULL(iseq);
+    FAIL_IF_NOT(htons(iseq->seq) == 300);
+    DetectIcmpSeqFree(NULL, iseq);
+    PASS;
 }
 
 /**
@@ -362,74 +362,9 @@ static int DetectIcmpSeqParseTest02 (void)
  */
 static int DetectIcmpSeqParseTest03 (void)
 {
-    DetectIcmpSeqData *iseq = NULL;
-    iseq = DetectIcmpSeqParse(NULL, "badc");
-    if (iseq != NULL) {
-        DetectIcmpSeqFree(NULL, iseq);
-        return 0;
-    }
-    return 1;
-}
-
-/**
- * \test DetectIcmpSeqMatchTest01 is a test for checking the working of
- *       icmp_seq keyword by creating 2 rules and matching a crafted packet
- *       against them. Only the first one shall trigger.
- */
-static int DetectIcmpSeqMatchTest01 (void)
-{
-    int result = 0;
-    Packet *p = NULL;
-    Signature *s = NULL;
-    ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx = NULL;
-
-    memset(&th_v, 0, sizeof(th_v));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_ICMP);
-    p->icmpv4vars.seq = htons(2216);
-
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx, "alert icmp any any -> any any (icmp_seq:2216; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    s = s->next = SigInit(de_ctx, "alert icmp any any -> any any (icmp_seq:5000; sid:2;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, 1) == 0) {
-        printf("sid 1 did not alert, but should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 2)) {
-        printf("sid 2 alerted, but should not have: ");
-        goto cleanup;
-    }
-
-    result = 1;
-
-cleanup:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    UTHFreePackets(&p, 1);
-end:
-    return result;
+    DetectIcmpSeqData *iseq = DetectIcmpSeqParse(NULL, "badc");
+    FAIL_IF_NOT_NULL(iseq);
+    PASS;
 }
 
 static void DetectIcmpSeqRegisterTests (void)
@@ -437,6 +372,5 @@ static void DetectIcmpSeqRegisterTests (void)
     UtRegisterTest("DetectIcmpSeqParseTest01", DetectIcmpSeqParseTest01);
     UtRegisterTest("DetectIcmpSeqParseTest02", DetectIcmpSeqParseTest02);
     UtRegisterTest("DetectIcmpSeqParseTest03", DetectIcmpSeqParseTest03);
-    UtRegisterTest("DetectIcmpSeqMatchTest01", DetectIcmpSeqMatchTest01);
 }
 #endif /* UNITTESTS */

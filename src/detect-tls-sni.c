@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,12 +25,12 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-content.h"
 #include "detect-pcre.h"
@@ -40,7 +40,6 @@
 #include "flow-var.h"
 
 #include "util-debug.h"
-#include "util-unittest.h"
 #include "util-spm.h"
 #include "util-print.h"
 
@@ -55,9 +54,6 @@
 #include "util-unittest-helper.h"
 
 static int DetectTlsSniSetup(DetectEngineCtx *, Signature *, const char *);
-#ifdef UNITTESTS
-static void DetectTlsSniRegisterTests(void);
-#endif
 static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
        const DetectEngineTransforms *transforms,
        Flow *f, const uint8_t flow_flags,
@@ -69,22 +65,20 @@ static int g_tls_sni_buffer_id = 0;
  */
 void DetectTlsSniRegister(void)
 {
-    sigmatch_table[DETECT_AL_TLS_SNI].name = "tls.sni";
-    sigmatch_table[DETECT_AL_TLS_SNI].alias = "tls_sni";
-    sigmatch_table[DETECT_AL_TLS_SNI].desc = "content modifier to match specifically and only on the TLS SNI buffer";
-    sigmatch_table[DETECT_AL_TLS_SNI].url = "/rules/tls-keywords.html#tls-sni";
-    sigmatch_table[DETECT_AL_TLS_SNI].Setup = DetectTlsSniSetup;
-#ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_SNI].RegisterTests = DetectTlsSniRegisterTests;
-#endif
-    sigmatch_table[DETECT_AL_TLS_SNI].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_TLS_SNI].flags |= SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_TLS_SNI].name = "tls.sni";
+    sigmatch_table[DETECT_TLS_SNI].alias = "tls_sni";
+    sigmatch_table[DETECT_TLS_SNI].desc =
+            "sticky buffer to match specifically and only on the TLS SNI buffer";
+    sigmatch_table[DETECT_TLS_SNI].url = "/rules/tls-keywords.html#tls-sni";
+    sigmatch_table[DETECT_TLS_SNI].Setup = DetectTlsSniSetup;
+    sigmatch_table[DETECT_TLS_SNI].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_SNI].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("tls.sni", ALPROTO_TLS, SIG_FLAG_TOSERVER, 0,
-            DetectEngineInspectBufferGeneric, GetData);
+    DetectAppLayerInspectEngineRegister("tls.sni", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+            TLS_STATE_CLIENT_HELLO_DONE, DetectEngineInspectBufferGeneric, GetData);
 
-    DetectAppLayerMpmRegister2("tls.sni", SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS, 0);
+    DetectAppLayerMpmRegister("tls.sni", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister, GetData,
+            ALPROTO_TLS, TLS_STATE_CLIENT_HELLO_DONE);
 
     DetectBufferTypeSetDescriptionByName("tls.sni",
             "TLS Server Name Indication (SNI) extension");
@@ -105,10 +99,10 @@ void DetectTlsSniRegister(void)
  */
 static int DetectTlsSniSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(s, g_tls_sni_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_tls_sni_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
         return -1;
 
     return 0;
@@ -126,16 +120,12 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
             return NULL;
         }
 
-        const uint32_t data_len = strlen(ssl_state->client_connp.sni);
+        const uint32_t data_len = (uint32_t)strlen(ssl_state->client_connp.sni);
         const uint8_t *data = (uint8_t *)ssl_state->client_connp.sni;
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;
 }
-
-#ifdef UNITTESTS
-#include "tests/detect-tls-sni.c"
-#endif

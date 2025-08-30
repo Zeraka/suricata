@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -20,13 +20,10 @@
  *
  * \author Giuseppe Longo <giuseppelng@gmail.com>
  */
-#ifndef __RUNMODE_NFLOG_H__
-#define __RUNMODE_NFLOG_H__
+#ifndef SURICATA_RUNMODE_NFLOG_H
+#define SURICATA_RUNMODE_NFLOG_H
 
-int RunModeIdsNflogAutoFp(void);
-int RunModeIdsNflogSingle(void);
-int RunModeIdsNflogWorkers(void);
 void RunModeIdsNflogRegister(void);
 const char *RunModeIdsNflogGetDefaultMode(void);
 
-#endif /* __RUNMODE_NFLOG_H__ */
+#endif /* SURICATA_RUNMODE_NFLOG_H */

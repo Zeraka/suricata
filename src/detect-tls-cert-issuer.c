@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,12 +25,12 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -41,7 +41,6 @@
 #include "flow-var.h"
 
 #include "util-debug.h"
-#include "util-unittest.h"
 #include "util-spm.h"
 #include "util-print.h"
 
@@ -69,24 +68,29 @@ static int g_tls_cert_issuer_buffer_id = 0;
  */
 void DetectTlsIssuerRegister(void)
 {
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].name = "tls.cert_issuer";
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].alias = "tls_cert_issuer";
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].desc = "content modifier to match specifically and only on the TLS cert issuer buffer";
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].url = "/rules/tls-keywords.html#tls-cert-issuer";
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].Setup = DetectTlsIssuerSetup;
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].name = "tls.cert_issuer";
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].alias = "tls_cert_issuer";
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].desc =
+            "sticky buffer to match specifically and only on the TLS cert issuer buffer";
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].url = "/rules/tls-keywords.html#tls-cert-issuer";
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].Setup = DetectTlsIssuerSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].RegisterTests = DetectTlsIssuerRegisterTests;
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].RegisterTests = DetectTlsIssuerRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_TLS_CERT_ISSUER].flags |= SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_CERT_ISSUER].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("tls.cert_issuer", ALPROTO_TLS,
-            SIG_FLAG_TOCLIENT, TLS_STATE_CERT_READY,
-            DetectEngineInspectBufferGeneric, GetData);
+    DetectAppLayerInspectEngineRegister("tls.cert_issuer", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+            TLS_STATE_CLIENT_CERT_DONE, DetectEngineInspectBufferGeneric, GetData);
 
-    DetectAppLayerMpmRegister2("tls.cert_issuer", SIG_FLAG_TOCLIENT, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS,
-            TLS_STATE_CERT_READY);
+    DetectAppLayerMpmRegister("tls.cert_issuer", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_TLS, TLS_STATE_CLIENT_CERT_DONE);
+
+    DetectAppLayerInspectEngineRegister("tls.cert_issuer", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
+            TLS_STATE_SERVER_CERT_DONE, DetectEngineInspectBufferGeneric, GetData);
+
+    DetectAppLayerMpmRegister("tls.cert_issuer", SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetData, ALPROTO_TLS, TLS_STATE_SERVER_CERT_DONE);
 
     DetectBufferTypeSetDescriptionByName("tls.cert_issuer",
             "TLS certificate issuer");
@@ -107,10 +111,10 @@ void DetectTlsIssuerRegister(void)
  */
 static int DetectTlsIssuerSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(s, g_tls_cert_issuer_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_tls_cert_issuer_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
         return -1;
 
     return 0;
@@ -123,16 +127,22 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
         const SSLState *ssl_state = (SSLState *)f->alstate;
+        const SSLStateConnp *connp;
+        if (flow_flags & STREAM_TOSERVER) {
+            connp = &ssl_state->client_connp;
+        } else {
+            connp = &ssl_state->server_connp;
+        }
 
-        if (ssl_state->server_connp.cert0_issuerdn == NULL) {
+        if (connp->cert0_issuerdn == NULL) {
             return NULL;
         }
 
-        const uint32_t data_len = strlen(ssl_state->server_connp.cert0_issuerdn);
-        const uint8_t *data = (uint8_t *)ssl_state->server_connp.cert0_issuerdn;
+        const uint32_t data_len = (uint32_t)strlen(connp->cert0_issuerdn);
+        const uint8_t *data = (uint8_t *)connp->cert0_issuerdn;
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;

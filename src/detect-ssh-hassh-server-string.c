@@ -23,13 +23,13 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
 #include "detect-parse.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -70,15 +70,14 @@ static InspectionBuffer *GetSshData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *hassh = NULL;
         uint32_t b_len = 0;
 
-        if (rs_ssh_tx_get_hassh_string(txv, &hassh, &b_len, flow_flags) != 1)
+        if (SCSshTxGetHasshString(txv, &hassh, &b_len, flow_flags) != 1)
             return NULL;
         if (hassh == NULL || b_len == 0) {
             SCLogDebug("SSH hassh string is not set");
             return NULL;
         }
 
-        InspectionBufferSetup(buffer, hassh, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, hassh, b_len, transforms);
     }
 
     return buffer;
@@ -97,19 +96,19 @@ static InspectionBuffer *GetSshData(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectSshHasshServerStringSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(s, g_ssh_hassh_server_string_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_ssh_hassh_server_string_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_SSH) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_SSH) < 0)
         return -1;
      
     /* try to enable Hassh */
-    rs_ssh_enable_hassh();
+    SCSshEnableHassh();
 
     /* Check if Hassh is disabled */
-    if (!RunmodeIsUnittests() && !rs_ssh_hassh_is_enabled()) {
-        if (!SigMatchSilentErrorEnabled(de_ctx, DETECT_AL_SSH_HASSH_SERVER_STRING)) {
-            SCLogError(SC_WARN_HASSH_DISABLED, "hassh support is not enabled");
+    if (!RunmodeIsUnittests() && !SCSshHasshIsEnabled()) {
+        if (!SigMatchSilentErrorEnabled(de_ctx, DETECT_SSH_HASSH_SERVER_STRING)) {
+            SCLogError("hassh support is not enabled");
         }
         return -2;
     }
@@ -123,20 +122,18 @@ static int DetectSshHasshServerStringSetup(DetectEngineCtx *de_ctx, Signature *s
  */
 void DetectSshHasshServerStringRegister(void) 
 {
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].alias = KEYWORD_ALIAS;
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].desc = BUFFER_NAME " sticky buffer";
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].url = "/rules/" KEYWORD_DOC;
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].Setup = DetectSshHasshServerStringSetup;
-    sigmatch_table[DETECT_AL_SSH_HASSH_SERVER_STRING].flags |= SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].alias = KEYWORD_ALIAS;
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].desc = BUFFER_NAME " sticky buffer";
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].url = "/rules/" KEYWORD_DOC;
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].Setup = DetectSshHasshServerStringSetup;
+    sigmatch_table[DETECT_SSH_HASSH_SERVER_STRING].flags |=
+            SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_NOOPT;
 
-
-    DetectAppLayerMpmRegister2(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2, 
-            PrefilterGenericMpmRegister, GetSshData,
-            ALPROTO_SSH, SshStateBannerDone);
-    DetectAppLayerInspectEngineRegister2(BUFFER_NAME, ALPROTO_SSH, 
-            SIG_FLAG_TOCLIENT, SshStateBannerDone, 
-            DetectEngineInspectBufferGeneric, GetSshData);
+    DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetSshData, ALPROTO_SSH, SshStateBannerDone);
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_SSH, SIG_FLAG_TOCLIENT,
+            SshStateBannerDone, DetectEngineInspectBufferGeneric, GetSshData);
 
     DetectBufferTypeSetDescriptionByName(BUFFER_NAME, BUFFER_DESC);
 

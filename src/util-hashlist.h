@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __HASHLIST_H__
-#define __HASHLIST_H__
+#ifndef SURICATA_HASHLIST_H
+#define SURICATA_HASHLIST_H
 
 /* hash bucket structure */
 typedef struct HashListTableBucket_ {
@@ -44,12 +44,9 @@ typedef struct HashListTable_ {
     void (*Free)(void *);
 } HashListTable;
 
-#define HASHLIST_NO_SIZE 0
-
 /* prototypes */
 HashListTable* HashListTableInit(uint32_t, uint32_t (*Hash)(struct HashListTable_ *, void *, uint16_t), char (*Compare)(void *, uint16_t, void *, uint16_t), void (*Free)(void *));
 void HashListTableFree(HashListTable *);
-void HashListTablePrint(HashListTable *);
 int HashListTableAdd(HashListTable *, void *, uint16_t);
 int HashListTableRemove(HashListTable *, void *, uint16_t);
 void *HashListTableLookup(HashListTable *, void *, uint16_t);
@@ -61,5 +58,4 @@ char HashListTableDefaultCompare(void *, uint16_t, void *, uint16_t);
 
 void HashListTableRegisterTests(void);
 
-#endif /* __HASHLIST_H__ */
-
+#endif /* SURICATA_HASHLIST_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -32,6 +32,7 @@
 #include "util-time.h"
 #include "util-hashlist.h"
 #include "detect-engine-tag.h"
+#include "detect-engine-build.h"
 #include "detect-tag.h"
 #include "host.h"
 #include "host-storage.h"
@@ -45,20 +46,20 @@
 SC_ATOMIC_DECLARE(unsigned int, num_tags);  /**< Atomic counter, to know if we
                                                  have tagged hosts/sessions,
                                                  to avoid locking */
-static int host_tag_id = -1;                /**< Host storage id for tags */
-static int flow_tag_id = -1;                /**< Flow storage id for tags */
+static HostStorageId host_tag_id = { .id = -1 }; /**< Host storage id for tags */
+static FlowStorageId flow_tag_id = { .id = -1 }; /**< Flow storage id for tags */
 
 void TagInitCtx(void)
 {
     SC_ATOMIC_INIT(num_tags);
 
     host_tag_id = HostStorageRegister("tag", sizeof(void *), NULL, DetectTagDataListFree);
-    if (host_tag_id == -1) {
-        FatalError(SC_ERR_FATAL, "Can't initiate host storage for tag");
+    if (host_tag_id.id == -1) {
+        FatalError("Can't initiate host storage for tag");
     }
     flow_tag_id = FlowStorageRegister("tag", sizeof(void *), NULL, DetectTagDataListFree);
-    if (flow_tag_id == -1) {
-        FatalError(SC_ERR_FATAL, "Can't initiate flow storage for tag");
+    if (flow_tag_id.id == -1) {
+        FatalError("Can't initiate flow storage for tag");
     }
 }
 
@@ -75,14 +76,6 @@ void TagDestroyCtx(void)
 #endif
 }
 
-/** \brief Reset the tagging engine context
- */
-void TagRestartCtx()
-{
-    TagDestroyCtx();
-    TagInitCtx();
-}
-
 int TagHostHasTag(Host *host)
 {
     return HostGetStorageById(host, host_tag_id) ? 1 : 0;
@@ -90,11 +83,10 @@ int TagHostHasTag(Host *host)
 
 static DetectTagDataEntry *DetectTagDataCopy(DetectTagDataEntry *dtd)
 {
-    DetectTagDataEntry *tde = SCMalloc(sizeof(DetectTagDataEntry));
+    DetectTagDataEntry *tde = SCCalloc(1, sizeof(DetectTagDataEntry));
     if (unlikely(tde == NULL)) {
         return NULL;
     }
-    memset(tde, 0, sizeof(DetectTagDataEntry));
 
     tde->sid = dtd->sid;
     tde->gid = dtd->gid;
@@ -117,7 +109,7 @@ static DetectTagDataEntry *DetectTagDataCopy(DetectTagDataEntry *dtd)
  * \param p pointer to the current packet
  * \param tde pointer to the new DetectTagDataEntry
  *
- * \retval 0 if the tde was added succesfuly
+ * \retval 0 if the tde was added successfully
  * \retval 1 if an entry of this sid/gid already exist and was updated
  */
 int TagFlowAdd(Packet *p, DetectTagDataEntry *tde)
@@ -158,7 +150,8 @@ int TagFlowAdd(Packet *p, DetectTagDataEntry *tde)
         if (new_tde != NULL) {
             new_tde->next = FlowGetStorageById(p->flow, flow_tag_id);
             FlowSetStorageById(p->flow, flow_tag_id, new_tde);
-            SCLogDebug("adding tag with first_ts %u", new_tde->first_ts);
+            SCLogDebug(
+                    "adding tag with first_ts %" PRIu64, (uint64_t)SCTIME_SECS(new_tde->first_ts));
             (void) SC_ATOMIC_ADD(num_tags, 1);
         }
     } else if (tag_cnt == DETECT_TAG_MAX_TAGS) {
@@ -262,7 +255,7 @@ static void TagHandlePacketFlow(Flow *f, Packet *p)
 
     while (iter != NULL) {
         /* update counters */
-        iter->last_ts = p->ts.tv_sec;
+        iter->last_ts = p->ts;
         switch (iter->metric) {
             case DETECT_TAG_METRIC_PACKET:
                 iter->packets++;
@@ -276,6 +269,7 @@ static void TagHandlePacketFlow(Flow *f, Packet *p)
          * to log it (the alert will log it) */
         if (!(iter->flags & TAG_ENTRY_FLAG_SKIPPED_FIRST)) {
             iter->flags |= TAG_ENTRY_FLAG_SKIPPED_FIRST;
+            p->flags |= PKT_FIRST_TAG;
         } else {
             /* Update metrics; remove if tag expired; and set alerts */
             switch (iter->metric) {
@@ -336,10 +330,14 @@ static void TagHandlePacketFlow(Flow *f, Packet *p)
                 case DETECT_TAG_METRIC_SECONDS:
                     /* last_ts handles this metric, but also a generic time based
                      * expiration to prevent dead sessions/hosts */
-                    if (iter->last_ts - iter->first_ts > iter->count) {
-                        SCLogDebug("flow tag expired: %u - %u = %u > %u",
-                            iter->last_ts, iter->first_ts,
-                            (iter->last_ts - iter->first_ts), iter->count);
+                    if (SCTIME_SECS(iter->last_ts) - SCTIME_SECS(iter->first_ts) > iter->count) {
+                        // cast needed as gcc and clang behave differently
+                        SCLogDebug("flow tag expired: %" PRIu64 " - %" PRIu64 " = %" PRIu64 " > %u",
+                                (uint64_t)SCTIME_SECS(iter->last_ts),
+                                (uint64_t)SCTIME_SECS(iter->first_ts),
+                                (uint64_t)(SCTIME_SECS(iter->last_ts) -
+                                           SCTIME_SECS(iter->first_ts)),
+                                iter->count);
                         /* tag expired */
                         if (prev != NULL) {
                             tde = iter;
@@ -383,7 +381,7 @@ static void TagHandlePacketHost(Host *host, Packet *p)
     prev = NULL;
     while (iter != NULL) {
         /* update counters */
-        iter->last_ts = p->ts.tv_sec;
+        iter->last_ts = p->ts;
         switch (iter->metric) {
             case DETECT_TAG_METRIC_PACKET:
                 iter->packets++;
@@ -455,10 +453,13 @@ static void TagHandlePacketHost(Host *host, Packet *p)
                 case DETECT_TAG_METRIC_SECONDS:
                     /* last_ts handles this metric, but also a generic time based
                      * expiration to prevent dead sessions/hosts */
-                    if (iter->last_ts - iter->first_ts > iter->count) {
-                        SCLogDebug("host tag expired: %u - %u = %u > %u",
-                            iter->last_ts, iter->first_ts,
-                            (iter->last_ts - iter->first_ts), iter->count);
+                    if (SCTIME_SECS(iter->last_ts) - SCTIME_SECS(iter->first_ts) > iter->count) {
+                        SCLogDebug("host tag expired: %" PRIu64 " - %" PRIu64 " = %" PRIu64 " > %u",
+                                (uint64_t)SCTIME_SECS(iter->last_ts),
+                                (uint64_t)SCTIME_SECS(iter->first_ts),
+                                (uint64_t)(SCTIME_SECS(iter->last_ts) -
+                                           SCTIME_SECS(iter->first_ts)),
+                                iter->count);
                         /* tag expired */
                         if (prev != NULL) {
                             tde = iter;
@@ -491,6 +492,26 @@ static void TagHandlePacketHost(Host *host, Packet *p)
     }
 }
 
+static Host *GetLockedSrcHost(Packet *p)
+{
+    if (p->host_src == NULL) {
+        p->host_src = HostLookupHostFromHash(&p->src);
+    } else {
+        HostLock(p->host_src);
+    }
+    return p->host_src;
+}
+
+static Host *GetLockedDstHost(Packet *p)
+{
+    if (p->host_dst == NULL) {
+        p->host_dst = HostLookupHostFromHash(&p->dst);
+    } else {
+        HostLock(p->host_dst);
+    }
+    return p->host_dst;
+}
+
 /**
  * \brief Search tags for src and dst. Update entries of the tag, remove if necessary
  *
@@ -499,8 +520,7 @@ static void TagHandlePacketHost(Host *host, Packet *p)
  * \param p packet
  *
  */
-void TagHandlePacket(DetectEngineCtx *de_ctx,
-                     DetectEngineThreadCtx *det_ctx, Packet *p)
+void TagHandlePacket(const DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx, Packet *p)
 {
     SCEnter();
 
@@ -514,25 +534,27 @@ void TagHandlePacket(DetectEngineCtx *de_ctx,
         TagHandlePacketFlow(p->flow, p);
     }
 
-    Host *src = HostLookupHostFromHash(&p->src);
-    if (src) {
+    Host *src = GetLockedSrcHost(p);
+    if (src != NULL) {
         if (TagHostHasTag(src)) {
-            TagHandlePacketHost(src,p);
+            TagHandlePacketHost(src, p);
         }
-        HostRelease(src);
+        HostUnlock(src);
     }
-    Host *dst = HostLookupHostFromHash(&p->dst);
-    if (dst) {
+
+    Host *dst = GetLockedDstHost(p);
+    if (dst != NULL) {
         if (TagHostHasTag(dst)) {
-            TagHandlePacketHost(dst,p);
+            TagHandlePacketHost(dst, p);
         }
-        HostRelease(dst);
+        HostUnlock(dst);
     }
+
     SCReturn;
 }
 
 /**
- * \brief Removes the entries exceding the max timeout value
+ * \brief Removes the entries exceeding the max timeout value
  *
  * \param tag_ctx Tag context
  * \param ts the current time
@@ -540,7 +562,7 @@ void TagHandlePacket(DetectEngineCtx *de_ctx,
  * \retval 1 no tags or tags removed -- host is free to go (from tag perspective)
  * \retval 0 still active tags
  */
-int TagTimeoutCheck(Host *host, struct timeval *tv)
+int TagTimeoutCheck(Host *host, SCTime_t ts)
 {
     DetectTagDataEntry *tde = NULL;
     DetectTagDataEntry *tmp = NULL;
@@ -553,7 +575,8 @@ int TagTimeoutCheck(Host *host, struct timeval *tv)
 
     prev = NULL;
     while (tmp != NULL) {
-        if ((tv->tv_sec - tmp->last_ts) <= TAG_MAX_LAST_TIME_SEEN) {
+        SCTime_t timeout_at = SCTIME_ADD_SECS(tmp->last_ts, TAG_MAX_LAST_TIME_SEEN);
+        if (SCTIME_CMP_GTE(timeout_at, ts)) {
             prev = tmp;
             tmp = tmp->next;
             retval = 0;
@@ -590,7 +613,6 @@ int TagTimeoutCheck(Host *host, struct timeval *tv)
  */
 static int DetectTagTestPacket01 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -644,42 +666,36 @@ static int DetectTagTestPacket01 (void)
     HostInitConfig(1);
 
     SCLogDebug("running tests");
-    result = UTHGenericTest(p, 7, sigs, sid, (uint32_t *) results, 5);
+    FAIL_IF_NOT(UTHGenericTest(p, 7, sigs, sid, (uint32_t *)results, 5));
     SCLogDebug("running tests done");
 
     Host *src = HostLookupHostFromHash(&p[1]->src);
-    if (src) {
-        void *tag = HostGetStorageById(src, host_tag_id);
-        if (tag != NULL) {
-            printf("tag should have been expired: ");
-            result = 0;
-        }
+    FAIL_IF_NULL(src);
+    FAIL_IF_NOT_NULL(HostGetStorageById(src, host_tag_id));
 
-        HostRelease(src);
-    }
     Host *dst = HostLookupHostFromHash(&p[1]->dst);
-    if (dst) {
-        void *tag = HostGetStorageById(dst, host_tag_id);
-        BUG_ON(tag == NULL);
+    FAIL_IF_NULL(dst);
 
-        DetectTagDataEntry *iter = tag;
+    void *tag = HostGetStorageById(dst, host_tag_id);
+    FAIL_IF_NULL(tag);
 
-        /* check internal state */
-        if (!(iter->gid == 1 && iter->sid == 2 && iter->packets == 4 && iter->count == 4)) {
-            printf("gid %u sid %u packets %u count %u: ", iter->gid, iter->sid, iter->packets, iter->count);
-            result = 0;
-        }
+    DetectTagDataEntry *iter = tag;
 
-        HostRelease(dst);
-    }
-    BUG_ON(src == NULL || dst == NULL);
+    /* check internal state */
+    FAIL_IF_NOT(iter->gid == 1);
+    FAIL_IF_NOT(iter->sid == 2);
+    FAIL_IF_NOT(iter->packets == 4);
+    FAIL_IF_NOT(iter->count == 4);
+
+    HostRelease(src);
+    HostRelease(dst);
 
     UTHFreePackets(p, 7);
 
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -687,7 +703,6 @@ static int DetectTagTestPacket01 (void)
  */
 static int DetectTagTestPacket02 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -705,9 +720,7 @@ static int DetectTagTestPacket02 (void)
     HostInitConfig(1);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -744,8 +757,7 @@ static int DetectTagTestPacket02 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
 
     //de_ctx->flags |= DE_QUIET;
 
@@ -766,41 +778,26 @@ static int DetectTagTestPacket02 (void)
     int i = 0;
     for (; i < num_packets; i++) {
         SCLogDebug("packet %d", i);
-        TimeGet(&p[i]->ts);
+        p[i]->ts = TimeGet();
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         TimeSetIncrementTime(2);
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
 
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 2 || i == 3 || i == 5 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
+        bool expect = (i == 1 || i == 4);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
-end:
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -808,7 +805,6 @@ end:
  */
 static int DetectTagTestPacket03 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -826,9 +822,8 @@ static int DetectTagTestPacket03 (void)
     HostInitConfig(1);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
+
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -865,8 +860,7 @@ static int DetectTagTestPacket03 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
 
     int32_t results[7][5] = {
                               {1, 1, 0, 0, 0},
@@ -886,38 +880,23 @@ static int DetectTagTestPacket03 (void)
     for (; i < num_packets; i++) {
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
 
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
 
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 3 || i == 5 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
+        bool expect = (i == 1 || i == 2 || i == 4);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
-end:
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -925,7 +904,6 @@ end:
  */
 static int DetectTagTestPacket04 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -944,14 +922,12 @@ static int DetectTagTestPacket04 (void)
     FlowInitConfig(1);
 
     f = FlowAlloc();
-    BUG_ON(f == NULL);
+    FAIL_IF_NULL(f);
     FLOW_INITIALIZE(f);
     f->protoctx = (void *)&ssn;
     f->flags |= FLOW_IPV4;
-    if (inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1)
-        goto end;
-    if (inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1)
-        goto end;
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1);
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1);
 
     DecodeThreadVars dtv;
     ThreadVars th_v;
@@ -960,9 +936,7 @@ static int DetectTagTestPacket04 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -999,8 +973,7 @@ static int DetectTagTestPacket04 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
 
     int32_t results[7][5] = {
                               {1, 0, 0, 0, 0},
@@ -1022,44 +995,29 @@ static int DetectTagTestPacket04 (void)
         p[i]->flow->protoctx = &ssn;
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
 
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 4 || i == 5 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
+        bool expect = (i == 1 || i == 2 || i == 3);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
     /* clean up flow */
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
     FlowFree(f);
-end:
+
     FlowShutdown();
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -1067,7 +1025,6 @@ end:
  */
 static int DetectTagTestPacket05 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -1086,14 +1043,12 @@ static int DetectTagTestPacket05 (void)
     FlowInitConfig(1);
 
     f = FlowAlloc();
-    BUG_ON(f == NULL);
+    FAIL_IF_NULL(f);
     FLOW_INITIALIZE(f);
     f->protoctx = (void *)&ssn;
     f->flags |= FLOW_IPV4;
-    if (inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1)
-        goto end;
-    if (inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1)
-        goto end;
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1);
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1);
 
     DecodeThreadVars dtv;
     ThreadVars th_v;
@@ -1102,9 +1057,7 @@ static int DetectTagTestPacket05 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -1141,8 +1094,7 @@ static int DetectTagTestPacket05 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
 
     int32_t results[7][5] = {
                               {1, 0, 0, 0, 0},
@@ -1164,49 +1116,34 @@ static int DetectTagTestPacket05 (void)
         p[i]->flow->protoctx = &ssn;
 
         SCLogDebug("packet %d", i);
-        TimeGet(&p[i]->ts);
+        p[i]->ts = TimeGet();
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
 
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         TimeSetIncrementTime(2);
 
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 5 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
+        bool expect = (i == 1 || i == 2 || i == 3 || i == 4);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
     /* clean up flow */
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
     FlowFree(f);
-end:
+
     FlowShutdown();
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -1214,7 +1151,6 @@ end:
  */
 static int DetectTagTestPacket06 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -1233,14 +1169,12 @@ static int DetectTagTestPacket06 (void)
     FlowInitConfig(1);
 
     f = FlowAlloc();
-    BUG_ON(f == NULL);
+    FAIL_IF_NULL(f);
     FLOW_INITIALIZE(f);
     f->protoctx = (void *)&ssn;
     f->flags |= FLOW_IPV4;
-    if (inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1)
-        goto end;
-    if (inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1)
-        goto end;
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1);
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1);
 
     DecodeThreadVars dtv;
     ThreadVars th_v;
@@ -1249,9 +1183,7 @@ static int DetectTagTestPacket06 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -1288,8 +1220,7 @@ static int DetectTagTestPacket06 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
 
     int32_t results[7][5] = {
                               {1, 0, 0, 0, 0},
@@ -1311,45 +1242,30 @@ static int DetectTagTestPacket06 (void)
         p[i]->flow->protoctx = &ssn;
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
 
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
 
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 3 || i == 4 || i == 5 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
+        bool expect = (i == 1 || i == 2);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
     /* clean up flow */
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
     FlowFree(f);
-end:
+
     FlowShutdown();
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 /**
@@ -1357,7 +1273,6 @@ end:
  */
 static int DetectTagTestPacket07 (void)
 {
-    int result = 0;
     uint8_t *buf = (uint8_t *)"Hi all!";
     uint8_t *buf2 = (uint8_t *)"lalala!";
     uint16_t buf_len = strlen((char *)buf);
@@ -1376,14 +1291,12 @@ static int DetectTagTestPacket07 (void)
     FlowInitConfig(1);
 
     f = FlowAlloc();
-    BUG_ON(f == NULL);
+    FAIL_IF_NULL(f);
     FLOW_INITIALIZE(f);
     f->protoctx = (void *)&ssn;
     f->flags |= FLOW_IPV4;
-    if (inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1)
-        goto end;
-    if (inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1)
-        goto end;
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.5", f->src.addr_data32) != 1);
+    FAIL_IF(inet_pton(AF_INET, "192.168.1.1", f->dst.addr_data32) != 1);
 
     DecodeThreadVars dtv;
     ThreadVars th_v;
@@ -1392,9 +1305,7 @@ static int DetectTagTestPacket07 (void)
     memset(&th_v, 0, sizeof(th_v));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     Packet *p[7];
@@ -1431,9 +1342,7 @@ static int DetectTagTestPacket07 (void)
     uint32_t sid[5] = {1,2,3,4,5};
     int numsigs = 5;
 
-    if (UTHAppendSigs(de_ctx, sigs, numsigs) == 0)
-        goto cleanup;
-
+    FAIL_IF(UTHAppendSigs(de_ctx, sigs, numsigs) == 0);
     int32_t results[7][5] = {
                               {1, 0, 0, 0, 0},
                               {0, 0, 0, 0, 0},
@@ -1454,46 +1363,30 @@ static int DetectTagTestPacket07 (void)
         p[i]->flow->protoctx = &ssn;
         SigMatchSignatures(&th_v, de_ctx, det_ctx, p[i]);
 
-        if (UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0)
-            goto cleanup;
+        FAIL_IF(UTHCheckPacketMatchResults(p[i], sid, (uint32_t *)&results[i][0], numsigs) == 0);
 
         SCLogDebug("packet %d flag %s", i, p[i]->flags & PKT_HAS_TAG ? "true" : "false");
-#if 1
+
         /* see if the PKT_HAS_TAG is set on the packet if needed */
-        int expect;
-        if (i == 0 || i == 6)
-            expect = FALSE;
-        else
-            expect = TRUE;
-        if (((p[i]->flags & PKT_HAS_TAG) ? TRUE : FALSE) != expect)
-            goto cleanup;
-#endif
+        bool expect = (i == 1 || i == 2 || i == 3 || i == 4 || i == 5);
+        FAIL_IF(((p[i]->flags & PKT_HAS_TAG) ? true : false) != expect);
     }
 
-    result = 1;
-
-cleanup:
     UTHFreePackets(p, 7);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
     /* clean up flow */
     uint8_t proto_map = FlowGetProtoMapping(f->proto);
     FlowClearMemory(f, proto_map);
     FLOW_DESTROY(f);
     FlowFree(f);
-end:
+
     FlowShutdown();
     HostShutdown();
     TagDestroyCtx();
     StorageCleanup();
-    return result;
+    PASS;
 }
 
 #endif /* UNITTESTS */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2014-2018 Open Information Security Foundation
+/* Copyright (C) 2014-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,10 +22,8 @@
 * \author Victor Julien <victor@inliniac.net>
 */
 
-#ifndef __SOURCE_NETMAP_H__
-#define __SOURCE_NETMAP_H__
-
-#include "queue.h"
+#ifndef SURICATA_SOURCE_NETMAP_H
+#define SURICATA_SOURCE_NETMAP_H
 
 /* copy modes */
 enum {
@@ -80,4 +78,4 @@ int NetmapGetRSSCount(const char *ifname);
 void TmModuleReceiveNetmapRegister (void);
 void TmModuleDecodeNetmapRegister (void);
 
-#endif /* __SOURCE_NETMAP_H__ */
+#endif /* SURICATA_SOURCE_NETMAP_H */

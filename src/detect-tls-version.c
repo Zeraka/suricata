@@ -25,7 +25,6 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
@@ -73,14 +72,15 @@ static int g_tls_generic_list_id = 0;
  */
 void DetectTlsVersionRegister (void)
 {
-    sigmatch_table[DETECT_AL_TLS_VERSION].name = "tls.version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].desc = "match on TLS/SSL version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].url = "/rules/tls-keywords.html#tls-version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].AppLayerTxMatch = DetectTlsVersionMatch;
-    sigmatch_table[DETECT_AL_TLS_VERSION].Setup = DetectTlsVersionSetup;
-    sigmatch_table[DETECT_AL_TLS_VERSION].Free  = DetectTlsVersionFree;
+    sigmatch_table[DETECT_TLS_VERSION].name = "tls.version";
+    sigmatch_table[DETECT_TLS_VERSION].desc = "match on TLS/SSL version";
+    sigmatch_table[DETECT_TLS_VERSION].url = "/rules/tls-keywords.html#tls-version";
+    sigmatch_table[DETECT_TLS_VERSION].AppLayerTxMatch = DetectTlsVersionMatch;
+    sigmatch_table[DETECT_TLS_VERSION].Setup = DetectTlsVersionSetup;
+    sigmatch_table[DETECT_TLS_VERSION].Free = DetectTlsVersionFree;
+    sigmatch_table[DETECT_TLS_VERSION].flags = SIGMATCH_SUPPORT_FIREWALL;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_VERSION].RegisterTests = DetectTlsVersionRegisterTests;
+    sigmatch_table[DETECT_TLS_VERSION].RegisterTests = DetectTlsVersionRegisterTests;
 #endif
 
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
@@ -151,21 +151,23 @@ static DetectTlsVersionData *DetectTlsVersionParse (DetectEngineCtx *de_ctx, con
 {
     uint16_t temp;
     DetectTlsVersionData *tls = NULL;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2len;
 
-    ret = DetectParsePcreExec(&parse_regex, str, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, str, 0, 0);
     if (ret < 1 || ret > 3) {
-        SCLogError(SC_ERR_PCRE_MATCH, "invalid tls.version option");
+        SCLogError("invalid tls.version option");
         goto error;
     }
 
     if (ret > 1) {
         char ver_ptr[64];
         char *tmp_str;
-        res = pcre_copy_substring((char *)str, ov, MAX_SUBSTRINGS, 1, ver_ptr, sizeof(ver_ptr));
+        pcre2len = sizeof(ver_ptr);
+        res = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)ver_ptr, &pcre2len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
+            SCLogError("pcre2_substring_copy_bynumber failed");
             goto error;
         }
 
@@ -195,7 +197,7 @@ static DetectTlsVersionData *DetectTlsVersionParse (DetectEngineCtx *de_ctx, con
             temp = (uint16_t)strtol(tmp_str, NULL, 0);
             tls->flags |= DETECT_TLS_VERSION_FLAG_RAW;
         } else {
-            SCLogError(SC_ERR_INVALID_VALUE, "Invalid value");
+            SCLogError("Invalid value");
             goto error;
         }
 
@@ -204,9 +206,13 @@ static DetectTlsVersionData *DetectTlsVersionParse (DetectEngineCtx *de_ctx, con
         SCLogDebug("will look for tls %"PRIu16"", tls->ver);
     }
 
+    pcre2_match_data_free(match);
     return tls;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     if (tls != NULL)
         DetectTlsVersionFree(de_ctx, tls);
     return NULL;
@@ -227,33 +233,31 @@ error:
 static int DetectTlsVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     DetectTlsVersionData *tls = NULL;
-    SigMatch *sm = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     tls = DetectTlsVersionParse(de_ctx, str);
     if (tls == NULL)
         goto error;
 
+    /* keyword supports multiple hooks, so attach to the hook specified in the rule. */
+    int list = g_tls_generic_list_id;
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    if (s->init_data->hook.type == SIGNATURE_HOOK_TYPE_APP) {
+        list = s->init_data->hook.sm_list;
+    }
+
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_VERSION, (SigMatchCtx *)tls, list) == NULL) {
         goto error;
-
-    sm->type = DETECT_AL_TLS_VERSION;
-    sm->ctx = (void *)tls;
-
-    SigMatchAppendSMToList(s, sm, g_tls_generic_list_id);
+    }
 
     return 0;
 
 error:
     if (tls != NULL)
         DetectTlsVersionFree(de_ctx, tls);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 
 }

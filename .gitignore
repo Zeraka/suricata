@@ -1,5 +1,7 @@
 *.o
 *.lo
+*.a
+*.la
 *.in
 *.[ch]e
 *.log
@@ -30,19 +32,6 @@ doc/userguide/suricata.1
 etc/suricata.logrotate
 etc/suricata.service
 install-sh
-libhtp/TAGS
-libhtp/aclocal.m4
-libhtp/autom4te.cache/
-libhtp/config.h
-libhtp/config.log
-libhtp/config.status
-libhtp/configure
-libhtp/htp.pc
-libhtp/htp/TAGS
-libhtp/htp/libhtp.la
-libhtp/libtool
-libhtp/stamp-h1
-libhtp/test/TAGS
 libtool
 ltmain.sh
 missing
@@ -64,3 +53,15 @@ test.sh
 .vscode/*
 /suricata-update/*
 !/suricata-update/Makefile.am
+/libsuricata-config
+!/libsuricata-config.in
+!/.readthedocs.yaml
+
+# Man pages.
+doc/userguide/*.1
+
+# Generated compile commands for LSP.
+/compile_commands.json
+
+# Don't ignore *.rules in rules/
+!/rules/*.rules

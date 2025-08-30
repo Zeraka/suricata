@@ -24,14 +24,15 @@
 #include "suricata-common.h"
 #include "tm-threads.h"
 
-#ifndef __SOURCE_PCAP_FILE_HELPER_H__
-#define __SOURCE_PCAP_FILE_HELPER_H__
+#ifndef SURICATA_SOURCE_PCAP_FILE_HELPER_H
+#define SURICATA_SOURCE_PCAP_FILE_HELPER_H
 
 typedef struct PcapFileGlobalVars_ {
     uint64_t cnt; /** packet counter */
     ChecksumValidationMode conf_checksum_mode;
     ChecksumValidationMode checksum_mode;
     SC_ATOMIC_DECLARE(unsigned int, invalid_checksums);
+    uint32_t read_buffer_size;
 } PcapFileGlobalVars;
 
 /**
@@ -80,6 +81,12 @@ typedef struct PcapFileFileVars_
     const u_char *first_pkt_data;
     struct pcap_pkthdr *first_pkt_hdr;
     struct timeval first_pkt_ts;
+
+    /** flex array member for the libc io read buffer. Size controlled by
+     * PcapFileGlobalVars::read_buffer_size. */
+#if defined(HAVE_SETVBUF) && defined(OS_LINUX)
+    char buffer[];
+#endif
 } PcapFileFileVars;
 
 /**
@@ -112,4 +119,6 @@ void CleanupPcapFileFileVars(PcapFileFileVars *pfv);
  */
 TmEcode ValidateLinkType(int datalink, DecoderFunc *decoder);
 
-#endif /* __SOURCE_PCAP_FILE_HELPER_H__ */
+const char *PcapFileGetFilename(void);
+
+#endif /* SURICATA_SOURCE_PCAP_FILE_HELPER_H */

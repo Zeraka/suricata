@@ -25,9 +25,12 @@ rfb.secresult
 
 Match on the value of the RFB security result, e.g. ``ok``, ``fail``, ``toomany`` or ``unknown``.
 
+rfb.secresult uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>`.
+
 Examples::
 
   rfb.secresult: ok;
+  rfb.secresult: !0;
   rfb.secresult: unknown;
 
 
@@ -35,6 +38,8 @@ rfb.sectype
 -----------
 
 Match on the value of the RFB security type field, e.g. ``2`` for VNC challenge-response authentication, ``0`` for no authentication, and ``30`` for Apple's custom Remote Desktop authentication.
+
+rfb.sectype uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>`.
 
 This keyword takes a numeric argument after a colon and supports additional qualifiers, such as:
 

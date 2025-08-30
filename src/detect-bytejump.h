@@ -21,8 +21,8 @@
  * \author Brian Rectanus <brectanu@gmail.com>
  */
 
-#ifndef __DETECT_BYTEJUMP_H__
-#define __DETECT_BYTEJUMP_H__
+#ifndef SURICATA_DETECT_BYTEJUMP_H
+#define SURICATA_DETECT_BYTEJUMP_H
 
 /** Bytejump Base */
 #define DETECT_BYTEJUMP_BASE_UNSET  0 /**< Unset type value string (automatic)*/
@@ -40,14 +40,16 @@
 #define DETECT_BYTEJUMP_DCE       BIT_U16(6) /**< "dce" enabled */
 #define DETECT_BYTEJUMP_OFFSET_BE BIT_U16(7) /**< "byte extract" enabled */
 #define DETECT_BYTEJUMP_END       BIT_U16(8) /**< "from_end" jump */
+#define DETECT_BYTEJUMP_NBYTES_VAR BIT_U16(9) /**< nbytes string*/
+#define DETECT_BYTEJUMP_OFFSET_VAR BIT_U16(10) /**< byte extract value enabled */
 
 typedef struct DetectBytejumpData_ {
     uint8_t nbytes;                   /**< Number of bytes to compare */
     uint8_t base;                     /**< String value base (oct|dec|hex) */
     uint16_t flags;                   /**< Flags (big|little|relative|string) */
-    uint32_t multiplier;              /**< Multiplier for nbytes (multiplier n)*/
     int32_t offset;                   /**< Offset in payload to extract value */
     int32_t post_offset;              /**< Offset to adjust post-jump */
+    uint16_t multiplier;              /**< Multiplier for nbytes (multiplier n)*/
 } DetectBytejumpData;
 
 /* prototypes */
@@ -67,17 +69,10 @@ void DetectBytejumpRegister (void);
  * \param p pointer to the current packet
  * \param m pointer to the sigmatch that we will cast into DetectBytejumpData
  *
- * \retval -1 error
- * \retval  0 no match
- * \retval  1 match
- *
- * \todo The return seems backwards.  We should return a non-zero error code.
- *       One of the error codes is "no match".  As-is if someone accidentally
- *       does: if (DetectBytejumpMatch(...)) { match }, then they catch an
- *       error as a match.
+ * \retval  false no match
+ * \retval  true
  */
-int DetectBytejumpDoMatch(DetectEngineThreadCtx *, const Signature *, const SigMatchCtx *,
-                          const uint8_t *, uint32_t, uint16_t, int32_t);
+bool DetectBytejumpDoMatch(DetectEngineThreadCtx *, const Signature *, const SigMatchCtx *,
+        const uint8_t *, uint32_t, uint16_t, int32_t, int32_t);
 
-#endif /* __DETECT_BYTEJUMP_H__ */
-
+#endif /* SURICATA_DETECT_BYTEJUMP_H */

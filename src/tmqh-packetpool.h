@@ -21,19 +21,22 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __TMQH_PACKETPOOL_H__
-#define __TMQH_PACKETPOOL_H__
+#ifndef SURICATA_TMQH_PACKETPOOL_H
+#define SURICATA_TMQH_PACKETPOOL_H
 
 #include "decode.h"
 #include "threads.h"
-#include "util-atomic.h"
 
     /* Return stack, onto which other threads free packets. */
 typedef struct PktPoolLockedStack_{
     /* linked list of free packets. */
     SCMutex mutex;
     SCCondT cond;
-    SC_ATOMIC_DECLARE(int, sync_now);
+    /** number of packets in needed to trigger a sync during
+     *  the return to pool logic. Updated by pool owner based
+     *  on how full the pool is. */
+    SC_ATOMIC_DECLARE(uint32_t, return_threshold);
+    uint32_t cnt;
     Packet *head;
 } __attribute__((aligned(CLS))) PktPoolLockedStack;
 
@@ -42,8 +45,10 @@ typedef struct PktPool_ {
      * No mutex is needed.
      */
     Packet *head;
+    uint32_t cnt;
+
     /* Packets waiting (pending) to be returned to the given Packet
-     * Pool. Accumulate packets for the same pool until a theshold is
+     * Pool. Accumulate packets for the same pool until a threshold is
      * reached, then return them all at once.  Keep the head and tail
      * to fast insertion of the entire list onto a return stack.
      */
@@ -73,11 +78,9 @@ void TmqhReleasePacketsToPacketPool(PacketQueue *);
 void TmqhPacketpoolRegister(void);
 Packet *PacketPoolGetPacket(void);
 void PacketPoolWait(void);
-void PacketPoolWaitForN(int n);
 void PacketPoolReturnPacket(Packet *p);
 void PacketPoolInit(void);
-void PacketPoolInitEmpty(void);
 void PacketPoolDestroy(void);
 void PacketPoolPostRunmodes(void);
 
-#endif /* __TMQH_PACKETPOOL_H__ */
+#endif /* SURICATA_TMQH_PACKETPOOL_H */

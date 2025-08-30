@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,11 +21,10 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DECODE_ICMPV6_H__
-#define __DECODE_ICMPV6_H__
+#ifndef SURICATA_DECODE_ICMPV6_H
+#define SURICATA_DECODE_ICMPV6_H
 
 #include "decode-tcp.h"
-#include "decode-sctp.h"
 #include "decode-udp.h"
 #include "decode-ipv6.h"
 
@@ -99,40 +98,25 @@
 
 
 /** macro for icmpv6 "type" access */
-#define ICMPV6_GET_TYPE(p)      (p)->icmpv6h->type
+#define ICMPV6_GET_TYPE(icmp6h) (icmp6h)->type
 /** macro for icmpv6 "code" access */
-#define ICMPV6_GET_CODE(p)      (p)->icmpv6h->code
-/** macro for icmpv6 "csum" access */
-#define ICMPV6_GET_RAW_CSUM(p)      SCNtohs((p)->icmpv6h->csum)
-#define ICMPV6_GET_CSUM(p)      (p)->icmpv6h->csum
+#define ICMPV6_GET_CODE(icmp6h) (icmp6h)->code
 
 /** If message is informational */
 /** macro for icmpv6 "id" access */
-#define ICMPV6_GET_ID(p)        (p)->icmpv6vars.id
+#define ICMPV6_GET_ID(p) (p)->l4.vars.icmpv6.id
 /** macro for icmpv6 "seq" access */
-#define ICMPV6_GET_SEQ(p)       (p)->icmpv6vars.seq
+#define ICMPV6_GET_SEQ(p) (p)->l4.vars.icmpv6.seq
 
 /** If message is Error */
-/** macro for icmpv6 "unused" access */
-#define ICMPV6_GET_UNUSED(p)       (p)->icmpv6h->icmpv6b.icmpv6e.unused
-/** macro for icmpv6 "error_ptr" access */
-#define ICMPV6_GET_ERROR_PTR(p)    (p)->icmpv6h->icmpv6b.icmpv6e.error_ptr
 /** macro for icmpv6 "mtu" accessibility */
 // ICMPv6 has MTU only for type too big
-#define ICMPV6_HAS_MTU(p)          ((p)->icmpv6h->type == ICMP6_PACKET_TOO_BIG)
+#define ICMPV6_HAS_MTU(icmp6h) ((icmp6h)->type == ICMP6_PACKET_TOO_BIG)
 /** macro for icmpv6 "mtu" access */
-#define ICMPV6_GET_MTU(p)          SCNtohl((p)->icmpv6h->icmpv6b.icmpv6e.mtu)
+#define ICMPV6_GET_MTU(icmp6h) SCNtohl((icmp6h)->icmpv6b.icmpv6e.mtu)
 
 /** macro for icmpv6 embedded "protocol" access */
-#define ICMPV6_GET_EMB_PROTO(p)    (p)->icmpv6vars.emb_ip6_proto_next
-/** macro for icmpv6 embedded "ipv6h" header access */
-#define ICMPV6_GET_EMB_IPV6(p)     (p)->icmpv6vars.emb_ipv6h
-/** macro for icmpv6 embedded "tcph" header access */
-#define ICMPV6_GET_EMB_TCP(p)      (p)->icmpv6vars.emb_tcph
-/** macro for icmpv6 embedded "udph" header access */
-#define ICMPV6_GET_EMB_UDP(p)      (p)->icmpv6vars.emb_udph
-/** macro for icmpv6 embedded "icmpv6h" header access */
-#define ICMPV6_GET_EMB_icmpv6h(p)  (p)->icmpv6vars.emb_icmpv6h
+#define ICMPV6_GET_EMB_PROTO(p) (p)->l4.vars.icmpv6.emb_ip6_proto_next
 
 typedef struct ICMPV6Info_
 {
@@ -163,39 +147,24 @@ typedef struct ICMPV6Vars_ {
     /* checksum of the icmpv6 packet */
     uint16_t  id;
     uint16_t  seq;
-    uint32_t  mtu;
-    uint32_t  error_ptr;
+    uint32_t mtu;
 
-    /** Pointers to the embedded packet headers */
-    IPV6Hdr *emb_ipv6h;
-    TCPHdr *emb_tcph;
-    UDPHdr *emb_udph;
-    ICMPV6Hdr *emb_icmpv6h;
-
-    /** IPv6 src and dst address */
-    uint32_t emb_ip6_src[4];
-    uint32_t emb_ip6_dst[4];
     uint8_t emb_ip6_proto_next;
 
+    bool emb_ports_set;
     /** TCP/UDP ports */
     uint16_t emb_sport;
     uint16_t emb_dport;
 
+    /** offset of the embedded packet header */
+    uint16_t emb_ip6h_offset;
 } ICMPV6Vars;
-
-
-#define CLEAR_ICMPV6_PACKET(p) do { \
-    (p)->level4_comp_csum = -1;     \
-    PACKET_CLEAR_L4VARS((p));       \
-    (p)->icmpv6h = NULL;            \
-} while(0)
 
 void DecodeICMPV6RegisterTests(void);
 
 int ICMPv6GetCounterpart(uint8_t type);
 
 /** -------- Inline functions --------- */
-static inline uint16_t ICMPV6CalculateChecksum(uint16_t *, uint16_t *, uint16_t);
 
 /**
  * \brief Calculates the checksum for the ICMPV6 packet
@@ -207,8 +176,8 @@ static inline uint16_t ICMPV6CalculateChecksum(uint16_t *, uint16_t *, uint16_t)
  *
  * \retval csum Checksum for the ICMPV6 packet
  */
-static inline uint16_t ICMPV6CalculateChecksum(uint16_t *shdr, uint16_t *pkt,
-                                        uint16_t tlen)
+static inline uint16_t ICMPV6CalculateChecksum(
+        const uint16_t *shdr, const uint16_t *pkt, uint16_t tlen)
 {
     uint16_t pad = 0;
     uint32_t csum = shdr[0];
@@ -269,6 +238,4 @@ static inline uint16_t ICMPV6CalculateChecksum(uint16_t *shdr, uint16_t *pkt,
     return (uint16_t) ~csum;
 }
 
-
-#endif /* __DECODE_ICMPV6_H__ */
-
+#endif /* SURICATA_DECODE_ICMPV6_H */

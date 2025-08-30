@@ -29,8 +29,11 @@
 #include "app-layer-htp.h"
 #include "app-layer-htp-xff.h"
 
-#include "util-misc.h"
+#ifndef HAVE_MEMRCHR
 #include "util-memrchr.h"
+#endif
+
+#include "util-misc.h"
 #include "util-unittest.h"
 
 /** XFF header value minimal length */
@@ -130,26 +133,23 @@ int HttpXFFGetIPFromTx(const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg,
     if (tx_id >= total_txs)
         return 0;
 
-    tx = AppLayerParserGetTx(f->proto, ALPROTO_HTTP, htp_state, tx_id);
+    tx = AppLayerParserGetTx(f->proto, ALPROTO_HTTP1, htp_state, tx_id);
     if (tx == NULL) {
         SCLogDebug("tx is NULL, XFF cannot be retrieved");
         return 0;
     }
 
-    htp_header_t *h_xff = NULL;
-    if (tx->request_headers != NULL) {
-        h_xff = htp_table_get_c(tx->request_headers, xff_cfg->header);
-    }
+    const htp_header_t *h_xff = htp_tx_request_header(tx, xff_cfg->header);
 
-    if (h_xff != NULL && bstr_len(h_xff->value) >= XFF_CHAIN_MINLEN &&
-            bstr_len(h_xff->value) < XFF_CHAIN_MAXLEN) {
+    if (h_xff != NULL && htp_header_value_len(h_xff) >= XFF_CHAIN_MINLEN &&
+            htp_header_value_len(h_xff) < XFF_CHAIN_MAXLEN) {
 
-        memcpy(xff_chain, bstr_ptr(h_xff->value), bstr_len(h_xff->value));
-        xff_chain[bstr_len(h_xff->value)]=0;
+        memcpy(xff_chain, htp_header_value_ptr(h_xff), htp_header_value_len(h_xff));
+        xff_chain[htp_header_value_len(h_xff)] = 0;
 
         if (xff_cfg->flags & XFF_REVERSE) {
             /** Get the last IP address from the chain */
-            p_xff = memrchr(xff_chain, ' ', bstr_len(h_xff->value));
+            p_xff = memrchr(xff_chain, ' ', htp_header_value_len(h_xff));
             if (p_xff == NULL) {
                 p_xff = xff_chain;
             } else {
@@ -158,7 +158,7 @@ int HttpXFFGetIPFromTx(const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg,
         }
         else {
             /** Get the first IP address from the chain */
-            p_xff = memchr(xff_chain, ',', bstr_len(h_xff->value));
+            p_xff = memchr(xff_chain, ',', htp_header_value_len(h_xff));
             if (p_xff != NULL) {
                 *p_xff = 0;
             }
@@ -199,57 +199,56 @@ end:
 /**
  * \brief Function to return XFF configuration from a configuration node.
  */
-void HttpXFFGetCfg(ConfNode *conf, HttpXFFCfg *result)
+void HttpXFFGetCfg(SCConfNode *conf, HttpXFFCfg *result)
 {
     BUG_ON(result == NULL);
 
-    ConfNode *xff_node = NULL;
+    SCConfNode *xff_node = NULL;
 
     if (conf != NULL)
-        xff_node = ConfNodeLookupChild(conf, "xff");
+        xff_node = SCConfNodeLookupChild(conf, "xff");
 
-    if (xff_node != NULL && ConfNodeChildValueIsTrue(xff_node, "enabled")) {
-        const char *xff_mode = ConfNodeLookupChildValue(xff_node, "mode");
+    if (xff_node != NULL && SCConfNodeChildValueIsTrue(xff_node, "enabled")) {
+        const char *xff_mode = SCConfNodeLookupChildValue(xff_node, "mode");
 
         if (xff_mode != NULL && strcasecmp(xff_mode, "overwrite") == 0) {
             result->flags |= XFF_OVERWRITE;
         } else {
             if (xff_mode == NULL) {
-                SCLogWarning(SC_WARN_XFF_INVALID_MODE, "The XFF mode hasn't been defined, falling back to extra-data mode");
+                SCLogWarning("The XFF mode hasn't been defined, falling back to extra-data mode");
             }
             else if (strcasecmp(xff_mode, "extra-data") != 0) {
-                SCLogWarning(SC_WARN_XFF_INVALID_MODE, "The XFF mode %s is invalid, falling back to extra-data mode",
-                        xff_mode);
+                SCLogWarning(
+                        "The XFF mode %s is invalid, falling back to extra-data mode", xff_mode);
             }
             result->flags |= XFF_EXTRADATA;
         }
 
-        const char *xff_deployment = ConfNodeLookupChildValue(xff_node, "deployment");
+        const char *xff_deployment = SCConfNodeLookupChildValue(xff_node, "deployment");
 
         if (xff_deployment != NULL && strcasecmp(xff_deployment, "forward") == 0) {
             result->flags |= XFF_FORWARD;
         } else {
             if (xff_deployment == NULL) {
-                SCLogWarning(SC_WARN_XFF_INVALID_DEPLOYMENT, "The XFF deployment hasn't been defined, falling back to reverse proxy deployment");
+                SCLogWarning("The XFF deployment hasn't been defined, falling back to reverse "
+                             "proxy deployment");
             }
             else if (strcasecmp(xff_deployment, "reverse") != 0) {
-                SCLogWarning(SC_WARN_XFF_INVALID_DEPLOYMENT, "The XFF mode %s is invalid, falling back to reverse proxy deployment",
+                SCLogWarning("The XFF mode %s is invalid, falling back to reverse proxy deployment",
                         xff_deployment);
             }
             result->flags |= XFF_REVERSE;
         }
 
-        const char *xff_header = ConfNodeLookupChildValue(xff_node, "header");
+        const char *xff_header = SCConfNodeLookupChildValue(xff_node, "header");
 
         if (xff_header != NULL) {
             result->header = (char *) xff_header;
         } else {
-            SCLogWarning(SC_WARN_XFF_INVALID_HEADER, "The XFF header hasn't been defined, using the default %s",
-                    XFF_DEFAULT);
+            SCLogWarning("The XFF header hasn't been defined, using the default %s", XFF_DEFAULT);
             result->header = XFF_DEFAULT;
         }
-    }
-    else {
+    } else {
         result->flags = XFF_DISABLED;
     }
 }
@@ -260,90 +259,72 @@ static int XFFTest01(void) {
     char input[] = "1.2.3.4:5678";
     char output[16];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "1.2.3.4") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "1.2.3.4") == 0);
+    PASS;
 }
 
 static int XFFTest02(void) {
     char input[] = "[12::34]:1234"; // thanks chort!
     char output[16];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "12::34") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "12::34") == 0);
+    PASS;
 }
 
 static int XFFTest03(void) {
     char input[] = "[2a03:2880:1010:3f02:face:b00c:0:2]:80"; // thanks chort!
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "2a03:2880:1010:3f02:face:b00c:0:2") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "2a03:2880:1010:3f02:face:b00c:0:2") == 0);
+    PASS;
 }
 
 static int XFFTest04(void) {
     char input[] = "[2a03:2880:1010:3f02:face:b00c:0:2]"; // thanks chort!
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "2a03:2880:1010:3f02:face:b00c:0:2") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "2a03:2880:1010:3f02:face:b00c:0:2") == 0);
+    PASS;
 }
 
 static int XFFTest05(void) {
     char input[] = "[::ffff:1.2.3.4]:1234"; // thanks double-p
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "::ffff:1.2.3.4") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "::ffff:1.2.3.4") == 0);
+    PASS;
 }
 
 static int XFFTest06(void) {
     char input[] = "12::34";
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "12::34") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "12::34") == 0);
+    PASS;
 }
 
 static int XFFTest07(void) {
     char input[] = "1.2.3.4";
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 1 && strcmp(output, "1.2.3.4") == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 1 && strcmp(output, "1.2.3.4") == 0);
+    PASS;
 }
 
 static int XFFTest08(void) {
     char input[] = "[1.2.3.4:1234";
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 0);
+    PASS;
 }
 
 static int XFFTest09(void) {
     char input[] = "999.999.999.999:1234";
     char output[46];
     int r = ParseXFFString(input, output, sizeof(output));
-    if (r == 0) {
-        return 1;
-    }
-    return 0;
+    FAIL_IF_NOT(r == 0);
+    PASS;
 }
 
 #endif

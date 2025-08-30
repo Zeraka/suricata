@@ -21,30 +21,33 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_PCRE_H__
-#define __DETECT_PCRE_H__
+#ifndef SURICATA_DETECT_PCRE_H
+#define SURICATA_DETECT_PCRE_H
 
 #include "detect-parse.h"
 
 #define DETECT_PCRE_RELATIVE            0x00001
+/* no-op other than in parsing */
 #define DETECT_PCRE_RAWBYTES            0x00002
 #define DETECT_PCRE_CASELESS            0x00004
 
-#define DETECT_PCRE_MATCH_LIMIT         0x00020
 #define DETECT_PCRE_RELATIVE_NEXT       0x00040
 #define DETECT_PCRE_NEGATE              0x00080
 
 #define DETECT_PCRE_CAPTURE_MAX         8
 
-typedef struct DetectPcreData_ {
-    /* pcre options */
-    DetectParseRegex parse_regex;
-
-#ifdef PCRE_HAVE_JIT_EXEC
-    /* JIT stack thread context id */
-    int thread_ctx_jit_stack_id;
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#define SC_MATCH_LIMIT_DEFAULT           350
+#define SC_MATCH_LIMIT_RECURSION_DEFAULT 150
+#else
+#define SC_MATCH_LIMIT_DEFAULT           3500
+#define SC_MATCH_LIMIT_RECURSION_DEFAULT 1500
 #endif
-    int opts;
+
+typedef struct DetectPcreData_ {
+    DetectParseRegex parse_regex;
+    int thread_ctx_id;
+
     uint16_t flags;
     uint8_t idx;
     uint8_t captypes[DETECT_PCRE_CAPTURE_MAX];
@@ -59,5 +62,4 @@ int DetectPcrePayloadMatch(DetectEngineThreadCtx *,
 
 void DetectPcreRegister (void);
 
-#endif /* __DETECT_PCRE_H__ */
-
+#endif /* SURICATA_DETECT_PCRE_H */

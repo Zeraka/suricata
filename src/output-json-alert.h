@@ -1,4 +1,4 @@
-/* Copyright (C) 2013-2014 Open Information Security Foundation
+/* Copyright (C) 2013-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,12 +24,12 @@
  *
  */
 
-#ifndef __OUTPUT_JSON_ALERT_H__
-#define __OUTPUT_JSON_ALERT_H__
+#ifndef SURICATA_OUTPUT_JSON_ALERT_H
+#define SURICATA_OUTPUT_JSON_ALERT_H
 
 void JsonAlertLogRegister(void);
-void AlertJsonHeader(void *ctx, const Packet *p, const PacketAlert *pa, JsonBuilder *js,
-                     uint16_t flags, JsonAddrInfo *addr);
+void AlertJsonHeader(const Packet *p, const PacketAlert *pa, SCJsonBuilder *js, uint16_t flags,
+        JsonAddrInfo *addr, char *xff_buffer);
+void EveAddVerdict(SCJsonBuilder *jb, const Packet *p);
 
-#endif /* __OUTPUT_JSON_ALERT_H__ */
-
+#endif /* SURICATA_OUTPUT_JSON_ALERT_H */

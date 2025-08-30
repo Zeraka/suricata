@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,13 +21,16 @@
  * \author Tom DeCanio <td@npulsetech.com>
  */
 
-#ifndef __OUTPUT_JSON_FILE_H__
-#define __OUTPUT_JSON_FILE_H__
+#ifndef SURICATA_OUTPUT_JSON_FILE_H
+#define SURICATA_OUTPUT_JSON_FILE_H
 
 #include "app-layer-htp-xff.h"
 
-void JsonFileLogRegister(void);
-JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff,
-        const bool stored, uint8_t dir, HttpXFFCfg *xff_cfg);
+typedef struct OutputJsonCtx_ OutputJsonCtx;
 
-#endif /* __OUTPUT_JSON_FILE_H__ */
+void JsonFileLogRegister(void);
+SCJsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
+        const uint64_t tx_id, const bool stored, uint8_t dir, HttpXFFCfg *xff_cfg,
+        OutputJsonCtx *eve_ctx);
+
+#endif /* SURICATA_OUTPUT_JSON_FILE_H */

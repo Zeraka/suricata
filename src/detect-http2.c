@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2020-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -26,15 +26,20 @@
 
 #include "detect.h"
 #include "detect-parse.h"
+#include "detect-content.h"
+
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-uint.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-content-inspection.h"
+#include "detect-engine-helper.h"
 
 #include "detect-http2.h"
 #include "util-byte.h"
 #include "rust.h"
+#include "util-profiling.h"
 
 #ifdef UNITTESTS
 void DetectHTTP2frameTypeRegisterTests (void);
@@ -83,25 +88,6 @@ static int DetectHTTP2settingsSetup (DetectEngineCtx *, Signature *, const char 
 void DetectHTTP2settingsFree (DetectEngineCtx *, void *);
 
 static int DetectHTTP2headerNameSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg);
-static int PrefilterMpmHttp2HeaderNameRegister(DetectEngineCtx *de_ctx,
-                                               SigGroupHead *sgh, MpmCtx *mpm_ctx,
-                                               const DetectBufferMpmRegistery *mpm_reg, int list_id);
-static int DetectEngineInspectHttp2HeaderName(
-                                              DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-                                              const DetectEngineAppInspectionEngine *engine,
-                                              const Signature *s,
-                                              Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
-
-static int DetectHTTP2headerSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg);
-static int PrefilterMpmHttp2HeaderRegister(DetectEngineCtx *de_ctx,
-                                               SigGroupHead *sgh, MpmCtx *mpm_ctx,
-                                               const DetectBufferMpmRegistery *mpm_reg, int list_id);
-static int DetectEngineInspectHttp2Header(
-                                          DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-                                          const DetectEngineAppInspectionEngine *engine,
-                                          const Signature *s,
-                                          Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
-static bool DetectHttp2HeaderValidateCallback(const Signature *s, const char **sigerror);
 
 #ifdef UNITTESTS
 void DetectHTTP2RegisterTests (void);
@@ -109,15 +95,6 @@ void DetectHTTP2RegisterTests (void);
 
 static int g_http2_match_buffer_id = 0;
 static int g_http2_header_name_buffer_id = 0;
-static int g_http2_header_buffer_id = 0;
-
-static int DetectEngineInspectHTTP2(ThreadVars *tv, DetectEngineCtx *de_ctx,
-                                   DetectEngineThreadCtx *det_ctx, const Signature *s, const SigMatchData *smd,
-                                   Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
-{
-    return DetectEngineInspectGenericList(tv, de_ctx, det_ctx, s, smd,
-                                          f, flags, alstate, txv, tx_id);
-}
 
 /**
  * \brief Registration function for HTTP2 keywords
@@ -197,58 +174,22 @@ void DetectHttp2Register(void)
     sigmatch_table[DETECT_HTTP2_HEADERNAME].Setup = DetectHTTP2headerNameSetup;
     sigmatch_table[DETECT_HTTP2_HEADERNAME].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerMpmRegister2("http2_header_name", SIG_FLAG_TOCLIENT, 2,
-                               PrefilterMpmHttp2HeaderNameRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header_name",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2HeaderName, NULL);
-    DetectAppLayerMpmRegister2("http2_header_name", SIG_FLAG_TOSERVER, 2,
-                               PrefilterMpmHttp2HeaderNameRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header_name",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOSERVER, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2HeaderName, NULL);
+    DetectAppLayerMultiRegister("http2_header_name", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateOpen, SCHttp2TxGetHeaderName, 2);
+    DetectAppLayerMultiRegister("http2_header_name", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+            HTTP2StateOpen, SCHttp2TxGetHeaderName, 2);
 
+    DetectBufferTypeSupportsMultiInstance("http2_header_name");
     DetectBufferTypeSetDescriptionByName("http2_header_name",
                                          "HTTP2 header name");
     g_http2_header_name_buffer_id = DetectBufferTypeGetByName("http2_header_name");
 
-    sigmatch_table[DETECT_HTTP2_HEADER].name = "http2.header";
-    sigmatch_table[DETECT_HTTP2_HEADER].desc = "sticky buffer to match on one HTTP2 header name and value";
-    sigmatch_table[DETECT_HTTP2_HEADER].url = "/rules/http2-keywords.html#header";
-    sigmatch_table[DETECT_HTTP2_HEADER].Setup = DetectHTTP2headerSetup;
-    sigmatch_table[DETECT_HTTP2_HEADER].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
-
-    DetectAppLayerMpmRegister2("http2_header", SIG_FLAG_TOCLIENT, 2,
-                               PrefilterMpmHttp2HeaderRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2Header, NULL);
-    DetectAppLayerMpmRegister2("http2_header", SIG_FLAG_TOSERVER, 2,
-                               PrefilterMpmHttp2HeaderRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOSERVER, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2Header, NULL);
-
-    DetectBufferTypeSetDescriptionByName("http2_header",
-                                         "HTTP2 header name and value");
-    DetectBufferTypeRegisterValidateCallback("http2_header", DetectHttp2HeaderValidateCallback);
-    g_http2_header_buffer_id = DetectBufferTypeGetByName("http2_header");
-
-    DetectAppLayerInspectEngineRegister("http2",
-                                        ALPROTO_HTTP2, SIG_FLAG_TOSERVER, 0,
-                                        DetectEngineInspectHTTP2);
-    DetectAppLayerInspectEngineRegister("http2",
-                                        ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, 0,
-                                        DetectEngineInspectHTTP2);
+    DetectAppLayerInspectEngineRegister(
+            "http2", ALPROTO_HTTP2, SIG_FLAG_TOSERVER, 0, DetectEngineInspectGenericList, NULL);
+    DetectAppLayerInspectEngineRegister(
+            "http2", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, 0, DetectEngineInspectGenericList, NULL);
 
     g_http2_match_buffer_id = DetectBufferTypeRegister("http2");
-    DetectUintRegister();
-
-    return;
 }
 
 /**
@@ -264,20 +205,20 @@ static int DetectHTTP2frametypeMatch(DetectEngineThreadCtx *det_ctx,
 {
     uint8_t *detect = (uint8_t *)ctx;
 
-    return rs_http2_tx_has_frametype(txv, flags, *detect);
+    return SCHttp2TxHasFrametype(txv, flags, *detect);
 }
 
 static int DetectHTTP2FuncParseFrameType(const char *str, uint8_t *ft)
 {
     // first parse numeric value
-    if (ByteExtractStringUint8(ft, 10, strlen(str), str) >= 0) {
+    if (ByteExtractStringUint8(ft, 10, (uint16_t)strlen(str), str) > 0) {
         return 1;
     }
 
     // it it failed so far, parse string value from enumeration
-    int r = rs_http2_parse_frametype(str);
-    if (r >= 0) {
-        *ft = r;
+    int r = SCHttp2ParseFrametype(str);
+    if (r >= 0 && r <= UINT8_MAX) {
+        *ft = (uint8_t)r;
         return 1;
     }
 
@@ -298,12 +239,11 @@ static int DetectHTTP2frametypeSetup (DetectEngineCtx *de_ctx, Signature *s, con
 {
     uint8_t frame_type;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
     if (!DetectHTTP2FuncParseFrameType(str, &frame_type)) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE,
-                   "Invalid argument \"%s\" supplied to http2.frametype keyword.", str);
+        SCLogError("Invalid argument \"%s\" supplied to http2.frametype keyword.", str);
         return -1;
     }
 
@@ -312,16 +252,11 @@ static int DetectHTTP2frametypeSetup (DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     *http2ft = frame_type;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_FRAMETYPE, (SigMatchCtx *)http2ft,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2frametypeFree(NULL, http2ft);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_FRAMETYPE;
-    sm->ctx = (SigMatchCtx *)http2ft;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -349,19 +284,19 @@ static int DetectHTTP2errorcodeMatch(DetectEngineThreadCtx *det_ctx,
 {
     uint32_t *detect = (uint32_t *)ctx;
 
-    return rs_http2_tx_has_errorcode(txv, flags, *detect);
+    return SCHttp2TxHasErrorCode(txv, flags, *detect);
     //TODOask handle negation rules
 }
 
 static int DetectHTTP2FuncParseErrorCode(const char *str, uint32_t *ec)
 {
     // first parse numeric value
-    if (ByteExtractStringUint32(ec, 10, strlen(str), str) >= 0) {
+    if (ByteExtractStringUint32(ec, 10, (uint16_t)strlen(str), str) > 0) {
         return 1;
     }
 
     // it it failed so far, parse string value from enumeration
-    int r = rs_http2_parse_errorcode(str);
+    int r = SCHttp2ParseErrorCode(str);
     if (r >= 0) {
         *ec = r;
         return 1;
@@ -384,12 +319,11 @@ static int DetectHTTP2errorcodeSetup (DetectEngineCtx *de_ctx, Signature *s, con
 {
     uint32_t error_code;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
     if (!DetectHTTP2FuncParseErrorCode(str, &error_code)) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE,
-                   "Invalid argument \"%s\" supplied to http2.errorcode keyword.", str);
+        SCLogError("Invalid argument \"%s\" supplied to http2.errorcode keyword.", str);
         return -1;
     }
 
@@ -398,16 +332,11 @@ static int DetectHTTP2errorcodeSetup (DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     *http2ec = error_code;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_ERRORCODE, (SigMatchCtx *)http2ec,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2errorcodeFree(NULL, http2ec);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_ERRORCODE;
-    sm->ctx = (SigMatchCtx *)http2ec;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -434,14 +363,14 @@ static int DetectHTTP2priorityMatch(DetectEngineThreadCtx *det_ctx,
 
 {
     uint32_t nb = 0;
-    int value = rs_http2_tx_get_next_priority(txv, flags, nb);
+    int value = SCHttp2TxGetNextPriority(txv, flags, nb);
     const DetectU8Data *du8 = (const DetectU8Data *)ctx;
     while (value >= 0) {
-        if (DetectU8Match(value, du8)) {
+        if (DetectU8Match((uint8_t)value, du8)) {
             return 1;
         }
         nb++;
-        value = rs_http2_tx_get_next_priority(txv, flags, nb);
+        value = SCHttp2TxGetNextPriority(txv, flags, nb);
     }
     return 0;
 }
@@ -458,23 +387,18 @@ static int DetectHTTP2priorityMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectHTTP2prioritySetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
     DetectU8Data *prio = DetectU8Parse(str);
     if (prio == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
-        SCFree(prio);
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_PRIORITY, (SigMatchCtx *)prio,
+                g_http2_match_buffer_id) == NULL) {
+        SCDetectU8Free(prio);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_PRIORITY;
-    sm->ctx = (SigMatchCtx *)prio;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -486,7 +410,7 @@ static int DetectHTTP2prioritySetup (DetectEngineCtx *de_ctx, Signature *s, cons
  */
 void DetectHTTP2priorityFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    SCFree(ptr);
+    SCDetectU8Free(ptr);
 }
 
 /**
@@ -501,14 +425,14 @@ static int DetectHTTP2windowMatch(DetectEngineThreadCtx *det_ctx,
 
 {
     uint32_t nb = 0;
-    int value = rs_http2_tx_get_next_window(txv, flags, nb);
+    int value = SCHttp2TxGetNextWindow(txv, flags, nb);
     const DetectU32Data *du32 = (const DetectU32Data *)ctx;
     while (value >= 0) {
         if (DetectU32Match(value, du32)) {
             return 1;
         }
         nb++;
-        value = rs_http2_tx_get_next_window(txv, flags, nb);
+        value = SCHttp2TxGetNextWindow(txv, flags, nb);
     }
     return 0;
 }
@@ -525,23 +449,18 @@ static int DetectHTTP2windowMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectHTTP2windowSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
     DetectU32Data *wu = DetectU32Parse(str);
     if (wu == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
-        SCFree(wu);
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_WINDOW, (SigMatchCtx *)wu,
+                g_http2_match_buffer_id) == NULL) {
+        SCDetectU32Free(wu);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_WINDOW;
-    sm->ctx = (SigMatchCtx *)wu;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -553,7 +472,7 @@ static int DetectHTTP2windowSetup (DetectEngineCtx *de_ctx, Signature *s, const 
  */
 void DetectHTTP2windowFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    SCFree(ptr);
+    SCDetectU32Free(ptr);
 }
 
 /**
@@ -567,7 +486,7 @@ static int DetectHTTP2sizeUpdateMatch(DetectEngineThreadCtx *det_ctx,
                                const SigMatchCtx *ctx)
 
 {
-    return rs_http2_detect_sizeupdatectx_match(ctx, txv, flags);
+    return SCHttp2DetectSizeUpdateCtxMatch(ctx, txv, flags);
 }
 
 /**
@@ -582,23 +501,18 @@ static int DetectHTTP2sizeUpdateMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectHTTP2sizeUpdateSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
-    void *su = rs_detect_u64_parse(str);
+    void *su = SCDetectU64Parse(str);
     if (su == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_SIZEUPDATE, (SigMatchCtx *)su,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2settingsFree(NULL, su);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_SIZEUPDATE;
-    sm->ctx = (SigMatchCtx *)su;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -610,7 +524,7 @@ static int DetectHTTP2sizeUpdateSetup (DetectEngineCtx *de_ctx, Signature *s, co
  */
 void DetectHTTP2sizeUpdateFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u64_free(ptr);
+    SCDetectU64Free(ptr);
 }
 
 /**
@@ -624,7 +538,7 @@ static int DetectHTTP2settingsMatch(DetectEngineThreadCtx *det_ctx,
                                const SigMatchCtx *ctx)
 
 {
-    return rs_http2_detect_settingsctx_match(ctx, txv, flags);
+    return SCHttp2DetectSettingsCtxMatch(ctx, txv, flags);
 }
 
 /**
@@ -639,23 +553,18 @@ static int DetectHTTP2settingsMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectHTTP2settingsSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
-    void *http2set = rs_http2_detect_settingsctx_parse(str);
+    void *http2set = SCHttp2DetectSettingsCtxParse(str);
     if (http2set == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_SETTINGS, (SigMatchCtx *)http2set,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2settingsFree(NULL, http2set);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_SETTINGS;
-    sm->ctx = (SigMatchCtx *)http2set;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -667,316 +576,18 @@ static int DetectHTTP2settingsSetup (DetectEngineCtx *de_ctx, Signature *s, cons
  */
 void DetectHTTP2settingsFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_http2_detect_settingsctx_free(ptr);
+    SCHttp2DetectSettingsCtxFree(ptr);
 }
 
 static int DetectHTTP2headerNameSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(s, g_http2_header_name_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http2_header_name_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
-        return -1;
-
-    return 0;
-}
-
-static void PrefilterMpmHttp2HNameFree(void *ptr)
-{
-    SCFree(ptr);
-}
-
-static InspectionBuffer *GetHttp2HNameData(DetectEngineThreadCtx *det_ctx,
-        const uint8_t flags, const DetectEngineTransforms *transforms,
-        Flow *_f, const struct MpmListIdDataArgs *cbdata,
-        int list_id, bool first)
-{
-    SCEnter();
-
-    InspectionBufferMultipleForList *fb = InspectionBufferGetMulti(det_ctx, list_id);
-    InspectionBuffer *buffer = InspectionBufferMultipleForListGet(fb, cbdata->local_id);
-    if (buffer == NULL)
-        return NULL;
-    if (!first && buffer->inspect != NULL)
-        return buffer;
-
-    uint32_t b_len = 0;
-    const uint8_t *b = NULL;
-
-    if (rs_http2_tx_get_header_name(cbdata->txv, flags, (uint32_t)cbdata->local_id, &b, &b_len) != 1)
-        return NULL;
-    if (b == NULL || b_len == 0)
-        return NULL;
-
-    InspectionBufferSetup(buffer, b, b_len);
-    InspectionBufferApplyTransforms(buffer, transforms);
-
-    SCReturnPtr(buffer, "InspectionBuffer");
-}
-
-static void PrefilterTxHttp2HName(DetectEngineThreadCtx *det_ctx,
-        const void *pectx,
-        Packet *p, Flow *f, void *txv,
-        const uint64_t idx, const uint8_t flags)
-{
-    SCEnter();
-
-    const PrefilterMpmListId *ctx = (const PrefilterMpmListId *)pectx;
-    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
-    const int list_id = ctx->list_id;
-
-    int local_id = 0;
-
-    while(1) {
-        // loop until we get a NULL
-
-        struct MpmListIdDataArgs cbdata = { local_id, txv };
-        InspectionBuffer *buffer = GetHttp2HNameData(det_ctx, flags, ctx->transforms,
-                f, &cbdata, list_id, true);
-        if (buffer == NULL)
-            break;
-
-        if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(mpm_ctx,
-                    &det_ctx->mtcu, &det_ctx->pmq,
-                    buffer->inspect, buffer->inspect_len);
-        }
-
-        local_id++;
-    }
-}
-
-static int PrefilterMpmHttp2HeaderNameRegister(DetectEngineCtx *de_ctx,
-        SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectBufferMpmRegistery *mpm_reg, int list_id)
-{
-    //TODOask use PrefilterMpmListId elsewhere
-    PrefilterMpmListId *pectx = SCCalloc(1, sizeof(*pectx));
-    if (pectx == NULL)
-        return -1;
-    pectx->list_id = list_id;
-    pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->transforms;
-
-    return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxHttp2HName,
-            mpm_reg->app_v2.alproto, mpm_reg->app_v2.tx_min_progress,
-            pectx, PrefilterMpmHttp2HNameFree, mpm_reg->name);
-}
-
-static int DetectEngineInspectHttp2HeaderName(
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const DetectEngineAppInspectionEngine *engine,
-        const Signature *s,
-        Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
-{
-    int local_id = 0;
-
-    const DetectEngineTransforms *transforms = NULL;
-    if (!engine->mpm) {
-        transforms = engine->v2.transforms;
-    }
-
-    while (1) {
-        //TODOask use MpmListIdDataArgs elsewhere
-        struct MpmListIdDataArgs cbdata = { local_id, txv, };
-        InspectionBuffer *buffer = GetHttp2HNameData(det_ctx, flags,
-                transforms, f, &cbdata, engine->sm_list, false);
-
-        if (buffer == NULL || buffer->inspect == NULL)
-            break;
-
-        det_ctx->buffer_offset = 0;
-        det_ctx->discontinue_matching = 0;
-        det_ctx->inspection_recursion_counter = 0;
-
-        const int match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd,
-                                              NULL, f,
-                                              (uint8_t *)buffer->inspect,
-                                              buffer->inspect_len,
-                                              buffer->inspect_offset, DETECT_CI_FLAGS_SINGLE,
-                                              DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match == 1) {
-            return DETECT_ENGINE_INSPECT_SIG_MATCH;
-        }
-        local_id++;
-    }
-
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
-}
-
-static int DetectHTTP2headerSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
-{
-    if (DetectBufferSetActiveList(s, g_http2_header_buffer_id) < 0)
-        return -1;
-
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP2) != 0)
         return -1;
 
     return 0;
-}
-
-static void PrefilterMpmHttp2HeaderFree(void *ptr)
-{
-    SCFree(ptr);
-}
-
-static InspectionBuffer *GetHttp2HeaderData(DetectEngineThreadCtx *det_ctx,
-        const uint8_t flags, const DetectEngineTransforms *transforms,
-        Flow *_f, const struct MpmListIdDataArgs *cbdata,
-        int list_id, bool first)
-{
-    SCEnter();
-
-    InspectionBufferMultipleForList *fb = InspectionBufferGetMulti(det_ctx, list_id);
-    InspectionBuffer *buffer = InspectionBufferMultipleForListGet(fb, cbdata->local_id);
-    if (buffer == NULL)
-        return NULL;
-    if (!first && buffer->inspect != NULL)
-        return buffer;
-
-    uint32_t b_len = 0;
-    const uint8_t *b = NULL;
-
-    if (rs_http2_tx_get_header(cbdata->txv, flags, (uint32_t)cbdata->local_id, &b, &b_len) != 1)
-        return NULL;
-    if (b == NULL || b_len == 0)
-        return NULL;
-
-    InspectionBufferSetup(buffer, b, b_len);
-    InspectionBufferApplyTransforms(buffer, transforms);
-
-    SCReturnPtr(buffer, "InspectionBuffer");
-}
-
-static void PrefilterTxHttp2Header(DetectEngineThreadCtx *det_ctx,
-        const void *pectx,
-        Packet *p, Flow *f, void *txv,
-        const uint64_t idx, const uint8_t flags)
-{
-    SCEnter();
-
-    const PrefilterMpmListId *ctx = (const PrefilterMpmListId *)pectx;
-    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
-    const int list_id = ctx->list_id;
-
-    int local_id = 0;
-
-    while(1) {
-        // loop until we get a NULL
-
-        struct MpmListIdDataArgs cbdata = { local_id, txv };
-        InspectionBuffer *buffer = GetHttp2HeaderData(det_ctx, flags, ctx->transforms,
-                f, &cbdata, list_id, true);
-        if (buffer == NULL)
-            break;
-
-        if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(mpm_ctx,
-                    &det_ctx->mtcu, &det_ctx->pmq,
-                    buffer->inspect, buffer->inspect_len);
-        }
-
-        local_id++;
-    }
-}
-
-static int PrefilterMpmHttp2HeaderRegister(DetectEngineCtx *de_ctx,
-        SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectBufferMpmRegistery *mpm_reg, int list_id)
-{
-    PrefilterMpmListId *pectx = SCCalloc(1, sizeof(*pectx));
-    if (pectx == NULL)
-        return -1;
-    pectx->list_id = list_id;
-    pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->transforms;
-
-    return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxHttp2Header,
-            mpm_reg->app_v2.alproto, mpm_reg->app_v2.tx_min_progress,
-            pectx, PrefilterMpmHttp2HeaderFree, mpm_reg->name);
-}
-
-static int DetectEngineInspectHttp2Header(
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const DetectEngineAppInspectionEngine *engine,
-        const Signature *s,
-        Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
-{
-    int local_id = 0;
-
-    const DetectEngineTransforms *transforms = NULL;
-    if (!engine->mpm) {
-        transforms = engine->v2.transforms;
-    }
-
-    while (1) {
-        struct MpmListIdDataArgs cbdata = { local_id, txv, };
-        InspectionBuffer *buffer = GetHttp2HeaderData(det_ctx, flags,
-                transforms, f, &cbdata, engine->sm_list, false);
-
-        if (buffer == NULL || buffer->inspect == NULL)
-            break;
-
-        det_ctx->buffer_offset = 0;
-        det_ctx->discontinue_matching = 0;
-        det_ctx->inspection_recursion_counter = 0;
-
-        const int match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd,
-                                              NULL, f,
-                                              (uint8_t *)buffer->inspect,
-                                              buffer->inspect_len,
-                                              buffer->inspect_offset, DETECT_CI_FLAGS_SINGLE,
-                                              DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match == 1) {
-            return DETECT_ENGINE_INSPECT_SIG_MATCH;
-        }
-        local_id++;
-    }
-
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
-}
-
-static bool DetectHttp2HeaderValidateCallback(const Signature *s, const char **sigerror)
-{
-    const SigMatch *sm = s->init_data->smlists[g_http2_header_buffer_id];
-    for ( ; sm != NULL; sm = sm->next) {
-        if (sm->type != DETECT_CONTENT)
-            continue;
-        const DetectContentData *cd = (DetectContentData *)sm->ctx;
-        bool escaped = false;
-        bool namevaluesep = false;
-        for (size_t i = 0; i < cd->content_len; ++i) {
-            if (escaped) {
-                if (cd->content[i] == ' ') {
-                    if (namevaluesep) {
-                        *sigerror = "Invalid http2.header string : "
-                        "': ' is a special sequence for separation between name and value "
-                        " and thus can only be present once";
-                        SCLogWarning(SC_WARN_POOR_RULE,  "rule %u: %s", s->id, *sigerror);
-                        return false;
-                    }
-                    namevaluesep = true;
-                } else if (cd->content[i] != ':') {
-                    *sigerror = "Invalid http2.header string : "
-                                "':' is an escaping character for itself, "
-                                "or space for the separation between name and value";
-                    SCLogWarning(SC_WARN_POOR_RULE,  "rule %u: %s", s->id, *sigerror);
-                    return false;
-                }
-                escaped = false;
-            } else if(cd->content[i] == ':') {
-                escaped = true;
-            }
-        }
-        if (escaped) {
-            *sigerror = "Invalid http2.header string : "
-            "':' is an escaping character for itself, "
-            "or space for the separation between name and value";
-            SCLogWarning(SC_WARN_POOR_RULE,  "rule %u: %s", s->id, *sigerror);
-            return false;
-        }
-    }
-    return true;
 }
 
 #ifdef UNITTESTS

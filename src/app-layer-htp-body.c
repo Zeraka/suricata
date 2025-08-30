@@ -26,45 +26,14 @@
  * This file provides a HTTP protocol support for the engine using HTP library.
  */
 
-#include "suricata.h"
 #include "suricata-common.h"
-#include "debug.h"
-#include "decode.h"
-#include "threads.h"
-
-#include "util-print.h"
-#include "util-pool.h"
-#include "util-radix-tree.h"
-
-#include "stream-tcp-private.h"
-#include "stream-tcp-reassemble.h"
-#include "stream-tcp.h"
-#include "stream.h"
-
-#include "app-layer-protos.h"
-#include "app-layer-parser.h"
 #include "app-layer-htp.h"
+#include "app-layer-htp-mem.h"
 #include "app-layer-htp-body.h"
+#include "util-streaming-buffer.h"
+#include "util-print.h"
 
-#include "util-spm.h"
-#include "util-debug.h"
-#include "app-layer-htp-file.h"
-#include "util-time.h"
-
-#include "util-unittest.h"
-#include "util-unittest-helper.h"
-#include "flow-util.h"
-
-#include "detect-engine.h"
-#include "detect-engine-state.h"
-#include "detect-parse.h"
-
-#include "conf.h"
-
-#include "util-memcmp.h"
-
-static StreamingBufferConfig default_cfg = {
-    0, 0, 3072, HTPMalloc, HTPCalloc, HTPRealloc, HTPFree };
+extern StreamingBufferConfig htp_sbcfg;
 
 /**
  * \brief Append a chunk of body to the HtpBody struct
@@ -76,8 +45,7 @@ static StreamingBufferConfig default_cfg = {
  * \retval 0 ok
  * \retval -1 error
  */
-int HtpBodyAppendChunk(const HTPCfgDir *hcfg, HtpBody *body,
-                       const uint8_t *data, uint32_t len)
+int HtpBodyAppendChunk(HtpBody *body, const uint8_t *data, uint32_t len)
 {
     SCEnter();
 
@@ -88,8 +56,7 @@ int HtpBodyAppendChunk(const HTPCfgDir *hcfg, HtpBody *body,
     }
 
     if (body->sb == NULL) {
-        const StreamingBufferConfig *cfg = hcfg ? &hcfg->sbcfg : &default_cfg;
-        body->sb = StreamingBufferInit(cfg);
+        body->sb = StreamingBufferInit(&htp_sbcfg);
         if (body->sb == NULL)
             SCReturnInt(-1);
     }
@@ -100,7 +67,7 @@ int HtpBodyAppendChunk(const HTPCfgDir *hcfg, HtpBody *body,
         SCReturnInt(-1);
     }
 
-    if (StreamingBufferAppend(body->sb, &bd->sbseg, data, len) != 0) {
+    if (StreamingBufferAppend(body->sb, &htp_sbcfg, &bd->sbseg, data, len) != 0) {
         HTPFree(bd, sizeof(HtpBodyChunk));
         SCReturnInt(-1);
     }
@@ -123,28 +90,6 @@ int HtpBodyAppendChunk(const HTPCfgDir *hcfg, HtpBody *body,
  * \param body pointer to the HtpBody holding the list
  * \retval none
  */
-void HtpBodyPrint(HtpBody *body)
-{
-    if (SCLogDebugEnabled()||1) {
-        SCEnter();
-
-        if (body->first == NULL)
-            return;
-
-        HtpBodyChunk *cur = NULL;
-        SCLogDebug("--- Start body chunks at %p ---", body);
-        printf("--- Start body chunks at %p ---\n", body);
-        for (cur = body->first; cur != NULL; cur = cur->next) {
-            const uint8_t *data = NULL;
-            uint32_t data_len = 0;
-            StreamingBufferSegmentGetData(body->sb, &cur->sbseg, &data, &data_len);
-            SCLogDebug("Body %p; data %p, len %"PRIu32, body, data, data_len);
-            printf("Body %p; data %p, len %"PRIu32"\n", body, data, data_len);
-            PrintRawDataFp(stdout, data, data_len);
-        }
-        SCLogDebug("--- End body chunks at %p ---", body);
-    }
-}
 
 /**
  * \brief Free the information held in the request body
@@ -168,7 +113,7 @@ void HtpBodyFree(HtpBody *body)
     }
     body->first = body->last = NULL;
 
-    StreamingBufferFree(body->sb);
+    StreamingBufferFree(body->sb, &htp_sbcfg);
 }
 
 /**
@@ -192,15 +137,10 @@ void HtpBodyPrune(HtpState *state, HtpBody *body, int direction)
         SCReturn;
     }
 
-    /* get the configured inspect sizes. Default to response values */
-    uint32_t min_size = state->cfg->response.inspect_min_size;
-    uint32_t window = state->cfg->response.inspect_window;
-
-    if (direction == STREAM_TOSERVER) {
-        min_size = state->cfg->request.inspect_min_size;
-        window = state->cfg->request.inspect_window;
-    }
-
+    const HTPCfgDir *cfg =
+            (direction == STREAM_TOCLIENT) ? &state->cfg->response : &state->cfg->request;
+    uint32_t min_size = cfg->inspect_min_size;
+    uint32_t window = cfg->inspect_window;
     uint64_t max_window = ((min_size > window) ? min_size : window);
     uint64_t in_flight = body->content_len_so_far - body->body_inspected;
 
@@ -222,7 +162,7 @@ void HtpBodyPrune(HtpState *state, HtpBody *body, int direction)
 
     if (left_edge) {
         SCLogDebug("sliding body to offset %"PRIu64, left_edge);
-        StreamingBufferSlideToOffset(body->sb, left_edge);
+        StreamingBufferSlideToOffset(body->sb, &htp_sbcfg, left_edge);
     }
 
     SCLogDebug("pruning chunks of body %p", body);

@@ -15,10 +15,11 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DATASETS_H__
-#define __DATASETS_H__
+#ifndef SURICATA_DATASETS_H
+#define SURICATA_DATASETS_H
 
 #include "util-thash.h"
+#include "rust.h"
 #include "datasets-reputation.h"
 
 int DatasetsInit(void);
@@ -27,11 +28,19 @@ void DatasetsSave(void);
 void DatasetReload(void);
 void DatasetPostReloadCleanup(void);
 
+typedef enum {
+    DATASET_FORMAT_CSV = 0,
+    DATASET_FORMAT_JSON,   /* File contains one single JSON object */
+    DATASET_FORMAT_NDJSON, /* Newline Delimited JSON */
+} DatasetFormats;
+
 enum DatasetTypes {
 #define DATASET_TYPE_NOTSET 0
     DATASET_TYPE_STRING = 1,
     DATASET_TYPE_MD5,
     DATASET_TYPE_SHA256,
+    DATASET_TYPE_IPV4,
+    DATASET_TYPE_IPV6,
 };
 
 #define DATASET_NAME_MAX_LEN 63
@@ -41,6 +50,7 @@ typedef struct Dataset {
     uint32_t id;
     bool from_yaml;                     /* Mark whether the set was retrieved from YAML */
     bool hidden;                        /* Mark the old sets hidden in case of reload */
+    bool remove_key;                    /* Mark that value key should be removed from extra data */
     THashTableContext *hash;
 
     char load[PATH_MAX];
@@ -50,15 +60,27 @@ typedef struct Dataset {
 } Dataset;
 
 enum DatasetTypes DatasetGetTypeFromString(const char *s);
+int DatasetAppendSet(Dataset *set);
+Dataset *DatasetAlloc(const char *name);
+void DatasetLock(void);
+void DatasetUnlock(void);
+Dataset *DatasetSearchByName(const char *name);
 Dataset *DatasetFind(const char *name, enum DatasetTypes type);
-Dataset *DatasetGet(const char *name, enum DatasetTypes type,
-        const char *save, const char *load);
+Dataset *DatasetGet(const char *name, enum DatasetTypes type, const char *save, const char *load,
+        uint64_t memcap, uint32_t hashsize);
+int DatasetGetOrCreate(const char *name, enum DatasetTypes type, const char *save, const char *load,
+        uint64_t *memcap, uint32_t *hashsize, Dataset **ret_set);
 int DatasetAdd(Dataset *set, const uint8_t *data, const uint32_t data_len);
+int DatasetRemove(Dataset *set, const uint8_t *data, const uint32_t data_len);
 int DatasetLookup(Dataset *set, const uint8_t *data, const uint32_t data_len);
 DataRepResultType DatasetLookupwRep(Dataset *set, const uint8_t *data, const uint32_t data_len,
         const DataRepType *rep);
 
+void DatasetGetDefaultMemcap(uint64_t *memcap, uint32_t *hashsize);
+int DatasetParseIpv6String(Dataset *set, const char *line, struct in6_addr *in6);
+
 int DatasetAddSerialized(Dataset *set, const char *string);
 int DatasetRemoveSerialized(Dataset *set, const char *string);
+int DatasetLookupSerialized(Dataset *set, const char *string);
 
-#endif /* __DATASETS_H__ */
+#endif /* SURICATA_DATASETS_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -33,6 +33,7 @@
 #include "decode-events.h"
 
 #include "detect-gid.h"
+#include "util-byte.h"
 #include "util-unittest.h"
 #include "util-debug.h"
 
@@ -71,20 +72,13 @@ void DetectGidRegister (void)
  */
 static int DetectGidSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-    unsigned long gid = 0;
-    char *endptr = NULL;
-    gid = strtoul(rawstr, &endptr, 10);
-    if (endptr == NULL || *endptr != '\0') {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "invalid character as arg "
-                   "to gid keyword");
-        goto error;
-    }
-    if (gid >= UINT_MAX) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "gid value to high, max %u", UINT_MAX);
+    uint32_t gid = 0;
+    if (ByteExtractStringUint32(&gid, 10, strlen(rawstr), rawstr) <= 0) {
+        SCLogError("invalid input as arg to gid keyword");
         goto error;
     }
 
-    s->gid = (uint32_t)gid;
+    s->gid = gid;
 
     return 0;
 
@@ -99,77 +93,50 @@ static int DetectGidSetup (DetectEngineCtx *de_ctx, Signature *s, const char *ra
 #ifdef UNITTESTS
 /**
  * \test GidTestParse01 is a test for a  valid gid value
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int GidTestParse01 (void)
 {
-    int result = 0;
-    Signature *s = NULL;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    s = DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:1; gid:1;)");
-    if (s == NULL || s->gid != 1)
-        goto end;
+    Signature *s =
+            DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:1; gid:1;)");
 
-    result = 1;
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    FAIL_IF_NULL(s);
+    FAIL_IF(s->gid != 1);
+
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 /**
  * \test GidTestParse02 is a test for an invalid gid value
- *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int GidTestParse02 (void)
 {
-    int result = 0;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    if (DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:1; gid:a;)") != NULL)
-        goto end;
+    FAIL_IF_NOT_NULL(
+            DetectEngineAppendSig(de_ctx, "alert tcp 1.2.3.4 any -> any any (sid:1; gid:a;)"));
 
-    result = 1;
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 /**
  * \test Test a gid consisting of a single quote.
- *
- * \retval 1 on succces
- * \retval 0 on failure
  */
 static int GidTestParse03 (void)
 {
-    int result = 0;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
+    FAIL_IF_NULL(de_ctx);
 
-    if (DetectEngineAppendSig(de_ctx,
-            "alert tcp any any -> any any (content:\"ABC\"; gid:\";)") != NULL)
-        goto end;
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (content:\"ABC\"; gid:\";)"));
 
-    result = 1;
-end:
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 /**

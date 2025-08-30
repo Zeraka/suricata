@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2012 Open Information Security Foundation
+/* Copyright (C) 2007-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,13 +21,13 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __UTIL_BUFFER_H__
-#define __UTIL_BUFFER_H__
+#ifndef SURICATA_UTIL_BUFFER_H
+#define SURICATA_UTIL_BUFFER_H
 
 typedef struct MemBuffer_ {
-   uint8_t *buffer;
-   uint32_t size;
-   uint32_t offset;
+    uint32_t size;
+    uint32_t offset;
+    uint8_t buffer[];
 } MemBuffer;
 
 MemBuffer *MemBufferCreateNew(uint32_t size);
@@ -39,10 +39,11 @@ void MemBufferFree(MemBuffer *buffer);
  *
  * \param mem_buffer Pointer to the mem buffer instance.
  */
-#define MemBufferReset(mem_buffer) do {                     \
-        (mem_buffer)->buffer[0] = 0;                        \
-        (mem_buffer)->offset = 0;                           \
-    } while (0)
+static inline void MemBufferReset(MemBuffer *b)
+{
+    b->buffer[0] = 0;
+    b->offset = 0;
+}
 
 /**
  * \brief Get the MemBuffers underlying buffer.
@@ -71,45 +72,26 @@ void MemBufferFree(MemBuffer *buffer);
  *        onetwo|EF|three|ED|five
  *
  * \param buffer Pointer to the src MemBuffer instance to write.
- * \param fp     Pointer to the file file instance to write to.
+ * \param fp     Pointer to the file instance to write to.
  */
-#define MemBufferPrintToFP(buffer, fp) do {             \
-        uint32_t i;                                     \
-                                                        \
-        for (i = 0; i < (buffer)->offset; i++) {            \
-            if (isprint(buffer->buffer[i]))                 \
-                fprintf(fp, "%c", (buffer)->buffer[i]);     \
-            else                                            \
-                fprintf(fp, "|%02X|", (buffer)->buffer[i]); \
-        }                                                   \
-    } while (0)
+void MemBufferPrintToFP(MemBuffer *buffer, FILE *fp);
 
 /**
  * \brief Write a buffer to the file pointer as a printable char string.
  *
- * \param buffer Pointer to the src MemBuffer instance to write.
- * \param fp     Pointer to the file file instance to write to.
+ * \param b     Pointer to the src MemBuffer instance to write.
+ * \param fp    Pointer to the file instance to write to.
+ * \retval size_t bytes written by fwrite()
  */
-#define MemBufferPrintToFPAsString(mem_buffer, fp) ({                           \
-    fwrite((mem_buffer)->buffer, sizeof(uint8_t), (mem_buffer)->offset, fp);    \
-})
+size_t MemBufferPrintToFPAsString(MemBuffer *b, FILE *fp);
 
 /**
  * \brief Write a buffer in hex format.
  *
- * \param buffer Pointer to the src MemBuffer instance to write.
- * \param fp     Pointer to the file file instance to write to.
+ * \param b      Pointer to the src MemBuffer instance to write.
+ * \param fp     Pointer to the file instance to write to.
  */
-#define MemBufferPrintToFPAsHex(mem_buffer, fp) do {        \
-        uint32_t i;                                     \
-                                                        \
-        for (i = 0; i < (mem_buffer)->offset; i++) {        \
-            if (((mem_buffer)->offset % 8) == 0)            \
-                fprintf(fp, "\n");                      \
-            fprintf(fp, " %02X", (mem_buffer)->buffer[i]);  \
-        }                                               \
-    } while (0)
-
+void MemBufferPrintToFPAsHex(MemBuffer *b, FILE *fp);
 
 /**
  * \brief Write a raw buffer to the MemBuffer dst.
@@ -129,22 +111,9 @@ void MemBufferFree(MemBuffer *buffer);
  *
  * \param raw_buffer     The buffer to write.
  * \param raw_buffer_len Length of the above buffer.
+ * \retval write_len Bytes written. If less than raw_len, the buffer is full.
  */
-#define MemBufferWriteRaw(dst, raw_buffer, raw_buffer_len) do { \
-        uint32_t write_len;                                     \
-                                                                \
-        if (((raw_buffer_len) >= (dst)->size - (dst)->offset)) {        \
-            SCLogDebug("Truncating data write since it exceeded buffer limit of " \
-                       "- %"PRIu32, (dst)->size);                       \
-            write_len = ((dst)->size - (dst)->offset) - 1;              \
-        } else {                                                        \
-            write_len = (raw_buffer_len);                               \
-        }                                                               \
-                                                                        \
-        memcpy((dst)->buffer + (dst)->offset, (raw_buffer), write_len); \
-        (dst)->offset += write_len;                                     \
-        dst->buffer[dst->offset] = '\0';                                \
-    } while (0)
+uint32_t MemBufferWriteRaw(MemBuffer *dst, const uint8_t *raw, const uint32_t raw_len);
 
 /**
  * \brief Write a string buffer to the Membuffer dst.
@@ -159,19 +128,6 @@ void MemBufferFree(MemBuffer *buffer);
  * \param format The format string.
  * \param ...    Variable arguments.
  */
-#define MemBufferWriteString(dst, ...) do {                             \
-        int cw = snprintf((char *)(dst)->buffer + (dst)->offset,        \
-                          (dst)->size - (dst)->offset,                  \
-                          __VA_ARGS__);                                 \
-        if (cw >= 0) {                                                  \
-            if ( ((dst)->offset + cw) >= (dst)->size) {                 \
-                SCLogDebug("Truncating data write since it exceeded buffer " \
-                           "limit of - %"PRIu32"\n", (dst)->size); \
-                (dst)->offset = (dst)->size - 1;                        \
-            } else {                                                    \
-                (dst->offset) += cw;                                    \
-            }                                                           \
-        }                                                               \
-    } while (0)
+void MemBufferWriteString(MemBuffer *dst, const char *fmt, ...) ATTR_FMT_PRINTF(2, 3);
 
-#endif /* __UTIL_BUFFER_H__ */
+#endif /* SURICATA_UTIL_BUFFER_H */

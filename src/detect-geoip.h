@@ -22,13 +22,12 @@
  * \author Bill Meeks <billmeeks8@gmail.com>
  */
 
-#ifndef __DETECT_GEOIP_H__
-#define __DETECT_GEOIP_H__
+#ifndef SURICATA_DETECT_GEOIP_H
+#define SURICATA_DETECT_GEOIP_H
 
 #ifdef HAVE_GEOIP
 
 #include <maxminddb.h>
-#include "util-spm-bm.h"
 
 #define GEOOPTION_MAXSIZE 3 /* Country Code (2 chars) + NULL */
 #define GEOOPTION_MAXLOCATIONS 64

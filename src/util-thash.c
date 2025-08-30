@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -33,11 +33,12 @@
 #include "util-byte.h"
 
 #include "util-hash-lookup3.h"
+#include "util-validate.h"
 
-static THashData *THashGetUsed(THashTableContext *ctx);
+static THashData *THashGetUsed(THashTableContext *ctx, uint32_t data_size);
 static void THashDataEnqueue (THashDataQueue *q, THashData *h);
 
-static void THashDataMoveToSpare(THashTableContext *ctx, THashData *h)
+void THashDataMoveToSpare(THashTableContext *ctx, THashData *h)
 {
     THashDataEnqueue(&ctx->spare_q, h);
     (void) SC_ATOMIC_SUB(ctx->counter, 1);
@@ -56,7 +57,7 @@ THashDataQueue *THashDataQueueNew(void)
 {
     THashDataQueue *q = (THashDataQueue *)SCMalloc(sizeof(THashDataQueue));
     if (q == NULL) {
-        SCLogError(SC_ERR_FATAL, "Fatal error encountered in THashDataQueueNew. Exiting...");
+        SCLogError("Fatal error encountered in THashDataQueueNew. Exiting...");
         exit(EXIT_SUCCESS);
     }
     q = THashDataQueueInit(q);
@@ -156,17 +157,19 @@ static uint32_t THashDataQueueLen(THashDataQueue *q)
 }
 #endif
 
-static THashData *THashDataAlloc(THashTableContext *ctx)
+static THashData *THashDataAlloc(THashTableContext *ctx, uint32_t data_size)
 {
-    const size_t data_size = THASH_DATA_SIZE(ctx);
+    const size_t thash_data_size = THASH_DATA_SIZE(ctx);
 
-    if (!(THASH_CHECK_MEMCAP(ctx, data_size))) {
+    if (!(THASH_CHECK_MEMCAP(ctx, thash_data_size + data_size))) {
         return NULL;
     }
 
-    (void) SC_ATOMIC_ADD(ctx->memuse, data_size);
+    size_t total_data_size = thash_data_size + data_size;
 
-    THashData *h = SCCalloc(1, data_size);
+    (void)SC_ATOMIC_ADD(ctx->memuse, total_data_size);
+
+    THashData *h = SCCalloc(1, thash_data_size);
     if (unlikely(h == NULL))
         goto error;
 
@@ -180,18 +183,25 @@ static THashData *THashDataAlloc(THashTableContext *ctx)
     return h;
 
 error:
+    (void)SC_ATOMIC_SUB(ctx->memuse, total_data_size);
     return NULL;
 }
 
 static void THashDataFree(THashTableContext *ctx, THashData *h)
 {
     if (h != NULL) {
+        DEBUG_VALIDATE_BUG_ON(SC_ATOMIC_GET(h->use_cnt) != 0);
+
+        uint32_t data_size = 0;
         if (h->data != NULL) {
+            if (ctx->config.DataSize) {
+                data_size = ctx->config.DataSize(h->data);
+            }
             ctx->config.DataFree(h->data);
         }
         SCMutexDestroy(&h->m);
         SCFree(h);
-        (void) SC_ATOMIC_SUB(ctx->memuse, THASH_DATA_SIZE(ctx));
+        (void)SC_ATOMIC_SUB(ctx->memuse, THASH_DATA_SIZE(ctx) + (uint64_t)data_size);
     }
 }
 
@@ -204,7 +214,7 @@ static void THashDataFree(THashTableContext *ctx, THashData *h)
 
 /** \brief initialize the configuration
  *  \warning Not thread safe */
-static void THashInitConfig(THashTableContext *ctx, const char *cnf_prefix)
+static int THashInitConfig(THashTableContext *ctx, const char *cnf_prefix)
 {
     char varname[256];
 
@@ -216,29 +226,27 @@ static void THashInitConfig(THashTableContext *ctx, const char *cnf_prefix)
 
     /** set config values for memcap, prealloc and hash_size */
     GET_VAR(cnf_prefix, "memcap");
-    if ((ConfGet(varname, &conf_val)) == 1)
-    {
-        if (ParseSizeStringU64(conf_val, &ctx->config.memcap) < 0) {
-            SCLogError(SC_ERR_SIZE_PARSE, "Error parsing %s "
+    if ((SCConfGet(varname, &conf_val)) == 1) {
+        uint64_t memcap;
+        if (ParseSizeStringU64(conf_val, &memcap) < 0) {
+            SCLogError("Error parsing %s "
                        "from conf file - %s.  Killing engine",
-                       varname, conf_val);
-            exit(EXIT_FAILURE);
+                    varname, conf_val);
+            return -1;
         }
+        SC_ATOMIC_INIT(ctx->config.memcap);
+        SC_ATOMIC_SET(ctx->config.memcap, memcap);
     }
     GET_VAR(cnf_prefix, "hash-size");
-    if ((ConfGet(varname, &conf_val)) == 1)
-    {
-        if (StringParseUint32(&configval, 10, strlen(conf_val),
-                                    conf_val) > 0) {
+    if ((SCConfGet(varname, &conf_val)) == 1) {
+        if (StringParseUint32(&configval, 10, (uint16_t)strlen(conf_val), conf_val) > 0) {
             ctx->config.hash_size = configval;
         }
     }
 
     GET_VAR(cnf_prefix, "prealloc");
-    if ((ConfGet(varname, &conf_val)) == 1)
-    {
-        if (StringParseUint32(&configval, 10, strlen(conf_val),
-                                    conf_val) > 0) {
+    if ((SCConfGet(varname, &conf_val)) == 1) {
+        if (StringParseUint32(&configval, 10, (uint16_t)strlen(conf_val), conf_val) > 0) {
             ctx->config.prealloc = configval;
         } else {
             WarnInvalidConfEntry(varname, "%"PRIu32, ctx->config.prealloc);
@@ -248,18 +256,18 @@ static void THashInitConfig(THashTableContext *ctx, const char *cnf_prefix)
     /* alloc hash memory */
     uint64_t hash_size = ctx->config.hash_size * sizeof(THashHashRow);
     if (!(THASH_CHECK_MEMCAP(ctx, hash_size))) {
-        SCLogError(SC_ERR_THASH_INIT, "allocating hash failed: "
-                "max hash memcap is smaller than projected hash size. "
-                "Memcap: %"PRIu64", Hash table size %"PRIu64". Calculate "
-                "total hash size by multiplying \"hash-size\" with %"PRIuMAX", "
-                "which is the hash bucket size.", ctx->config.memcap, hash_size,
-                (uintmax_t)sizeof(THashHashRow));
-        exit(EXIT_FAILURE);
+        SCLogError("allocating hash failed: "
+                   "max hash memcap is smaller than projected hash size. "
+                   "Memcap: %" PRIu64 ", Hash table size %" PRIu64 ". Calculate "
+                   "total hash size by multiplying \"hash-size\" with %" PRIuMAX ", "
+                   "which is the hash bucket size.",
+                SC_ATOMIC_GET(ctx->config.memcap), hash_size, (uintmax_t)sizeof(THashHashRow));
+        return -1;
     }
     ctx->array = SCMallocAligned(ctx->config.hash_size * sizeof(THashHashRow), CLS);
     if (unlikely(ctx->array == NULL)) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in THashInitConfig. Exiting...");
+        SCLogError("Fatal error encountered in THashInitConfig. Exiting...");
+        return -1;
     }
     memset(ctx->array, 0, ctx->config.hash_size * sizeof(THashHashRow));
 
@@ -267,34 +275,35 @@ static void THashInitConfig(THashTableContext *ctx, const char *cnf_prefix)
     for (i = 0; i < ctx->config.hash_size; i++) {
         HRLOCK_INIT(&ctx->array[i]);
     }
-    (void) SC_ATOMIC_ADD(ctx->memuse, (ctx->config.hash_size * sizeof(THashHashRow)));
+    (void)SC_ATOMIC_ADD(ctx->memuse, (ctx->config.hash_size * sizeof(THashHashRow)));
 
     /* pre allocate prealloc */
     for (i = 0; i < ctx->config.prealloc; i++) {
         if (!(THASH_CHECK_MEMCAP(ctx, THASH_DATA_SIZE(ctx)))) {
-            SCLogError(SC_ERR_THASH_INIT, "preallocating data failed: "
-                    "max thash memcap reached. Memcap %"PRIu64", "
-                    "Memuse %"PRIu64".", ctx->config.memcap,
+            SCLogError("preallocating data failed: "
+                       "max thash memcap reached. Memcap %" PRIu64 ", "
+                       "Memuse %" PRIu64 ".",
+                    SC_ATOMIC_GET(ctx->config.memcap),
                     ((uint64_t)SC_ATOMIC_GET(ctx->memuse) + THASH_DATA_SIZE(ctx)));
-            exit(EXIT_FAILURE);
+            return -1;
         }
 
-        THashData *h = THashDataAlloc(ctx);
+        THashData *h = THashDataAlloc(ctx, 0 /* as we don't have string data here */);
         if (h == NULL) {
-            SCLogError(SC_ERR_THASH_INIT, "preallocating data failed: %s", strerror(errno));
-            exit(EXIT_FAILURE);
+            SCLogError("preallocating data failed: %s", strerror(errno));
+            return -1;
         }
         THashDataEnqueue(&ctx->spare_q,h);
     }
 
-    return;
+    return 0;
 }
 
-THashTableContext* THashInit(const char *cnf_prefix, size_t data_size,
-    int (*DataSet)(void *, void *),
-     void (*DataFree)(void *),
-     uint32_t (*DataHash)(void *),
-     bool (*DataCompare)(void *, void *))
+THashTableContext *THashInit(const char *cnf_prefix, uint32_t data_size,
+        int (*DataSet)(void *, void *), void (*DataFree)(void *),
+        uint32_t (*DataHash)(uint32_t, void *), bool (*DataCompare)(void *, void *),
+        bool (*DataExpired)(void *, SCTime_t), uint32_t (*DataSize)(void *), bool reset_memcap,
+        uint64_t memcap, uint32_t hashsize)
 {
     THashTableContext *ctx = SCCalloc(1, sizeof(*ctx));
     BUG_ON(!ctx);
@@ -304,11 +313,19 @@ THashTableContext* THashInit(const char *cnf_prefix, size_t data_size,
     ctx->config.DataFree = DataFree;
     ctx->config.DataHash = DataHash;
     ctx->config.DataCompare = DataCompare;
+    ctx->config.DataExpired = DataExpired;
+    ctx->config.DataSize = DataSize;
 
     /* set defaults */
     ctx->config.hash_rand = (uint32_t)RandomGet();
-    ctx->config.hash_size = THASH_DEFAULT_HASHSIZE;
-    ctx->config.memcap = THASH_DEFAULT_MEMCAP;
+    ctx->config.hash_size = hashsize > 0 ? hashsize : THASH_DEFAULT_HASHSIZE;
+    /* Reset memcap in case of loading from file to the highest possible value
+     unless defined by the rule keyword */
+    if (memcap > 0) {
+        SC_ATOMIC_SET(ctx->config.memcap, memcap);
+    } else {
+        SC_ATOMIC_SET(ctx->config.memcap, reset_memcap ? UINT64_MAX : THASH_DEFAULT_MEMCAP);
+    }
     ctx->config.prealloc = THASH_DEFAULT_PREALLOC;
 
     SC_ATOMIC_INIT(ctx->counter);
@@ -316,8 +333,20 @@ THashTableContext* THashInit(const char *cnf_prefix, size_t data_size,
     SC_ATOMIC_INIT(ctx->prune_idx);
     THashDataQueueInit(&ctx->spare_q);
 
-    THashInitConfig(ctx, cnf_prefix);
+    if (THashInitConfig(ctx, cnf_prefix) < 0) {
+        THashShutdown(ctx);
+        ctx = NULL;
+    }
     return ctx;
+}
+
+/* \brief Set memcap to current memuse
+ * */
+void THashConsolidateMemcap(THashTableContext *ctx)
+{
+    SC_ATOMIC_SET(
+            ctx->config.memcap, MAX(SC_ATOMIC_GET(ctx->memuse), SC_ATOMIC_GET(ctx->config.memcap)));
+    SCLogDebug("memcap after load set to: %" PRIu64, SC_ATOMIC_GET(ctx->config.memcap));
 }
 
 /** \brief shutdown the flow engine
@@ -325,7 +354,6 @@ THashTableContext* THashInit(const char *cnf_prefix, size_t data_size,
 void THashShutdown(THashTableContext *ctx)
 {
     THashData *h;
-    uint32_t u;
 
     /* free spare queue */
     while ((h = THashDataDequeue(&ctx->spare_q))) {
@@ -335,7 +363,7 @@ void THashShutdown(THashTableContext *ctx)
 
     /* clear and free the hash */
     if (ctx->array != NULL) {
-        for (u = 0; u < ctx->config.hash_size; u++) {
+        for (uint32_t u = 0; u < ctx->config.hash_size; u++) {
             h = ctx->array[u].head;
             while (h) {
                 THashData *n = h->next;
@@ -347,11 +375,11 @@ void THashShutdown(THashTableContext *ctx)
         }
         SCFreeAligned(ctx->array);
         ctx->array = NULL;
+        (void)SC_ATOMIC_SUB(ctx->memuse, ctx->config.hash_size * sizeof(THashHashRow));
     }
-    (void) SC_ATOMIC_SUB(ctx->memuse, ctx->config.hash_size * sizeof(THashHashRow));
     THashDataQueueDestroy(&ctx->spare_q);
+    DEBUG_VALIDATE_BUG_ON(SC_ATOMIC_GET(ctx->memuse) != 0);
     SCFree(ctx);
-    return;
 }
 
 /** \brief Walk the hash
@@ -381,10 +409,68 @@ int THashWalk(THashTableContext *ctx, THashFormatFunc FormatterFunc, THashOutput
             h = h->next;
         }
         HRLOCK_UNLOCK(hb);
-        if (err == true)
+        if (err)
             return -1;
     }
     return 0;
+}
+
+/** \brief expire data from the hash
+ *  Walk the hash table and remove data that is exprired according to the
+ *  DataExpired callback.
+ *  \retval cnt number of items successfully expired/removed
+ */
+uint32_t THashExpire(THashTableContext *ctx, const SCTime_t ts)
+{
+    if (ctx->config.DataExpired == NULL)
+        return 0;
+
+    SCLogDebug("timeout: starting");
+    uint32_t cnt = 0;
+
+    for (uint32_t i = 0; i < ctx->config.hash_size; i++) {
+        THashHashRow *hb = &ctx->array[i];
+        if (HRLOCK_TRYLOCK(hb) != 0)
+            continue;
+        /* hash bucket is now locked */
+        THashData *h = hb->head;
+        while (h) {
+            THashData *next = h->next;
+            THashDataLock(h);
+            DEBUG_VALIDATE_BUG_ON(SC_ATOMIC_GET(h->use_cnt) > (uint32_t)INT_MAX);
+            /* only consider items with no references to it */
+            if (SC_ATOMIC_GET(h->use_cnt) == 0 && ctx->config.DataExpired(h->data, ts)) {
+                /* remove from the hash */
+                if (h->prev != NULL)
+                    h->prev->next = h->next;
+                if (h->next != NULL)
+                    h->next->prev = h->prev;
+                if (hb->head == h)
+                    hb->head = h->next;
+                if (hb->tail == h)
+                    hb->tail = h->prev;
+                h->next = NULL;
+                h->prev = NULL;
+                SCLogDebug("timeout: removing data %p", h);
+                if (ctx->config.DataSize) {
+                    uint32_t data_size = ctx->config.DataSize(h->data);
+                    if (data_size > 0)
+                        (void)SC_ATOMIC_SUB(ctx->memuse, (uint64_t)data_size);
+                }
+                ctx->config.DataFree(h->data);
+                THashDataUnlock(h);
+                THashDataMoveToSpare(ctx, h);
+                cnt++;
+            } else {
+                THashDataUnlock(h);
+            }
+            h = next;
+        }
+        HRLOCK_UNLOCK(hb);
+    }
+
+    SCLogDebug("timeout: ending: %u entries expired", cnt);
+    return cnt;
 }
 
 /** \brief Cleanup the thash engine
@@ -419,13 +505,17 @@ void THashCleanup(THashTableContext *ctx)
                     hb->tail = h->prev;
                 h->next = NULL;
                 h->prev = NULL;
+                if (ctx->config.DataSize) {
+                    uint32_t data_size = ctx->config.DataSize(h->data);
+                    if (data_size > 0)
+                        (void)SC_ATOMIC_SUB(ctx->memuse, (uint64_t)data_size);
+                }
                 THashDataMoveToSpare(ctx, h);
                 h = n;
             }
         }
         HRLOCK_UNLOCK(hb);
     }
-    return;
 }
 
 /* calculate the hash key for this packet
@@ -438,7 +528,7 @@ static uint32_t THashGetKey(const THashConfig *cnf, void *data)
 {
     uint32_t key;
 
-    key = cnf->DataHash(data);
+    key = cnf->DataHash(cnf->hash_rand, data);
     key %= cnf->hash_size;
 
     return key;
@@ -446,7 +536,7 @@ static uint32_t THashGetKey(const THashConfig *cnf, void *data)
 
 static inline int THashCompare(const THashConfig *cnf, void *a, void *b)
 {
-    if (cnf->DataCompare(a, b) == TRUE)
+    if (cnf->DataCompare(a, b))
         return 1;
     return 0;
 }
@@ -462,21 +552,29 @@ static inline int THashCompare(const THashConfig *cnf, void *a, void *b)
 static THashData *THashDataGetNew(THashTableContext *ctx, void *data)
 {
     THashData *h = NULL;
+    uint32_t data_size = 0;
+    if (ctx->config.DataSize) {
+        data_size = ctx->config.DataSize(data);
+    }
 
     /* get data from the spare queue */
     h = THashDataDequeue(&ctx->spare_q);
     if (h == NULL) {
         /* If we reached the max memcap, we get used data */
-        if (!(THASH_CHECK_MEMCAP(ctx, THASH_DATA_SIZE(ctx)))) {
-            h = THashGetUsed(ctx);
+        if (!(THASH_CHECK_MEMCAP(ctx, THASH_DATA_SIZE(ctx) + data_size))) {
+            h = THashGetUsed(ctx, data_size);
             if (h == NULL) {
                 return NULL;
+            }
+
+            if (!SC_ATOMIC_GET(ctx->memcap_reached)) {
+                SC_ATOMIC_SET(ctx->memcap_reached, true);
             }
 
             /* freed data, but it's unlocked */
         } else {
             /* now see if we can alloc a new data */
-            h = THashDataAlloc(ctx);
+            h = THashDataAlloc(ctx, data_size);
             if (h == NULL) {
                 return NULL;
             }
@@ -485,13 +583,28 @@ static THashData *THashDataGetNew(THashTableContext *ctx, void *data)
         }
     } else {
         /* data has been recycled before it went into the spare queue */
-
-        /* data is initialized (recylced) but *unlocked* */
+        /* data is initialized (recycled) but *unlocked* */
+        /* the recycled data was THashData and again does not include
+         * the size of current data to be added */
+        if (data_size > 0) {
+            /* Since it is prealloc'd data, it already has THashData in its memuse */
+            (void)SC_ATOMIC_ADD(ctx->memuse, data_size);
+            if (!(THASH_CHECK_MEMCAP(ctx, data_size))) {
+                if (!SC_ATOMIC_GET(ctx->memcap_reached)) {
+                    SC_ATOMIC_SET(ctx->memcap_reached, true);
+                }
+                SCLogError("Adding data will exceed memcap: %" PRIu64 ", current memuse: %" PRIu64,
+                        SC_ATOMIC_GET((ctx)->config.memcap), SC_ATOMIC_GET(ctx->memuse));
+            }
+        }
     }
 
     // setup the data
-    BUG_ON(ctx->config.DataSet(h->data, data) != 0);
-
+#ifdef DEBUG_VALIDATION
+    DEBUG_VALIDATE_BUG_ON(ctx->config.DataSet(h->data, data) != 0);
+#else
+    ctx->config.DataSet(h->data, data);
+#endif
     (void) SC_ATOMIC_ADD(ctx->counter, 1);
     SCMutexLock(&h->m);
     return h;
@@ -686,7 +799,7 @@ THashData *THashLookupFromHash (THashTableContext *ctx, void *data)
  *
  *  \retval h data or NULL
  */
-static THashData *THashGetUsed(THashTableContext *ctx)
+static THashData *THashGetUsed(THashTableContext *ctx, uint32_t data_size)
 {
     uint32_t idx = SC_ATOMIC_GET(ctx->prune_idx) % ctx->config.hash_size;
     uint32_t cnt = ctx->config.hash_size;
@@ -731,9 +844,20 @@ static THashData *THashGetUsed(THashTableContext *ctx)
         h->prev = NULL;
         HRLOCK_UNLOCK(hb);
 
+        if (h->data != NULL) {
+            if (ctx->config.DataSize) {
+                uint32_t h_data_size = ctx->config.DataSize(h->data);
+                if (h_data_size > 0) {
+                    (void)SC_ATOMIC_SUB(ctx->memuse, (uint64_t)h_data_size);
+                }
+            }
+            ctx->config.DataFree(h->data);
+        }
         SCMutexUnlock(&h->m);
 
         (void) SC_ATOMIC_ADD(ctx->prune_idx, (ctx->config.hash_size - cnt));
+        if (data_size > 0)
+            (void)SC_ATOMIC_ADD(ctx->memuse, data_size);
         return h;
     }
 

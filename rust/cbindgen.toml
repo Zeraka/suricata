@@ -43,7 +43,8 @@ include_version = true
 
 # A list of headers to #include (with quotes)
 # default: []
-includes = ["rust.h"]
+no_includes = true
+includes = ["stdint.h", "stdbool.h"]
 
 # The desired length of a line to use when formatting lines
 # default: 100
@@ -72,10 +73,23 @@ documentation_style = "doxy"
 #
 # default: []
 include = [
+    "StreamSlice",
+    "AppLayerResult",
+    "AppLayerStateData",
+    "AppLayerGetFileState",
     "AppLayerGetTxIterTuple",
     "RdpState",
     "SIPState",
+    "ModbusState",
     "CMark",
+    "QuicState",
+    "QuicTransaction",
+    "FtpEvent",
+    "FtpRequestCommand",
+    "FtpStateValues",
+    "FtpDataStateValues",
+    "HTTP2TransactionState",
+    "DataRepType",
 ]
 
 # A list of items to not include in the generated bindings
@@ -85,22 +99,26 @@ exclude = [
     "AppLayerParserState",
     "CLuaState",
     "DetectEngineState",
+    "DetectEngineThreadCtx",
+    "GenericVar",
     "Flow",
+    "StreamingBufferConfig",
+    "HttpRangeContainerBlock",
     "FileContainer",
     "JsonT",
-    "IKEV2State",
-    "IKEV2Transaction",
-    "KRB5State",
-    "KRB5Transaction",
-    "NTPState",
-    "NTPTransaction",
-    "SNMPState",
-    "SNMPTransaction",
+    "IKEState",
+    "IKETransaction",
     "SuricataContext",
     "SuricataFileContext",
     "TFTPState",
     "TFTPTransaction",
     "free",
+    "IPPROTO_TCP",
+    "IPPROTO_UDP",
+    "SRepCatGetByShortname",
+    "SIGMATCH_NOOPT",
+    "SIGMATCH_INFO_STICKY_BUFFER",
+    "FtpCommand",
 ]
 
 # Types of items that we'll generate. If empty, then all types of item are emitted.
@@ -116,7 +134,7 @@ exclude = [
 # * "functions":
 #
 # default: []
-item_types = ["enums","structs","opaque","functions"]
+item_types = ["enums","structs","opaque","functions","constants"]
 
 # Whether applying rules in export.rename prevents export.prefix from applying.
 #
@@ -125,9 +143,10 @@ item_types = ["enums","structs","opaque","functions"]
 # [export]
 # prefix = "capi_"
 [export.rename]
-"DNSTransaction" = "RSDNSTransaction"
 "JsonT" = "json_t"
 "CLuaState" = "lua_State"
+"JsonBuilder" = "SCJsonBuilder"
+"JsonBuilderMark" = "SCJsonBuilderMark"
 
 #
 # You get the following results:

@@ -25,10 +25,13 @@
  * Pcap packet logging module.
  */
 
-#ifndef __LOG_PCAP_H__
-#define __LOG_PCAP_H__
+#ifndef SURICATA_LOG_PCAP_H
+#define SURICATA_LOG_PCAP_H
+
+#define PCAP_OUTPUT_BUFFER_SIZE 65535
 
 void PcapLogRegister(void);
 void PcapLogProfileSetup(void);
+char *PcapLogGetFilename(void);
 
-#endif /* __LOG_PCAP_H__ */
+#endif /* SURICATA_LOG_PCAP_H */

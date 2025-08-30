@@ -25,7 +25,6 @@
 
 #include "suricata-common.h"
 #include "suricata.h"
-#include "debug.h"
 #include "flow.h"
 #include "stream.h"
 #include "stream-tcp.h"
@@ -36,12 +35,13 @@
 #include "util-print.h"
 #include "app-layer-parser.h"
 #include "util-validate.h"
+#include "rust.h"
 
 extern int g_detect_disabled;
 
 /** \brief mask of file flags we'll not set
  *  This mask is set based on global file settings and
- *  cannot be overriden by detection.
+ *  cannot be overridden by detection.
  */
 static uint16_t g_file_flow_mask = 0;
 
@@ -86,10 +86,8 @@ static int g_file_store_enable = 0;
 static uint32_t g_file_store_reassembly_depth = 0;
 
 /* prototypes */
-static void FileFree(File *);
-#ifdef HAVE_NSS
+static void FileFree(File *, const StreamingBufferConfig *cfg);
 static void FileEndSha256(File *ff);
-#endif
 
 void FileForceFilestoreEnable(void)
 {
@@ -163,117 +161,136 @@ int FileForceSha256(void)
 void FileForceTrackingEnable(void)
 {
     g_file_force_tracking = 1;
-    g_file_flow_mask |= (FLOWFILE_NO_SIZE_TS|FLOWFILE_NO_SIZE_TC);
 }
 
 /**
  * \brief Function to parse forced file hashing configuration.
  */
-void FileForceHashParseCfg(ConfNode *conf)
+void FileForceHashParseCfg(SCConfNode *conf)
 {
     BUG_ON(conf == NULL);
 
-    ConfNode *forcehash_node = NULL;
-
-    /* legacy option */
-    const char *force_md5 = ConfNodeLookupChildValue(conf, "force-md5");
-    if (force_md5 != NULL) {
-        SCLogWarning(SC_ERR_DEPRECATED_CONF, "deprecated 'force-md5' option "
-                "found. Please use 'force-hash: [md5]' instead");
-
-        if (ConfValIsTrue(force_md5)) {
-#ifdef HAVE_NSS
-            FileForceMd5Enable();
-            SCLogInfo("forcing md5 calculation for logged files");
-#else
-            SCLogInfo("md5 calculation requires linking against libnss");
-#endif
-        }
-    }
+    SCConfNode *forcehash_node = NULL;
 
     if (conf != NULL)
-        forcehash_node = ConfNodeLookupChild(conf, "force-hash");
+        forcehash_node = SCConfNodeLookupChild(conf, "force-hash");
 
     if (forcehash_node != NULL) {
-        ConfNode *field = NULL;
+        SCConfNode *field = NULL;
 
         TAILQ_FOREACH(field, &forcehash_node->head, next) {
             if (strcasecmp("md5", field->val) == 0) {
-#ifdef HAVE_NSS
-                FileForceMd5Enable();
-                SCLogConfig("forcing md5 calculation for logged or stored files");
-#else
-                SCLogInfo("md5 calculation requires linking against libnss");
-#endif
+                if (g_disable_hashing) {
+                    SCLogInfo("not forcing md5 calculation for logged files: hashing globally "
+                              "disabled");
+                } else {
+                    FileForceMd5Enable();
+                    SCLogConfig("forcing md5 calculation for logged or stored files");
+                }
             }
 
             if (strcasecmp("sha1", field->val) == 0) {
-#ifdef HAVE_NSS
-                FileForceSha1Enable();
-                SCLogConfig("forcing sha1 calculation for logged or stored files");
-#else
-                SCLogInfo("sha1 calculation requires linking against libnss");
-#endif
+                if (g_disable_hashing) {
+                    SCLogInfo("not forcing sha1 calculation for logged files: hashing globally "
+                              "disabled");
+                } else {
+                    FileForceSha1Enable();
+                    SCLogConfig("forcing sha1 calculation for logged or stored files");
+                }
             }
 
             if (strcasecmp("sha256", field->val) == 0) {
-#ifdef HAVE_NSS
-                FileForceSha256Enable();
-                SCLogConfig("forcing sha256 calculation for logged or stored files");
-#else
-                SCLogInfo("sha256 calculation requires linking against libnss");
-#endif
+                if (g_disable_hashing) {
+                    SCLogInfo("not forcing sha256 calculation for logged files: hashing globally "
+                              "disabled");
+                } else {
+                    FileForceSha256Enable();
+                    SCLogConfig("forcing sha256 calculation for logged or stored files");
+                }
             }
         }
     }
 }
 
-uint16_t FileFlowToFlags(const Flow *flow, uint8_t direction)
+uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
 {
     uint16_t flags = 0;
 
     if (direction == STREAM_TOSERVER) {
-        if (flow->file_flags & FLOWFILE_NO_STORE_TS) {
+        if ((flow_file_flags & (FLOWFILE_NO_STORE_TS | FLOWFILE_STORE_TS)) ==
+                FLOWFILE_NO_STORE_TS) {
             flags |= FILE_NOSTORE;
+        } else if (flow_file_flags & FLOWFILE_STORE_TS) {
+            flags |= FILE_STORE;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_MAGIC_TS) {
+        if (flow_file_flags & FLOWFILE_NO_MAGIC_TS) {
             flags |= FILE_NOMAGIC;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_MD5_TS) {
+        if (flow_file_flags & FLOWFILE_NO_MD5_TS) {
             flags |= FILE_NOMD5;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_SHA1_TS) {
+        if (flow_file_flags & FLOWFILE_NO_SHA1_TS) {
             flags |= FILE_NOSHA1;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_SHA256_TS) {
+        if (flow_file_flags & FLOWFILE_NO_SHA256_TS) {
             flags |= FILE_NOSHA256;
         }
     } else {
-        if (flow->file_flags & FLOWFILE_NO_STORE_TC) {
+        if ((flow_file_flags & (FLOWFILE_NO_STORE_TC | FLOWFILE_STORE_TC)) ==
+                FLOWFILE_NO_STORE_TC) {
             flags |= FILE_NOSTORE;
+        } else if (flow_file_flags & FLOWFILE_STORE_TC) {
+            flags |= FILE_STORE;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_MAGIC_TC) {
+        if (flow_file_flags & FLOWFILE_NO_MAGIC_TC) {
             flags |= FILE_NOMAGIC;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_MD5_TC) {
+        if (flow_file_flags & FLOWFILE_NO_MD5_TC) {
             flags |= FILE_NOMD5;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_SHA1_TC) {
+        if (flow_file_flags & FLOWFILE_NO_SHA1_TC) {
             flags |= FILE_NOSHA1;
         }
 
-        if (flow->file_flags & FLOWFILE_NO_SHA256_TC) {
+        if (flow_file_flags & FLOWFILE_NO_SHA256_TC) {
             flags |= FILE_NOSHA256;
         }
     }
+    DEBUG_VALIDATE_BUG_ON((flags & (FILE_STORE | FILE_NOSTORE)) == (FILE_STORE | FILE_NOSTORE));
+
+    SCLogDebug("direction %02x flags %02x", direction, flags);
     return flags;
+}
+
+uint16_t FileFlowToFlags(const Flow *flow, uint8_t direction)
+{
+    return FileFlowFlagsToFlags(flow->file_flags, direction);
+}
+
+void FileApplyTxFlags(const AppLayerTxData *txd, const uint8_t direction, File *file)
+{
+    SCLogDebug("file flags %04x STORE %s NOSTORE %s", file->flags,
+            (file->flags & FILE_STORE) ? "true" : "false",
+            (file->flags & FILE_NOSTORE) ? "true" : "false");
+    uint16_t update_flags = FileFlowFlagsToFlags(txd->file_flags, direction);
+    DEBUG_VALIDATE_BUG_ON(
+            (file->flags & (FILE_STORE | FILE_NOSTORE)) == (FILE_STORE | FILE_NOSTORE));
+    if (file->flags & FILE_STORE)
+        update_flags &= ~FILE_NOSTORE;
+
+    file->flags |= update_flags;
+    SCLogDebug("file flags %04x STORE %s NOSTORE %s", file->flags,
+            (file->flags & FILE_STORE) ? "true" : "false",
+            (file->flags & FILE_NOSTORE) ? "true" : "false");
+    DEBUG_VALIDATE_BUG_ON(
+            (file->flags & (FILE_STORE | FILE_NOSTORE)) == (FILE_STORE | FILE_NOSTORE));
 }
 
 static int FileMagicSize(void)
@@ -291,9 +308,9 @@ static int FileMagicSize(void)
 uint64_t FileDataSize(const File *file)
 {
     if (file != NULL && file->sb != NULL) {
-        SCLogDebug("returning %"PRIu64,
-                file->sb->stream_offset + file->sb->buf_offset);
-        return file->sb->stream_offset + file->sb->buf_offset;
+        const uint64_t size = StreamingBufferGetConsecutiveDataRightEdge(file->sb);
+        SCLogDebug("returning %" PRIu64, size);
+        return size;
     }
     SCLogDebug("returning 0 (default)");
     return 0;
@@ -328,7 +345,7 @@ uint64_t FileTrackedSize(const File *file)
  *  \retval 1 prune (free) this file
  *  \retval 0 file not ready to be freed
  */
-static int FilePruneFile(File *file)
+static int FilePruneFile(File *file, const StreamingBufferConfig *cfg)
 {
     SCEnter();
 
@@ -354,44 +371,82 @@ static int FilePruneFile(File *file)
     if (file->flags & FILE_STORE) {
         left_edge = MIN(left_edge,file->content_stored);
     }
-    if (file->flags & FILE_USE_DETECT) {
-        left_edge = MIN(left_edge, file->content_inspected);
 
+    if (!g_detect_disabled) {
+        left_edge = MIN(left_edge, file->content_inspected);
         /* if file has inspect window and min size set, we
          * do some house keeping here */
         if (file->inspect_window != 0 && file->inspect_min_size != 0) {
+            const uint64_t file_offset = StreamingBufferGetOffset(file->sb);
             uint32_t window = file->inspect_window;
-            if (file->sb->stream_offset == 0)
+            if (file_offset == 0)
                 window = MAX(window, file->inspect_min_size);
 
             uint64_t file_size = FileDataSize(file);
-            uint64_t data_size = file_size - file->sb->stream_offset;
+            uint64_t data_size = file_size - file_offset;
 
             SCLogDebug("window %"PRIu32", file_size %"PRIu64", data_size %"PRIu64,
                     window, file_size, data_size);
 
             if (data_size > (window * 3)) {
-                left_edge = file_size - window;
-                SCLogDebug("file->content_inspected now %"PRIu64, left_edge);
-                file->content_inspected = left_edge;
+                file->content_inspected = MAX(file->content_inspected, file->size - window);
+                SCLogDebug("file->content_inspected now %" PRIu64, file->content_inspected);
             }
+
+            if (left_edge > window)
+                left_edge -= window;
+            else
+                left_edge = 0;
         }
     }
 
     if (left_edge) {
-        StreamingBufferSlideToOffset(file->sb, left_edge);
+        SCLogDebug("sliding to %" PRIu64, left_edge);
+        StreamingBufferSlideToOffset(file->sb, cfg, left_edge);
     }
 
     SCReturnInt(0);
 }
 
-void FilePrune(FileContainer *ffc)
+#ifdef DEBUG
+#define P(file, flag) ((file)->flags & (flag)) ? "true" : "false"
+void FilePrintFlags(const File *file)
 {
+    SCLogDebug("file %p flags %04x "
+               "FILE_TRUNCATED %s "
+               "FILE_NOMAGIC %s "
+               "FILE_NOMD5 %s "
+               "FILE_MD5 %s "
+               "FILE_NOSHA1 %s "
+               "FILE_SHA1 %s "
+               "FILE_NOSHA256 %s "
+               "FILE_SHA256 %s "
+               "FILE_LOGGED %s "
+               "FILE_NOSTORE %s "
+               "FILE_STORE %s "
+               "FILE_STORED %s "
+               "FILE_NOTRACK %s "
+               "FILE_HAS_GAPS %s",
+            file, file->flags, P(file, FILE_TRUNCATED), P(file, FILE_NOMAGIC), P(file, FILE_NOMD5),
+            P(file, FILE_MD5), P(file, FILE_NOSHA1), P(file, FILE_SHA1), P(file, FILE_NOSHA256),
+            P(file, FILE_SHA256), P(file, FILE_LOGGED), P(file, FILE_NOSTORE), P(file, FILE_STORE),
+            P(file, FILE_STORED), P(file, FILE_NOTRACK), P(file, FILE_HAS_GAPS));
+}
+#undef P
+#endif
+
+static void FilePrune(FileContainer *ffc, const StreamingBufferConfig *cfg)
+{
+    SCEnter();
+    SCLogDebug("ffc %p head %p", ffc, ffc->head);
     File *file = ffc->head;
     File *prev = NULL;
 
     while (file) {
-        if (FilePruneFile(file) == 0) {
+#ifdef DEBUG
+        FilePrintFlags(file);
+#endif
+        if (FilePruneFile(file, cfg) == 0) {
             prev = file;
             file = file->next;
             continue;
@@ -409,9 +464,10 @@ void FilePrune(FileContainer *ffc)
         if (file == ffc->tail)
             ffc->tail = prev;
 
-        FileFree(file);
+        FileFree(file, cfg);
         file = file_next;
     }
+    SCReturn;
 }
 
 /**
@@ -422,12 +478,11 @@ void FilePrune(FileContainer *ffc)
  */
 FileContainer *FileContainerAlloc(void)
 {
-    FileContainer *new = SCMalloc(sizeof(FileContainer));
+    FileContainer *new = SCCalloc(1, sizeof(FileContainer));
     if (unlikely(new == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating mem");
+        SCLogError("Error allocating mem");
         return NULL;
     }
-    memset(new, 0, sizeof(FileContainer));
     new->head = new->tail = NULL;
     return new;
 }
@@ -437,8 +492,9 @@ FileContainer *FileContainerAlloc(void)
  *
  *  \param ffc FileContainer
  */
-void FileContainerRecycle(FileContainer *ffc)
+void FileContainerRecycle(FileContainer *ffc, const StreamingBufferConfig *cfg)
 {
+    SCLogDebug("ffc %p", ffc);
     if (ffc == NULL)
         return;
 
@@ -446,7 +502,7 @@ void FileContainerRecycle(FileContainer *ffc)
     File *next = NULL;
     for (;cur != NULL; cur = next) {
         next = cur->next;
-        FileFree(cur);
+        FileFree(cur, cfg);
     }
     ffc->head = ffc->tail = NULL;
 }
@@ -456,8 +512,9 @@ void FileContainerRecycle(FileContainer *ffc)
  *
  *  \param ffc FileContainer
  */
-void FileContainerFree(FileContainer *ffc)
+void FileContainerFree(FileContainer *ffc, const StreamingBufferConfig *cfg)
 {
+    SCLogDebug("ffc %p", ffc);
     if (ffc == NULL)
         return;
 
@@ -465,7 +522,7 @@ void FileContainerFree(FileContainer *ffc)
     File *next = NULL;
     for (;ptr != NULL; ptr = next) {
         next = ptr->next;
-        FileFree(ptr);
+        FileFree(ptr, cfg);
     }
     ffc->head = ffc->tail = NULL;
     SCFree(ffc);
@@ -481,12 +538,11 @@ void FileContainerFree(FileContainer *ffc)
  */
 static File *FileAlloc(const uint8_t *name, uint16_t name_len)
 {
-    File *new = SCMalloc(sizeof(File));
+    File *new = SCCalloc(1, sizeof(File));
     if (unlikely(new == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating mem");
+        SCLogError("Error allocating mem");
         return NULL;
     }
-    memset(new, 0, sizeof(File));
 
     new->name = SCMalloc(name_len);
     if (new->name == NULL) {
@@ -507,8 +563,9 @@ static File *FileAlloc(const uint8_t *name, uint16_t name_len)
     return new;
 }
 
-static void FileFree(File *ff)
+static void FileFree(File *ff, const StreamingBufferConfig *sbcfg)
 {
+    SCLogDebug("ff %p", ff);
     if (ff == NULL)
         return;
 
@@ -522,22 +579,21 @@ static void FileFree(File *ff)
         SCFree(ff->magic);
 #endif
     if (ff->sb != NULL) {
-        StreamingBufferFree(ff->sb);
+        StreamingBufferFree(ff->sb, sbcfg);
     }
 
-#ifdef HAVE_NSS
     if (ff->md5_ctx)
-        HASH_Destroy(ff->md5_ctx);
+        SCMd5Free(ff->md5_ctx);
     if (ff->sha1_ctx)
-        HASH_Destroy(ff->sha1_ctx);
+        SCSha1Free(ff->sha1_ctx);
     if (ff->sha256_ctx)
-        HASH_Destroy(ff->sha256_ctx);
-#endif
+        SCSha256Free(ff->sha256_ctx);
     SCFree(ff);
 }
 
 void FileContainerAdd(FileContainer *ffc, File *ff)
 {
+    SCLogDebug("ffc %p ff %p", ffc, ff);
     if (ffc->head == NULL || ffc->tail == NULL) {
         ffc->head = ffc->tail = ff;
     } else {
@@ -553,29 +609,9 @@ void FileContainerAdd(FileContainer *ffc, File *ff)
  */
 int FileStore(File *ff)
 {
+    SCLogDebug("ff %p", ff);
     ff->flags |= FILE_STORE;
     SCReturnInt(0);
-}
-
-/**
- *  \brief Set the TX id for a file
- *
- *  \param ff The file to store
- *  \param txid the tx id
- */
-int FileSetTx(File *ff, uint64_t txid)
-{
-    SCLogDebug("ff %p txid %"PRIu64, ff, txid);
-    if (ff != NULL)
-        ff->txid = txid;
-    SCReturnInt(0);
-}
-
-void FileContainerSetTx(FileContainer *ffc, uint64_t tx_id)
-{
-    if (ffc && ffc->tail) {
-        (void)FileSetTx(ffc->tail, tx_id);
-    }
 }
 
 /**
@@ -605,23 +641,30 @@ static int FileStoreNoStoreCheck(File *ff)
     SCReturnInt(0);
 }
 
-static int AppendData(File *file, const uint8_t *data, uint32_t data_len)
+static int AppendData(
+        const StreamingBufferConfig *sbcfg, File *file, const uint8_t *data, uint32_t data_len)
 {
-    if (StreamingBufferAppendNoTrack(file->sb, data, data_len) != 0) {
+    DEBUG_VALIDATE_BUG_ON(
+            data_len > BIT_U32(26)); // 64MiB as a limit per chunk seems already excessive
+
+    SCLogDebug("file %p data_len %u", file, data_len);
+    if (StreamingBufferAppendNoTrack(file->sb, sbcfg, data, data_len) != 0) {
+        SCLogDebug("file %p StreamingBufferAppendNoTrack failed", file);
         SCReturnInt(-1);
     }
 
-#ifdef HAVE_NSS
     if (file->md5_ctx) {
-        HASH_Update(file->md5_ctx, data, data_len);
+        SCMd5Update(file->md5_ctx, data, data_len);
     }
     if (file->sha1_ctx) {
-        HASH_Update(file->sha1_ctx, data, data_len);
+        SCSha1Update(file->sha1_ctx, data, data_len);
     }
     if (file->sha256_ctx) {
-        HASH_Update(file->sha256_ctx, data, data_len);
+        SCLogDebug("SHA256 file %p data %p data_len %u", file, data, data_len);
+        SCSha256Update(file->sha256_ctx, data, data_len);
+    } else {
+        SCLogDebug("NO SHA256 file %p data %p data_len %u", file, data, data_len);
     }
-#endif
     SCReturnInt(0);
 }
 
@@ -647,7 +690,8 @@ static void FileFlagGap(File *ff) {
  *  \retval -1 error
  *  \retval -2 no store for this file
  */
-static int FileAppendDataDo(File *ff, const uint8_t *data, uint32_t data_len)
+static int FileAppendDataDo(
+        const StreamingBufferConfig *sbcfg, File *ff, const uint8_t *data, uint32_t data_len)
 {
     SCEnter();
 #ifdef DEBUG_VALIDATION
@@ -667,27 +711,26 @@ static int FileAppendDataDo(File *ff, const uint8_t *data, uint32_t data_len)
         SCReturnInt(-1);
     }
 
-    if ((ff->flags & FILE_USE_DETECT) == 0 &&
-            FileStoreNoStoreCheck(ff) == 1) {
-#ifdef HAVE_NSS
+    if (g_detect_disabled && FileStoreNoStoreCheck(ff) == 1) {
         int hash_done = 0;
         /* no storage but forced hashing */
         if (ff->md5_ctx) {
-            HASH_Update(ff->md5_ctx, data, data_len);
+            SCMd5Update(ff->md5_ctx, data, data_len);
             hash_done = 1;
         }
         if (ff->sha1_ctx) {
-            HASH_Update(ff->sha1_ctx, data, data_len);
+            SCSha1Update(ff->sha1_ctx, data, data_len);
             hash_done = 1;
         }
         if (ff->sha256_ctx) {
-            HASH_Update(ff->sha256_ctx, data, data_len);
+            SCLogDebug("file %p data %p data_len %u", ff, data, data_len);
+            SCSha256Update(ff->sha256_ctx, data, data_len);
             hash_done = 1;
         }
 
         if (hash_done)
             SCReturnInt(0);
-#endif
+
         if (g_file_force_tracking || (!(ff->flags & FILE_NOTRACK)))
             SCReturnInt(0);
 
@@ -698,7 +741,7 @@ static int FileAppendDataDo(File *ff, const uint8_t *data, uint32_t data_len)
 
     SCLogDebug("appending %"PRIu32" bytes", data_len);
 
-    int r = AppendData(ff, data, data_len);
+    int r = AppendData(sbcfg, ff, data, data_len);
     if (r != 0) {
         ff->state = FILE_STATE_ERROR;
         SCReturnInt(r);
@@ -719,14 +762,15 @@ static int FileAppendDataDo(File *ff, const uint8_t *data, uint32_t data_len)
  *  \retval -1 error
  *  \retval -2 no store for this file
  */
-int FileAppendData(FileContainer *ffc, const uint8_t *data, uint32_t data_len)
+int FileAppendData(FileContainer *ffc, const StreamingBufferConfig *sbcfg, const uint8_t *data,
+        uint32_t data_len)
 {
     SCEnter();
 
-    if (ffc == NULL || ffc->tail == NULL || data_len == 0) {
+    if (ffc == NULL || ffc->tail == NULL || data_len == 0 || sbcfg == NULL) {
         SCReturnInt(-1);
     }
-    int r = FileAppendDataDo(ffc->tail, data, data_len);
+    int r = FileAppendDataDo(sbcfg, ffc->tail, data, data_len);
     SCReturnInt(r);
 }
 
@@ -743,7 +787,7 @@ int FileAppendData(FileContainer *ffc, const uint8_t *data, uint32_t data_len)
  *  \retval -1 error
  *  \retval -2 no store for this file
  */
-int FileAppendDataById(FileContainer *ffc, uint32_t track_id,
+int FileAppendDataById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len)
 {
     SCEnter();
@@ -754,7 +798,7 @@ int FileAppendDataById(FileContainer *ffc, uint32_t track_id,
     File *ff = ffc->head;
     for ( ; ff != NULL; ff = ff->next) {
         if (track_id == ff->file_track_id) {
-            int r = FileAppendDataDo(ff, data, data_len);
+            int r = FileAppendDataDo(sbcfg, ff, data, data_len);
             SCReturnInt(r);
         }
     }
@@ -774,7 +818,7 @@ int FileAppendDataById(FileContainer *ffc, uint32_t track_id,
  *  \retval -1 error
  *  \retval -2 no store for this file
  */
-int FileAppendGAPById(FileContainer *ffc, uint32_t track_id,
+int FileAppendGAPById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len)
 {
     SCEnter();
@@ -788,7 +832,7 @@ int FileAppendGAPById(FileContainer *ffc, uint32_t track_id,
             FileFlagGap(ff);
             SCLogDebug("FILE_HAS_GAPS set");
 
-            int r = FileAppendDataDo(ff, data, data_len);
+            int r = FileAppendDataDo(sbcfg, ff, data, data_len);
             SCReturnInt(r);
         }
     }
@@ -853,7 +897,7 @@ static File *FileOpenFile(FileContainer *ffc, const StreamingBufferConfig *sbcfg
 
     ff->sb = StreamingBufferInit(sbcfg);
     if (ff->sb == NULL) {
-        FileFree(ff);
+        FileFree(ff, sbcfg);
         SCReturnPtr(NULL, "File");
     }
     SCLogDebug("ff->sb %p", ff->sb);
@@ -880,31 +924,17 @@ static File *FileOpenFile(FileContainer *ffc, const StreamingBufferConfig *sbcfg
         SCLogDebug("not doing sha256 for this file");
         ff->flags |= FILE_NOSHA256;
     }
-    if (!g_detect_disabled && flags & FILE_USE_DETECT) {
-        SCLogDebug("considering content_inspect tracker when pruning");
-        ff->flags |= FILE_USE_DETECT;
-    }
 
-#ifdef HAVE_NSS
     if (!(ff->flags & FILE_NOMD5) || g_file_force_md5) {
-        ff->md5_ctx = HASH_Create(HASH_AlgMD5);
-        if (ff->md5_ctx != NULL) {
-            HASH_Begin(ff->md5_ctx);
-        }
+        ff->md5_ctx = SCMd5New();
     }
     if (!(ff->flags & FILE_NOSHA1) || g_file_force_sha1) {
-        ff->sha1_ctx = HASH_Create(HASH_AlgSHA1);
-        if (ff->sha1_ctx != NULL) {
-            HASH_Begin(ff->sha1_ctx);
-        }
+        ff->sha1_ctx = SCSha1New();
     }
     if (!(ff->flags & FILE_NOSHA256) || g_file_force_sha256) {
-        ff->sha256_ctx = HASH_Create(HASH_AlgSHA256);
-        if (ff->sha256_ctx != NULL) {
-            HASH_Begin(ff->sha256_ctx);
-        }
+        ff->sha256_ctx = SCSha256New();
+        SCLogDebug("ff %p ff->sha256_ctx %p", ff, ff->sha256_ctx);
     }
-#endif
 
     ff->state = FILE_STATE_OPENED;
     SCLogDebug("flowfile state transitioned to FILE_STATE_OPENED");
@@ -913,9 +943,12 @@ static File *FileOpenFile(FileContainer *ffc, const StreamingBufferConfig *sbcfg
 
     FileContainerAdd(ffc, ff);
 
+    /* set default window and min inspection size */
+    FileSetInspectSizes(ff, FILEDATA_CONTENT_INSPECT_WINDOW, FILEDATA_CONTENT_INSPECT_MIN_SIZE);
+
+    ff->size += data_len;
     if (data != NULL) {
-        ff->size += data_len;
-        if (AppendData(ff, data, data_len) != 0) {
+        if (AppendData(sbcfg, ff, data, data_len) != 0) {
             ff->state = FILE_STATE_ERROR;
             SCReturnPtr(NULL, "File");
         }
@@ -934,6 +967,7 @@ int FileOpenFileWithId(FileContainer *ffc, const StreamingBufferConfig *sbcfg,
         uint32_t track_id, const uint8_t *name, uint16_t name_len,
         const uint8_t *data, uint32_t data_len, uint16_t flags)
 {
+    SCLogDebug("ffc %p track_id %u", ffc, track_id);
     File *ff = FileOpenFile(ffc, sbcfg, name, name_len, data, data_len, flags);
     if (ff == NULL)
         return -1;
@@ -942,7 +976,7 @@ int FileOpenFileWithId(FileContainer *ffc, const StreamingBufferConfig *sbcfg,
     return 0;
 }
 
-int FileCloseFilePtr(File *ff, const uint8_t *data,
+int FileCloseFilePtr(File *ff, const StreamingBufferConfig *sbcfg, const uint8_t *data,
         uint32_t data_len, uint16_t flags)
 {
     SCEnter();
@@ -955,27 +989,29 @@ int FileCloseFilePtr(File *ff, const uint8_t *data,
         SCReturnInt(-1);
     }
 
+    ff->size += data_len;
     if (data != NULL) {
-        ff->size += data_len;
         if (ff->flags & FILE_NOSTORE) {
-#ifdef HAVE_NSS
             /* no storage but hashing */
             if (ff->md5_ctx)
-                HASH_Update(ff->md5_ctx, data, data_len);
+                SCMd5Update(ff->md5_ctx, data, data_len);
             if (ff->sha1_ctx)
-                HASH_Update(ff->sha1_ctx, data, data_len);
-            if (ff->sha256_ctx)
-                HASH_Update(ff->sha256_ctx, data, data_len);
-#endif
-        } else {
-            if (AppendData(ff, data, data_len) != 0) {
-                ff->state = FILE_STATE_ERROR;
-                SCReturnInt(-1);
+                SCSha1Update(ff->sha1_ctx, data, data_len);
+            if (ff->sha256_ctx) {
+                SCLogDebug("file %p data %p data_len %u", ff, data, data_len);
+                SCSha256Update(ff->sha256_ctx, data, data_len);
             }
+        }
+        if (AppendData(sbcfg, ff, data, data_len) != 0) {
+            ff->state = FILE_STATE_ERROR;
+            SCReturnInt(-1);
         }
     }
 
     if ((flags & FILE_TRUNCATED) || (ff->flags & FILE_HAS_GAPS)) {
+        SCLogDebug("flags FILE_TRUNCATED %s", (flags & FILE_TRUNCATED) ? "true" : "false");
+        SCLogDebug("ff->flags FILE_HAS_GAPS %s", (ff->flags & FILE_HAS_GAPS) ? "true" : "false");
+
         ff->state = FILE_STATE_TRUNCATED;
         SCLogDebug("flowfile state transitioned to FILE_STATE_TRUNCATED");
 
@@ -983,31 +1019,29 @@ int FileCloseFilePtr(File *ff, const uint8_t *data,
             SCLogDebug("not storing this file");
             ff->flags |= FILE_NOSTORE;
         } else {
-#ifdef HAVE_NSS
             if (g_file_force_sha256 && ff->sha256_ctx) {
+                SCLogDebug("file %p data %p data_len %u", ff, data, data_len);
                 FileEndSha256(ff);
             }
-#endif
         }
     } else {
         ff->state = FILE_STATE_CLOSED;
         SCLogDebug("flowfile state transitioned to FILE_STATE_CLOSED");
 
-#ifdef HAVE_NSS
         if (ff->md5_ctx) {
-            unsigned int len = 0;
-            HASH_End(ff->md5_ctx, ff->md5, &len, sizeof(ff->md5));
+            SCMd5Finalize(ff->md5_ctx, ff->md5, sizeof(ff->md5));
+            ff->md5_ctx = NULL;
             ff->flags |= FILE_MD5;
         }
         if (ff->sha1_ctx) {
-            unsigned int len = 0;
-            HASH_End(ff->sha1_ctx, ff->sha1, &len, sizeof(ff->sha1));
+            SCSha1Finalize(ff->sha1_ctx, ff->sha1, sizeof(ff->sha1));
+            ff->sha1_ctx = NULL;
             ff->flags |= FILE_SHA1;
         }
         if (ff->sha256_ctx) {
+            SCLogDebug("file %p data %p data_len %u", ff, data, data_len);
             FileEndSha256(ff);
         }
-#endif
     }
 
     SCReturnInt(0);
@@ -1024,7 +1058,7 @@ int FileCloseFilePtr(File *ff, const uint8_t *data,
  *  \retval 0 ok
  *  \retval -1 error
  */
-int FileCloseFile(FileContainer *ffc, const uint8_t *data,
+int FileCloseFile(FileContainer *ffc, const StreamingBufferConfig *sbcfg, const uint8_t *data,
         uint32_t data_len, uint16_t flags)
 {
     SCEnter();
@@ -1033,14 +1067,14 @@ int FileCloseFile(FileContainer *ffc, const uint8_t *data,
         SCReturnInt(-1);
     }
 
-    if (FileCloseFilePtr(ffc->tail, data, data_len, flags) == -1) {
+    if (FileCloseFilePtr(ffc->tail, sbcfg, data, data_len, flags) == -1) {
         SCReturnInt(-1);
     }
 
     SCReturnInt(0);
 }
 
-int FileCloseFileById(FileContainer *ffc, uint32_t track_id,
+int FileCloseFileById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
         const uint8_t *data, uint32_t data_len, uint16_t flags)
 {
     SCEnter();
@@ -1052,7 +1086,7 @@ int FileCloseFileById(FileContainer *ffc, uint32_t track_id,
     File *ff = ffc->head;
     for ( ; ff != NULL; ff = ff->next) {
         if (track_id == ff->file_track_id) {
-            int r = FileCloseFilePtr(ff, data, data_len, flags);
+            int r = FileCloseFilePtr(ff, sbcfg, data, data_len, flags);
             SCReturnInt(r);
         }
     }
@@ -1083,78 +1117,13 @@ void FileUpdateFlowFileFlags(Flow *f, uint16_t set_file_flags, uint8_t direction
             f->file_flags, set_file_flags, g_file_flow_mask);
 
     if (set_file_flags != 0 && f->alproto != ALPROTO_UNKNOWN && f->alstate != NULL) {
-        uint16_t per_file_flags = 0;
-#ifdef HAVE_MAGIC
-        if (set_file_flags & (FLOWFILE_NO_MAGIC_TS|FLOWFILE_NO_MAGIC_TC))
-            per_file_flags |= FILE_NOMAGIC;
-#endif
-#ifdef HAVE_NSS
-        if (set_file_flags & (FLOWFILE_NO_MD5_TS|FLOWFILE_NO_MD5_TC))
-            per_file_flags |= FILE_NOMD5;
-        if (set_file_flags & (FLOWFILE_NO_SHA1_TS|FLOWFILE_NO_SHA1_TC))
-            per_file_flags |= FILE_NOSHA1;
-        if (set_file_flags & (FLOWFILE_NO_SHA256_TS|FLOWFILE_NO_SHA256_TC))
-            per_file_flags |= FILE_NOSHA256;
-#endif
-        if (set_file_flags & (FLOWFILE_NO_SIZE_TS|FLOWFILE_NO_SIZE_TC))
-            per_file_flags |= FILE_NOTRACK;
-        if (set_file_flags & (FLOWFILE_NO_STORE_TS|FLOWFILE_NO_STORE_TC))
-            per_file_flags |= FILE_NOSTORE;
-
-        FileContainer *ffc = AppLayerParserGetFiles(f, direction);
-        if (ffc != NULL) {
-            for (File *ptr = ffc->head; ptr != NULL; ptr = ptr->next) {
-                ptr->flags |= per_file_flags;
-
-#ifdef HAVE_NSS
-                /* destroy any ctx we may have so far */
-                if ((per_file_flags & FILE_NOSHA256) &&
-                        ptr->sha256_ctx != NULL)
-                {
-                    HASH_Destroy(ptr->sha256_ctx);
-                    ptr->sha256_ctx = NULL;
-                }
-                if ((per_file_flags & FILE_NOSHA1) &&
-                    ptr->sha1_ctx != NULL)
-                {
-                    HASH_Destroy(ptr->sha1_ctx);
-                    ptr->sha1_ctx = NULL;
-                }
-                if ((per_file_flags & FILE_NOMD5) &&
-                        ptr->md5_ctx != NULL)
-                {
-                    HASH_Destroy(ptr->md5_ctx);
-                    ptr->md5_ctx = NULL;
-                }
-#endif
+        AppLayerStateData *sd = AppLayerParserGetStateData(f->proto, f->alproto, f->alstate);
+        if (sd != NULL) {
+            if ((sd->file_flags & f->file_flags) != f->file_flags) {
+                SCLogDebug("state data: updating file_flags %04x with flow file_flags %04x",
+                        sd->file_flags, f->file_flags);
+                sd->file_flags |= f->file_flags;
             }
-        }
-    }
-}
-
-
-
-/**
- *  \brief set no store flag, close file if needed
- *
- *  \param ff file
- */
-static void FileDisableStoringForFile(File *ff)
-{
-    SCEnter();
-
-    if (ff == NULL) {
-        SCReturn;
-    }
-
-    SCLogDebug("not storing this file");
-    ff->flags |= FILE_NOSTORE;
-
-    if (ff->state == FILE_STATE_OPENED && FileDataSize(ff) >= (uint64_t)FileMagicSize()) {
-        if (g_file_force_md5 == 0 && g_file_force_sha1 == 0 && g_file_force_sha256 == 0
-                && g_file_force_tracking == 0) {
-            (void)FileCloseFilePtr(ff, NULL, 0,
-                    (FILE_TRUNCATED|FILE_NOSTORE));
         }
     }
 }
@@ -1166,29 +1135,16 @@ static void FileDisableStoringForFile(File *ff)
  *  \param direction flow direction
  *  \param tx_id transaction id
  */
-void FileDisableStoringForTransaction(Flow *f, uint8_t direction, uint64_t tx_id)
+void FileDisableStoringForTransaction(Flow *f, const uint8_t direction, void *tx, uint64_t tx_id)
 {
-    File *ptr = NULL;
-
-    DEBUG_ASSERT_FLOW_LOCKED(f);
-
-    SCEnter();
-
-    FileContainer *ffc = AppLayerParserGetFiles(f, direction);
-    if (ffc != NULL) {
-        for (ptr = ffc->head; ptr != NULL; ptr = ptr->next) {
-            if (ptr->txid == tx_id) {
-                if (ptr->flags & FILE_STORE) {
-                    /* weird, already storing -- let it continue*/
-                    SCLogDebug("file is already being stored");
-                } else {
-                    FileDisableStoringForFile(ptr);
-                }
-            }
+    if (g_file_force_filestore == 0) {
+        AppLayerTxData *txd = AppLayerParserGetTxData(f->proto, f->alproto, tx);
+        if (direction & STREAM_TOSERVER) {
+            txd->file_flags |= FLOWFILE_NO_STORE_TS;
+        } else {
+            txd->file_flags |= FLOWFILE_NO_STORE_TC;
         }
     }
-
-    SCReturn;
 }
 
 /**
@@ -1212,35 +1168,7 @@ void FileStoreFileById(FileContainer *fc, uint32_t file_id)
     }
 }
 
-void FileStoreAllFilesForTx(FileContainer *fc, uint64_t tx_id)
-{
-    File *ptr = NULL;
-
-    SCEnter();
-
-    if (fc != NULL) {
-        for (ptr = fc->head; ptr != NULL; ptr = ptr->next) {
-            if (ptr->txid == tx_id) {
-                FileStore(ptr);
-            }
-        }
-    }
-}
-
-void FileStoreAllFiles(FileContainer *fc)
-{
-    File *ptr = NULL;
-
-    SCEnter();
-
-    if (fc != NULL) {
-        for (ptr = fc->head; ptr != NULL; ptr = ptr->next) {
-            FileStore(ptr);
-        }
-    }
-}
-
-void FileTruncateAllOpenFiles(FileContainer *fc)
+static void FileTruncateAllOpenFiles(FileContainer *fc, const StreamingBufferConfig *sbcfg)
 {
     File *ptr = NULL;
 
@@ -1249,22 +1177,29 @@ void FileTruncateAllOpenFiles(FileContainer *fc)
     if (fc != NULL) {
         for (ptr = fc->head; ptr != NULL; ptr = ptr->next) {
             if (ptr->state == FILE_STATE_OPENED) {
-                FileCloseFilePtr(ptr, NULL, 0, FILE_TRUNCATED);
+                FileCloseFilePtr(ptr, sbcfg, NULL, 0, FILE_TRUNCATED);
             }
         }
     }
 }
 
+void FilesPrune(FileContainer *fc, const StreamingBufferConfig *sbcfg, const bool trunc)
+{
+    if (trunc) {
+        FileTruncateAllOpenFiles(fc, sbcfg);
+    }
+    FilePrune(fc, sbcfg);
+}
+
 /**
  * \brief Finish the SHA256 calculation.
  */
-#ifdef HAVE_NSS
 static void FileEndSha256(File *ff)
 {
+    SCLogDebug("ff %p ff->size %" PRIu64, ff, ff->size);
     if (!(ff->flags & FILE_SHA256) && ff->sha256_ctx) {
-        unsigned int len = 0;
-        HASH_End(ff->sha256_ctx, ff->sha256, &len, sizeof(ff->sha256));
+        SCSha256Finalize(ff->sha256_ctx, ff->sha256, sizeof(ff->sha256));
+        ff->sha256_ctx = NULL;
         ff->flags |= FILE_SHA256;
     }
 }
-#endif

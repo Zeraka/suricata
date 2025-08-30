@@ -61,39 +61,43 @@ void DetectPriorityRegister (void)
 static int DetectPrioritySetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
     char copy_str[128] = "";
+    size_t pcre2len;
 
-    int ret = 0;
-    int ov[MAX_SUBSTRINGS];
-
-    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, 30);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, rawstr, 0, 0);
     if (ret < 0) {
-        SCLogError(SC_ERR_PCRE_MATCH, "Invalid Priority in Signature "
-                     "- %s", rawstr);
+        SCLogError("Invalid Priority in Signature "
+                   "- %s",
+                rawstr);
+        if (match)
+            pcre2_match_data_free(match);
         return -1;
     }
 
-    ret = pcre_copy_substring((char *)rawstr, ov, 30, 1, copy_str, sizeof(copy_str));
+    pcre2len = sizeof(copy_str);
+    ret = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)copy_str, &pcre2len);
     if (ret < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
+        SCLogError("pcre2_substring_copy_bynumber failed");
+        pcre2_match_data_free(match);
         return -1;
     }
 
-    long prio = 0;
+    pcre2_match_data_free(match);
     char *endptr = NULL;
-    prio = strtol(copy_str, &endptr, 10);
+    int prio = (int)strtol(copy_str, &endptr, 10);
     if (endptr == NULL || *endptr != '\0') {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "Saw an invalid character as arg "
+        SCLogError("Saw an invalid character as arg "
                    "to priority keyword");
         return -1;
     }
 
-    if (s->init_data->init_flags & SIG_FLAG_INIT_PRIO_EXPLICT) {
-        SCLogWarning(SC_ERR_CONFLICTING_RULE_KEYWORDS, "duplicate priority "
-                "keyword. Using highest priority in the rule");
+    if (s->init_data->init_flags & SIG_FLAG_INIT_PRIO_EXPLICIT) {
+        SCLogWarning("duplicate priority "
+                     "keyword. Using highest priority in the rule");
         s->prio = MIN(s->prio, prio);
     } else {
         s->prio = prio;
-        s->init_data->init_flags |= SIG_FLAG_INIT_PRIO_EXPLICT;
+        s->init_data->init_flags |= SIG_FLAG_INIT_PRIO_EXPLICIT;
     }
     return 0;
 }

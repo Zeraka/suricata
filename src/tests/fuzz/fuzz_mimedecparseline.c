@@ -1,27 +1,16 @@
 /**
  * @file
  * @author Philippe Antoine <contact@catenacyber.fr>
- * fuzz target for ConfYamlLoadString
+ * fuzz target for SCConfYamlLoadString
  */
 
-
 #include "suricata-common.h"
-#include "util-decode-mime.h"
+#include "suricata.h"
+#include "rust.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static int initialized = 0;
-static int dummy = 0;
-
-static int MimeParserDataFromFileCB(const uint8_t *chunk, uint32_t len,
-                                    MimeDecParseState *state)
-{
-    if (len > 0 && chunk[len-1] == 0) {
-        // do not get optimizd away
-        dummy++;
-    }
-    return MIME_DEC_OK;
-}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -31,22 +20,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         setenv("SC_LOG_FILE", "/dev/null", 0);
         //global init
         InitGlobal();
-        run_mode = RUNMODE_UNITTEST;
+        SCRunmodeSet(RUNMODE_UNITTEST);
         initialized = 1;
     }
 
-    uint32_t line_count = 0;
-
-    MimeDecParseState *state = MimeDecInitParser(&line_count, MimeParserDataFromFileCB);
-    MimeDecEntity *msg_head = state->msg;
+    uint32_t events;
+    FileContainer *files = FileContainerAlloc();
+    StreamingBufferConfig sbcfg = STREAMING_BUFFER_CONFIG_INITIALIZER;
+    MimeStateSMTP *state = SCMimeSmtpStateInit(files, &sbcfg);
     const uint8_t * buffer = data;
     while (1) {
         uint8_t * next = memchr(buffer, '\n', size);
         if (next == NULL) {
-            (void) MimeDecParseLine(buffer, size, 1, state);
+            if (SCMimeSmtpGetState(state) >= MimeSmtpBody)
+                (void)SCSmtpMimeParseLine(buffer, (uint32_t)size, 0, &events, state);
             break;
         } else {
-            (void) MimeDecParseLine(buffer, next - buffer, 1, state);
+            (void)SCSmtpMimeParseLine(buffer, (uint32_t)(next - buffer), 1, &events, state);
             if (buffer + size < next + 1) {
                 break;
             }
@@ -55,10 +45,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
     }
     /* Completed */
-    (void)MimeDecParseComplete(state);
+    (void)SCSmtpMimeComplete(state);
     /* De Init parser */
-    MimeDecDeInitParser(state);
-    MimeDecFreeEntity(msg_head);
+    SCMimeSmtpStateFree(state);
+    FileContainerFree(files, &sbcfg);
 
     return 0;
 }

@@ -21,13 +21,11 @@
  * \author James Riden <jamesr@europe.com>
  */
 
-#ifndef __DECODE_PPPOE_H__
-#define __DECODE_PPPOE_H__
+#ifndef SURICATA_DECODE_PPPOE_H
+#define SURICATA_DECODE_PPPOE_H
 
-#include "decode.h"
-#include "threadvars.h"
-
-#define PPPOE_SESSION_HEADER_LEN 8
+// Session header length minus the protocol field
+#define PPPOE_SESSION_HEADER_MIN_LEN     7
 #define PPPOE_DISCOVERY_HEADER_MIN_LEN 6
 #define PPPOE_SESSION_GET_VERSION(hdr) ((hdr)->pppoe_version_type & 0xF0) >> 4
 #define PPPOE_SESSION_GET_TYPE(hdr) ((hdr)->pppoe_version_type & 0x0F)
@@ -78,5 +76,4 @@ typedef struct PPPOEDiscoveryHdr_
 
 void DecodePPPOERegisterTests(void);
 
-#endif /* __DECODE_PPPOE_H__ */
-
+#endif /* SURICATA_DECODE_PPPOE_H */

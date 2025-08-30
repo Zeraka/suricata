@@ -1,6 +1,8 @@
 Generic App Layer Keywords
 ==========================
 
+.. _rule-keyword-app-layer-protocol:
+
 app-layer-protocol
 ------------------
 
@@ -8,17 +10,43 @@ Match on the detected app-layer protocol.
 
 Syntax::
 
-    app-layer-protocol:[!]<protocol>;
+    app-layer-protocol:[!]<protocol>(,<mode>);
 
 Examples::
 
     app-layer-protocol:ssh;
     app-layer-protocol:!tls;
     app-layer-protocol:failed;
+    app-layer-protocol:!http,final;
+    app-layer-protocol:http,to_server; app-layer-protocol:tls,to_client;
+    app-layer-protocol:http2,final; app-layer-protocol:http1,original;
+    app-layer-protocol:unknown;
 
 A special value 'failed' can be used for matching on flows in which
 protocol detection failed. This can happen if Suricata doesn't know
 the protocol or when certain 'bail out' conditions happen.
+
+A special value 'unknown' can be used to match on a protocol being
+not yet known. It can not be negated.
+
+The different modes are
+* direction : protocol recognized on the direction of the current packet
+* to_server : protocol recognized in the direction to server
+* to_client : protocol recognized in the direction to client
+* either : tries to match protocols found on both directions
+* final : final protocol chosen by Suricata for parsing
+* original : original protocol (in case of protocol change)
+
+By default, (if no mode is specified), the mode is ``direction``.
+
+.. note:: when negation is used, like ``!http``, it will not match on the
+   "unknown" state in the flow.
+
+Here is an example of a rule matching non-http traffic on port 80:
+
+.. container:: example-rule
+
+    alert tcp any any -> any 80 (msg:"non-HTTP traffic over HTTP standard port"; flow:to_server; app-layer-protocol:!http,final; sid:1; )
 
 .. _proto-detect-bail-out:
 
@@ -78,3 +106,16 @@ applayer_proto_detection_skipped
 
 Protocol detection was skipped because of :ref:`proto-detect-bail-out`.
 
+app-layer-state
+---------------
+
+Match on the detected app-layer protocol transaction state.
+
+Syntax::
+
+    app-layer-state:[<>]<state>;
+
+Examples::
+
+    app-layer-state:request_headers;
+    app-layer-state:>request_body;

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2014 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,20 +21,24 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __TM_MODULES_H__
-#define __TM_MODULES_H__
+#ifndef SURICATA_TM_MODULES_H
+#define SURICATA_TM_MODULES_H
 
 #include "tm-threads-common.h"
 #include "threadvars.h"
+#include "decode.h"
 
 /* thread flags */
 #define TM_FLAG_RECEIVE_TM      0x01
 #define TM_FLAG_DECODE_TM       0x02
-#define TM_FLAG_STREAM_TM       0x04
-#define TM_FLAG_DETECT_TM       0x08
-#define TM_FLAG_LOGAPI_TM       0x10 /**< TM is run by Log API */
-#define TM_FLAG_MANAGEMENT_TM   0x20
-#define TM_FLAG_COMMAND_TM      0x40
+#define TM_FLAG_FLOWWORKER_TM   0x04
+#define TM_FLAG_VERDICT_TM      0x08
+#define TM_FLAG_MANAGEMENT_TM   0x10
+#define TM_FLAG_COMMAND_TM      0x20
+
+/* all packet modules combined */
+#define TM_FLAG_PACKET_ALL                                                                         \
+    (TM_FLAG_RECEIVE_TM | TM_FLAG_DECODE_TM | TM_FLAG_FLOWWORKER_TM | TM_FLAG_VERDICT_TM)
 
 typedef TmEcode (*ThreadInitFunc)(ThreadVars *, const void *, void **);
 typedef TmEcode (*ThreadDeinitFunc)(ThreadVars *, void *);
@@ -56,6 +60,12 @@ typedef struct TmModule_ {
     /** terminates the capture loop in PktAcqLoop */
     TmEcode (*PktAcqBreakLoop)(ThreadVars *, void *);
 
+    /** does a thread still have tasks to complete before it can be killed?
+     *  \retval bool
+     *  \param tv threadvars
+     *  \param thread_data thread module thread data (e.g. FlowWorkerThreadData for FlowWorker) */
+    bool (*ThreadBusy)(ThreadVars *tv, void *thread_data);
+
     TmEcode (*Management)(ThreadVars *, void *);
 
     /** global Init/DeInit */
@@ -64,8 +74,8 @@ typedef struct TmModule_ {
 #ifdef UNITTESTS
     void (*RegisterTests)(void);
 #endif
-    uint8_t cap_flags;   /**< Flags to indicate the capability requierment of
-                             the given TmModule */
+    uint8_t cap_flags; /**< Flags to indicate the capability requirement of
+                           the given TmModule */
     /* Other flags used by the module */
     uint8_t flags;
 } TmModule;
@@ -88,15 +98,14 @@ typedef struct OutputCtx_ {
 
 TmModule *TmModuleGetByName(const char *name);
 TmModule *TmModuleGetById(int id);
-int TmModuleGetIdByName(const char *name);
 int TmModuleGetIDForTM(TmModule *tm);
 TmEcode TmModuleRegister(char *name, int (*module_func)(ThreadVars *, Packet *, void *));
 void TmModuleDebugList(void);
 void TmModuleRegisterTests(void);
+#ifdef PROFILING
 const char * TmModuleTmmIdToString(TmmId id);
-
+#endif
 void TmModuleRunInit(void);
 void TmModuleRunDeInit(void);
 
-#endif /* __TM_MODULES_H__ */
-
+#endif /* SURICATA_TM_MODULES_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2019 Open Information Security Foundation
+/* Copyright (C) 2007-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,6 +27,7 @@
 
 #include "suricata-common.h"
 #include "suricata.h"
+#include "packet.h"
 #include "decode.h"
 #include "packet-queue.h"
 
@@ -41,12 +42,13 @@
 #include "source-nfq-prototypes.h"
 #include "action-globals.h"
 
+#include "util-datalink.h"
 #include "util-debug.h"
 #include "util-error.h"
 #include "util-byte.h"
 #include "util-cpu.h"
 #include "util-privs.h"
-#include "util-device.h"
+#include "util-device-private.h"
 
 #include "runmodes.h"
 
@@ -73,6 +75,7 @@ void TmModuleVerdictNFQRegister (void)
     tmm_modules[TMM_VERDICTNFQ].ThreadExitPrintStats = NULL;
     tmm_modules[TMM_VERDICTNFQ].ThreadDeinit = NULL;
     tmm_modules[TMM_VERDICTNFQ].cap_flags = SC_CAP_NET_ADMIN;
+    tmm_modules[TMM_VERDICTNFQ].flags = TM_FLAG_VERDICT_TM;
 }
 
 void TmModuleDecodeNFQRegister (void)
@@ -87,17 +90,18 @@ void TmModuleDecodeNFQRegister (void)
 
 static TmEcode NoNFQSupportExit(ThreadVars *tv, const void *initdata, void **data)
 {
-    FatalError(SC_ERR_NFQ_NOSUPPORT,"Error creating thread %s: you do not "
-            "have support for nfqueue enabled please recompile with "
-            "--enable-nfqueue", tv->name);
+    FatalError("Error creating thread %s: you do not "
+               "have support for nfqueue enabled please recompile with "
+               "--enable-nfqueue",
+            tv->name);
 }
 
 #else /* we do have NFQ support */
 
-extern int max_pending_packets;
+extern uint32_t max_pending_packets;
 
 #define MAX_ALREADY_TREATED 5
-#define NFQ_VERDICT_RETRY_TIME 3
+#define NFQ_VERDICT_RETRY_COUNT 3
 static int already_seen_warning;
 static int runmode_workers;
 
@@ -117,8 +121,6 @@ typedef struct NFQThreadVars_
 
     char *data; /** Per function and thread data */
     int datalen; /** Length of per function and thread data */
-
-    CaptureStats stats;
 } NFQThreadVars;
 /* shared vars for all for nfq queues and threads */
 static NFQGlobalVars nfq_g;
@@ -141,7 +143,8 @@ static TmEcode DecodeNFQ(ThreadVars *, Packet *, void *);
 static TmEcode DecodeNFQThreadInit(ThreadVars *, const void *, void **);
 static TmEcode DecodeNFQThreadDeinit(ThreadVars *tv, void *data);
 
-static TmEcode NFQSetVerdict(Packet *p);
+static TmEcode NFQSetVerdict(Packet *p, const uint32_t mark_value, const bool mark_modified);
+static void NFQReleasePacket(Packet *p);
 
 typedef enum NFQMode_ {
     NFQ_ACCEPT_MODE,
@@ -185,6 +188,7 @@ void TmModuleVerdictNFQRegister (void)
     tmm_modules[TMM_VERDICTNFQ].ThreadInit = VerdictNFQThreadInit;
     tmm_modules[TMM_VERDICTNFQ].Func = VerdictNFQ;
     tmm_modules[TMM_VERDICTNFQ].ThreadDeinit = VerdictNFQThreadDeinit;
+    tmm_modules[TMM_VERDICTNFQ].flags = TM_FLAG_VERDICT_TM;
 }
 
 void TmModuleDecodeNFQRegister (void)
@@ -201,7 +205,7 @@ void TmModuleDecodeNFQRegister (void)
  *  \param  quiet   It tells the mode of operation, if it is TRUE nothing will
  *                  be get printed.
  */
-void NFQInitConfig(char quiet)
+void NFQInitConfig(bool quiet)
 {
     intmax_t value = 0;
     const char *nfq_mode = NULL;
@@ -211,7 +215,7 @@ void NFQInitConfig(char quiet)
 
     memset(&nfq_config,  0, sizeof(nfq_config));
 
-    if ((ConfGet("nfq.mode", &nfq_mode)) == 0) {
+    if ((SCConfGet("nfq.mode", &nfq_mode)) == 0) {
         nfq_config.mode = NFQ_ACCEPT_MODE;
     } else {
         if (!strcmp("accept", nfq_mode)) {
@@ -221,52 +225,50 @@ void NFQInitConfig(char quiet)
         }  else if (!strcmp("route", nfq_mode)) {
             nfq_config.mode = NFQ_ROUTE_MODE;
         } else {
-            FatalError(SC_ERR_FATAL, "Unknown nfq.mode");
+            FatalError("Unknown nfq.mode");
         }
     }
 
-    (void)ConfGetBool("nfq.fail-open", (int *)&boolval);
+    (void)SCConfGetBool("nfq.fail-open", &boolval);
     if (boolval) {
 #ifdef HAVE_NFQ_SET_QUEUE_FLAGS
         SCLogInfo("Enabling fail-open on queue");
         nfq_config.flags |= NFQ_FLAG_FAIL_OPEN;
 #else
-        SCLogError(SC_ERR_NFQ_NOSUPPORT,
-                   "nfq.%s set but NFQ library has no support for it.", "fail-open");
+        SCLogError("nfq.%s set but NFQ library has no support for it.", "fail-open");
 #endif
     }
 
-    if ((ConfGetInt("nfq.repeat-mark", &value)) == 1) {
+    if ((SCConfGetInt("nfq.repeat-mark", &value)) == 1) {
         nfq_config.mark = (uint32_t)value;
     }
 
-    if ((ConfGetInt("nfq.repeat-mask", &value)) == 1) {
+    if ((SCConfGetInt("nfq.repeat-mask", &value)) == 1) {
         nfq_config.mask = (uint32_t)value;
     }
 
-    if ((ConfGetInt("nfq.bypass-mark", &value)) == 1) {
+    if ((SCConfGetInt("nfq.bypass-mark", &value)) == 1) {
         nfq_config.bypass_mark = (uint32_t)value;
     }
 
-    if ((ConfGetInt("nfq.bypass-mask", &value)) == 1) {
+    if ((SCConfGetInt("nfq.bypass-mask", &value)) == 1) {
         nfq_config.bypass_mask = (uint32_t)value;
     }
 
-    if ((ConfGetInt("nfq.route-queue", &value)) == 1) {
+    if ((SCConfGetInt("nfq.route-queue", &value)) == 1) {
         nfq_config.next_queue = ((uint32_t)value) << 16;
     }
 
-    if ((ConfGetInt("nfq.batchcount", &value)) == 1) {
+    if ((SCConfGetInt("nfq.batchcount", &value)) == 1) {
 #ifdef HAVE_NFQ_SET_VERDICT_BATCH
         if (value > 255) {
-            SCLogWarning(SC_ERR_INVALID_ARGUMENT, "nfq.batchcount cannot exceed 255.");
+            SCLogWarning("nfq.batchcount cannot exceed 255.");
             value = 255;
         }
         if (value > 1)
             nfq_config.batchcount = (uint8_t) (value - 1);
 #else
-        SCLogWarning(SC_ERR_NFQ_NOSUPPORT,
-                   "nfq.%s set but NFQ library has no support for it.", "batchcount");
+        SCLogWarning("nfq.%s set but NFQ library has no support for it.", "batchcount");
 #endif
     }
 
@@ -313,11 +315,10 @@ static void NFQVerdictCacheFlush(NFQQueueVars *t)
             ret = nfq_set_verdict_batch(t->qh,
                                         t->verdict_cache.packet_id,
                                         t->verdict_cache.verdict);
-    } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_TIME));
+    } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_COUNT));
 
     if (ret < 0) {
-        SCLogWarning(SC_ERR_NFQ_SET_VERDICT, "nfq_set_verdict_batch failed: %s",
-                     strerror(errno));
+        SCLogWarning("nfq_set_verdict_batch failed: %s", strerror(errno));
     } else {
         t->verdict_cache.len = 0;
         t->verdict_cache.mark_valid = 0;
@@ -325,7 +326,8 @@ static void NFQVerdictCacheFlush(NFQQueueVars *t)
 #endif
 }
 
-static int NFQVerdictCacheAdd(NFQQueueVars *t, Packet *p, uint32_t verdict)
+static int NFQVerdictCacheAdd(NFQQueueVars *t, Packet *p, const uint32_t verdict,
+        const uint32_t mark_value, const bool mark_modified)
 {
 #ifdef HAVE_NFQ_SET_VERDICT_BATCH
     if (t->verdict_cache.maxlen == 0)
@@ -334,13 +336,13 @@ static int NFQVerdictCacheAdd(NFQQueueVars *t, Packet *p, uint32_t verdict)
     if (p->flags & PKT_STREAM_MODIFIED || verdict == NF_DROP)
         goto flush;
 
-    if (p->flags & PKT_MARK_MODIFIED) {
+    if (mark_modified) {
         if (!t->verdict_cache.mark_valid) {
             if (t->verdict_cache.len)
                 goto flush;
             t->verdict_cache.mark_valid = 1;
-            t->verdict_cache.mark = p->nfq_v.mark;
-        } else if (t->verdict_cache.mark != p->nfq_v.mark) {
+            t->verdict_cache.mark = mark_value;
+        } else if (t->verdict_cache.mark != mark_value) {
             goto flush;
         }
     } else if (t->verdict_cache.mark_valid) {
@@ -407,6 +409,10 @@ static int NFQSetupPkt (Packet *p, struct nfq_q_handle *qh, void *data)
     char *pktdata;
     struct nfqnl_msg_packet_hdr *ph;
 
+    // Early release function -- will be updated once repeat
+    // mode handling has been done
+    p->ReleasePacket = PacketFreeOrRelease;
+
     ph = nfq_get_msg_packet_hdr(tb);
     if (ph != NULL) {
         p->nfq_v.id = SCNtohl(ph->packet_id);
@@ -423,18 +429,21 @@ static int NFQSetupPkt (Packet *p, struct nfq_q_handle *qh, void *data)
             already_seen_warning++;
             do {
                 ret = nfq_set_verdict(qh, p->nfq_v.id, NF_ACCEPT, 0, NULL);
-            } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_TIME));
+            } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_COUNT));
             if (ret < 0) {
-                SCLogWarning(SC_ERR_NFQ_SET_VERDICT,
-                             "nfq_set_verdict of %p failed %" PRId32 ": %s",
-                             p, ret, strerror(errno));
+                SCLogWarning(
+                        "nfq_set_verdict of %p failed %" PRId32 ": %s", p, ret, strerror(errno));
             }
             return -1 ;
         }
     }
+
+    // Switch to full featured release function
+    p->ReleasePacket = NFQReleasePacket;
     p->nfq_v.ifi  = nfq_get_indev(tb);
     p->nfq_v.ifo  = nfq_get_outdev(tb);
-    p->nfq_v.verdicted = 0;
+    /* coverity[missing_lock] */
+    p->nfq_v.verdicted = false;
 
 #ifdef NFQ_GET_PAYLOAD_SIGNED
     ret = nfq_get_payload(tb, &pktdata);
@@ -449,7 +458,7 @@ static int NFQSetupPkt (Packet *p, struct nfq_q_handle *qh, void *data)
             /* Will not be able to copy data ! Set length to 0
              * to trigger an error in packet decoding.
              * This is unlikely to happen */
-            SCLogWarning(SC_ERR_INVALID_ARGUMENTS, "NFQ sent too big packet");
+            SCLogWarning("NFQ sent too big packet");
             SET_PKT_LEN(p, 0);
         } else if (runmode_workers) {
             PacketSetData(p, (uint8_t *)pktdata, ret);
@@ -462,11 +471,13 @@ static int NFQSetupPkt (Packet *p, struct nfq_q_handle *qh, void *data)
         SET_PKT_LEN(p, 0);
     }
 
-    ret = nfq_get_timestamp(tb, &p->ts);
-    if (ret != 0 || p->ts.tv_sec == 0) {
-        memset (&p->ts, 0, sizeof(struct timeval));
-        gettimeofday(&p->ts, NULL);
+    struct timeval tv;
+    ret = nfq_get_timestamp(tb, &tv);
+    if (ret != 0 || tv.tv_sec == 0) {
+        memset(&tv, 0, sizeof(tv));
+        gettimeofday(&tv, NULL);
     }
+    p->ts = SCTIME_FROM_TIMEVAL(&tv);
 
     p->datalink = DLT_RAW;
     return 0;
@@ -474,9 +485,28 @@ static int NFQSetupPkt (Packet *p, struct nfq_q_handle *qh, void *data)
 
 static void NFQReleasePacket(Packet *p)
 {
-    if (unlikely(!p->nfq_v.verdicted)) {
-        PACKET_UPDATE_ACTION(p, ACTION_DROP);
-        NFQSetVerdict(p);
+    if (PacketIsNotTunnel(p)) {
+        if (unlikely(!p->nfq_v.verdicted)) {
+            PacketDrop(p, ACTION_DROP, PKT_DROP_REASON_NFQ_ERROR);
+            /* coverity[missing_lock] */
+            NFQSetVerdict(p, p->nfq_v.mark, p->nfq_v.mark_modified);
+            /* coverity[missing_lock] */
+            p->nfq_v.verdicted = true;
+        }
+    } else {
+        Packet *root_p = p->root ? p->root : p;
+        SCSpinlock *lock = &root_p->persistent.tunnel_lock;
+        SCSpinLock(lock);
+        const bool verdicted = p->nfq_v.verdicted;
+        // taken from root packet
+        const bool mark_modified = root_p->nfq_v.mark_modified;
+        const uint32_t mark_value = root_p->nfq_v.mark;
+        root_p->nfq_v.verdicted = true;
+        SCSpinUnlock(lock);
+        if (!verdicted) {
+            PacketDrop(p, ACTION_DROP, PKT_DROP_REASON_NFQ_ERROR);
+            NFQSetVerdict(p, mark_value, mark_modified);
+        }
     }
     PacketFreeOrRelease(p);
 }
@@ -489,16 +519,16 @@ static void NFQReleasePacket(Packet *p)
  */
 static int NFQBypassCallback(Packet *p)
 {
-    if (IS_TUNNEL_PKT(p)) {
+    if (PacketIsTunnel(p)) {
         /* real tunnels may have multiple flows inside them, so bypass can't
          * work for those. Rebuilt packets from IP fragments are fine. */
         if (p->flags & PKT_REBUILT_FRAGMENT) {
             Packet *tp = p->root ? p->root : p;
-            SCMutexLock(&tp->tunnel_mutex);
+            SCSpinLock(&tp->persistent.tunnel_lock);
             tp->nfq_v.mark = (nfq_config.bypass_mark & nfq_config.bypass_mask)
                 | (tp->nfq_v.mark & ~nfq_config.bypass_mask);
-            tp->flags |= PKT_MARK_MODIFIED;
-            SCMutexUnlock(&tp->tunnel_mutex);
+            tp->nfq_v.mark_modified = true;
+            SCSpinUnlock(&tp->persistent.tunnel_lock);
             return 1;
         }
         return 0;
@@ -506,7 +536,8 @@ static int NFQBypassCallback(Packet *p)
         /* coverity[missing_lock] */
         p->nfq_v.mark = (nfq_config.bypass_mark & nfq_config.bypass_mask)
                         | (p->nfq_v.mark & ~nfq_config.bypass_mask);
-        p->flags |= PKT_MARK_MODIFIED;
+        /* coverity[missing_lock] */
+        p->nfq_v.mark_modified = true;
     }
 
     return 1;
@@ -531,6 +562,7 @@ static int NFQCallBack(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     if (nfq_config.bypass_mask) {
         p->BypassPacketsFlow = NFQBypassCallback;
     }
+
     ret = NFQSetupPkt(p, qh, (void *)nfa);
     if (ret == -1) {
 #ifdef COUNTERS
@@ -546,8 +578,6 @@ static int NFQCallBack(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
         TmqhOutputPacketpool(tv, p);
         return 0;
     }
-
-    p->ReleasePacket = NFQReleasePacket;
 
 #ifdef COUNTERS
     NFQQueueVars *q = NFQGetQueue(ntv->nfq_index);
@@ -569,13 +599,13 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
     int opt;
     NFQQueueVars *q = NFQGetQueue(t->nfq_index);
     if (q == NULL) {
-        SCLogError(SC_ERR_NFQ_OPEN, "no queue for given index");
+        SCLogError("no queue for given index");
         return TM_ECODE_FAILED;
     }
     SCLogDebug("opening library handle");
     q->h = nfq_open();
     if (q->h == NULL) {
-        SCLogError(SC_ERR_NFQ_OPEN, "nfq_open() failed");
+        SCLogError("nfq_open() failed");
         return TM_ECODE_FAILED;
     }
 
@@ -585,20 +615,20 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
          * run. Ignoring the error seems to have no bad effects. */
         SCLogDebug("unbinding existing nf_queue handler for AF_INET (if any)");
         if (nfq_unbind_pf(q->h, AF_INET) < 0) {
-            FatalError(SC_ERR_FATAL, "nfq_unbind_pf() for AF_INET failed");
+            FatalError("nfq_unbind_pf() for AF_INET failed: %s", strerror(errno));
         }
         if (nfq_unbind_pf(q->h, AF_INET6) < 0) {
-            FatalError(SC_ERR_FATAL, "nfq_unbind_pf() for AF_INET6 failed");
+            FatalError("nfq_unbind_pf() for AF_INET6 failed");
         }
         nfq_g.unbind = 1;
 
         SCLogDebug("binding nfnetlink_queue as nf_queue handler for AF_INET and AF_INET6");
 
         if (nfq_bind_pf(q->h, AF_INET) < 0) {
-            FatalError(SC_ERR_FATAL, "nfq_bind_pf() for AF_INET failed");
+            FatalError("nfq_bind_pf() for AF_INET failed");
         }
         if (nfq_bind_pf(q->h, AF_INET6) < 0) {
-            FatalError(SC_ERR_FATAL, "nfq_bind_pf() for AF_INET6 failed");
+            FatalError("nfq_bind_pf() for AF_INET6 failed");
         }
     }
 
@@ -608,7 +638,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
      * callback function has access to it. */
     q->qh = nfq_create_queue(q->h, q->queue_num, &NFQCallBack, (void *)t);
     if (q->qh == NULL) {
-        SCLogError(SC_ERR_NFQ_CREATE_QUEUE, "nfq_create_queue failed");
+        SCLogError("nfq_create_queue failed");
         return TM_ECODE_FAILED;
     }
 
@@ -617,7 +647,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
     /* 05DC = 1500 */
     //if (nfq_set_mode(nfq_t->qh, NFQNL_COPY_PACKET, 0x05DC) < 0) {
     if (nfq_set_mode(q->qh, NFQNL_COPY_PACKET, 0xFFFF) < 0) {
-        SCLogError(SC_ERR_NFQ_SET_MODE, "can't set packet_copy mode");
+        SCLogError("can't set packet_copy mode");
         return TM_ECODE_FAILED;
     }
 
@@ -627,8 +657,8 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
 
         /* non-fatal if it fails */
         if (nfq_set_queue_maxlen(q->qh, queue_maxlen) < 0) {
-            SCLogWarning(SC_ERR_NFQ_MAXLEN, "can't set queue maxlen: your kernel probably "
-                    "doesn't support setting the queue length");
+            SCLogWarning("can't set queue maxlen: your kernel probably "
+                         "doesn't support setting the queue length");
         }
     }
 #endif /* HAVE_NFQ_MAXLEN */
@@ -647,9 +677,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
 #ifdef NETLINK_BROADCAST_SEND_ERROR
     if (setsockopt(q->fd, SOL_NETLINK,
                    NETLINK_BROADCAST_SEND_ERROR, &opt, sizeof(int)) == -1) {
-        SCLogWarning(SC_ERR_NFQ_SETSOCKOPT,
-                     "can't set netlink broadcast error: %s",
-                     strerror(errno));
+        SCLogWarning("can't set netlink broadcast error: %s", strerror(errno));
     }
 #endif
     /* Don't send error about no buffer space available but drop the
@@ -657,9 +685,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
 #ifdef NETLINK_NO_ENOBUFS
     if (setsockopt(q->fd, SOL_NETLINK,
                    NETLINK_NO_ENOBUFS, &opt, sizeof(int)) == -1) {
-        SCLogWarning(SC_ERR_NFQ_SETSOCKOPT,
-                     "can't set netlink enobufs: %s",
-                     strerror(errno));
+        SCLogWarning("can't set netlink enobufs: %s", strerror(errno));
     }
 #endif
 
@@ -670,8 +696,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
         int r = nfq_set_queue_flags(q->qh, mask, flags);
 
         if (r == -1) {
-            SCLogWarning(SC_ERR_NFQ_SET_MODE, "can't set fail-open mode: %s",
-                         strerror(errno));
+            SCLogWarning("can't set fail-open mode: %s", strerror(errno));
         } else {
             SCLogInfo("fail-open mode should be set on queue");
         }
@@ -682,7 +707,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
     if (runmode_workers) {
         q->verdict_cache.maxlen = nfq_config.batchcount;
     } else if (nfq_config.batchcount) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "nfq.batchcount is only valid in workers runmode.");
+        SCLogError("nfq.batchcount is only valid in workers runmode.");
     }
 #endif
 
@@ -692,7 +717,7 @@ static TmEcode NFQInitThread(NFQThreadVars *t, uint32_t queue_maxlen)
     tv.tv_usec = 0;
 
     if(setsockopt(q->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == -1) {
-        SCLogWarning(SC_ERR_NFQ_SETSOCKOPT, "can't set socket timeout: %s", strerror(errno));
+        SCLogWarning("can't set socket timeout: %s", strerror(errno));
     }
 
     SCLogDebug("nfq_q->h %p, nfq_q->nh %p, nfq_q->qh %p, nfq_q->fd %" PRId32 "",
@@ -716,7 +741,7 @@ TmEcode ReceiveNFQThreadInit(ThreadVars *tv, const void *initdata, void **data)
 
     int r = NFQInitThread(ntv, (max_pending_packets * NFQ_BURST_FACTOR));
     if (r != TM_ECODE_OK) {
-        SCLogError(SC_ERR_NFQ_THREAD_INIT, "nfq thread failed to initialize");
+        SCLogError("nfq thread failed to initialize");
 
         SCMutexUnlock(&nfq_init_lock);
         exit(EXIT_FAILURE);
@@ -730,6 +755,8 @@ TmEcode ReceiveNFQThreadInit(ThreadVars *tv, const void *initdata, void **data)
     }
     ntv->datalen = T_DATA_SIZE;
 #undef T_DATA_SIZE
+
+    DatalinkSetGlobalType(DLT_RAW);
 
     *data = (void *)ntv;
 
@@ -772,10 +799,7 @@ TmEcode ReceiveNFQThreadDeinit(ThreadVars *t, void *data)
 
 TmEcode VerdictNFQThreadInit(ThreadVars *tv, const void *initdata, void **data)
 {
-    NFQThreadVars *ntv = (NFQThreadVars *) initdata;
-
-    CaptureStatsSetup(tv, &ntv->stats);
-
+    NFQThreadVars *ntv = (NFQThreadVars *)initdata;
     *data = (void *)ntv;
     return TM_ECODE_OK;
 }
@@ -807,22 +831,19 @@ int NFQRegisterQueue(const uint16_t number)
     uint16_t num_cpus = UtilCpuGetNumProcessorsOnline();
 
     if (g_nfq_t == NULL || g_nfq_q == NULL) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "NFQ context is not initialized");
+        SCLogError("NFQ context is not initialized");
         return -1;
     }
 
     SCMutexLock(&nfq_init_lock);
     if (!many_queues_warned && (receive_queue_num >= num_cpus)) {
-        SCLogWarning(SC_WARN_UNCOMMON,
-                     "using more Netfilter queues than %hu available CPU core(s) "
+        SCLogWarning("using more Netfilter queues than %hu available CPU core(s) "
                      "may degrade performance",
-                     num_cpus);
+                num_cpus);
         many_queues_warned = true;
     }
     if (receive_queue_num >= NFQ_MAX_QUEUE) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT,
-                   "can not register more than %d Netfilter queues",
-                   NFQ_MAX_QUEUE);
+        SCLogError("can not register more than %d Netfilter queues", NFQ_MAX_QUEUE);
         SCMutexUnlock(&nfq_init_lock);
         return -1;
     }
@@ -841,7 +862,7 @@ int NFQRegisterQueue(const uint16_t number)
     ntv->livedev = LiveGetDevice(queue);
 
     if (ntv->livedev == NULL) {
-        SCLogError(SC_ERR_INVALID_VALUE, "Unable to find Live device");
+        SCLogError("Unable to find Live device");
         return -1;
     }
 
@@ -867,8 +888,9 @@ int NFQParseAndRegisterQueues(const char *queues)
     int count = sscanf(queues, "%hu:%hu", &queue_start, &queue_end);
 
     if (count < 1) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "specified queue(s) argument '%s' is not "
-                                            "valid (allowed queue numbers are 0-65535)", queues);
+        SCLogError("specified queue(s) argument '%s' is not "
+                   "valid (allowed queue numbers are 0-65535)",
+                queues);
         return -1;
     }
 
@@ -876,8 +898,9 @@ int NFQParseAndRegisterQueues(const char *queues)
     if (count == 2) {
         // Sanity check
         if (queue_start > queue_end) {
-            SCLogError(SC_ERR_INVALID_ARGUMENT, "start queue's number %d is greater than "
-                                            "ending number %d", queue_start, queue_end);
+            SCLogError("start queue's number %d is greater than "
+                       "ending number %d",
+                    queue_start, queue_end);
             return -1;
         }
 
@@ -887,7 +910,7 @@ int NFQParseAndRegisterQueues(const char *queues)
     // We do realloc() to preserve previously registered queues
     void *ptmp = SCRealloc(g_nfq_t, (receive_queue_num + num_queues) * sizeof(NFQThreadVars));
     if (ptmp == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to allocate NFQThreadVars");
+        SCLogError("Unable to allocate NFQThreadVars");
         NFQContextsClean();
         exit(EXIT_FAILURE);
     }
@@ -896,7 +919,7 @@ int NFQParseAndRegisterQueues(const char *queues)
 
     ptmp = SCRealloc(g_nfq_q, (receive_queue_num + num_queues) * sizeof(NFQQueueVars));
     if (ptmp == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to allocate NFQQueueVars");
+        SCLogError("Unable to allocate NFQQueueVars");
         NFQContextsClean();
         exit(EXIT_FAILURE);
     }
@@ -948,8 +971,6 @@ void *NFQGetThread(int number)
 
 /**
  * \brief NFQ function to get a packet from the kernel
- *
- * \note separate functions for Linux and Win32 for readability.
  */
 static void NFQRecvPkt(NFQQueueVars *t, NFQThreadVars *tv)
 {
@@ -973,7 +994,7 @@ static void NFQRecvPkt(NFQQueueVars *t, NFQThreadVars *tv)
 #endif /* COUNTERS */
         }
     } else if(rv == 0) {
-        SCLogWarning(SC_ERR_NFQ_RECV, "recv got returncode 0");
+        SCLogWarning("recv got returncode 0");
     } else {
 #ifdef DBG_PERF
         if (rv > t->dbg_maxreadsize)
@@ -984,7 +1005,7 @@ static void NFQRecvPkt(NFQQueueVars *t, NFQThreadVars *tv)
         if (t->qh != NULL) {
             ret = nfq_handle_packet(t->h, tv->data, rv);
         } else {
-            SCLogWarning(SC_ERR_NFQ_HANDLE_PKT, "NFQ handle has been destroyed");
+            SCLogWarning("NFQ handle has been destroyed");
             ret = -1;
         }
         NFQMutexUnlock(t);
@@ -1004,6 +1025,10 @@ TmEcode ReceiveNFQLoop(ThreadVars *tv, void *data, void *slot)
     NFQQueueVars *nq = NFQGetQueue(ntv->nfq_index);
 
     ntv->slot = ((TmSlot *) slot)->slot_next;
+
+    // Indicate that the thread is actually running its application level code (i.e., it can poll
+    // packets)
+    TmThreadsSetFlag(tv, THV_RUNNING);
 
     while(1) {
         if (unlikely(suricata_ctl_flags != 0)) {
@@ -1036,7 +1061,7 @@ static inline uint32_t GetVerdict(const Packet *p)
 {
     uint32_t verdict = NF_ACCEPT;
 
-    if (PACKET_TEST_ACTION(p, ACTION_DROP)) {
+    if (PacketCheckAction(p, ACTION_DROP)) {
         verdict = NF_DROP;
     } else {
         switch (nfq_config.mode) {
@@ -1058,7 +1083,7 @@ static inline uint32_t GetVerdict(const Packet *p)
 #ifdef COUNTERS
 static inline void UpdateCounters(NFQQueueVars *t, const Packet *p)
 {
-    if (PACKET_TEST_ACTION(p, ACTION_DROP)) {
+    if (PacketCheckAction(p, ACTION_DROP)) {
         t->dropped++;
     } else {
         if (p->flags & PKT_STREAM_MODIFIED) {
@@ -1070,16 +1095,15 @@ static inline void UpdateCounters(NFQQueueVars *t, const Packet *p)
 }
 #endif /* COUNTERS */
 
-/**
- * \brief NFQ verdict function
+/** \internal
+ *  \brief NFQ verdict function
+ *  \param p Packet to work with. Will be the tunnel root packet in case of tunnel.
  */
-TmEcode NFQSetVerdict(Packet *p)
+static TmEcode NFQSetVerdict(Packet *p, const uint32_t mark_value, const bool mark_modified)
 {
     int iter = 0;
-    /* we could also have a direct pointer but we need to have a ref counf in this case */
+    /* we could also have a direct pointer but we need to have a ref count in this case */
     NFQQueueVars *t = g_nfq_q + p->nfq_v.nfq_index;
-
-    p->nfq_v.verdicted = 1;
 
     /* can't verdict a "fake" packet */
     if (PKT_IS_PSEUDOPKT(p)) {
@@ -1100,7 +1124,7 @@ TmEcode NFQSetVerdict(Packet *p)
     UpdateCounters(t, p);
 #endif /* COUNTERS */
 
-    int ret = NFQVerdictCacheAdd(t, p, verdict);
+    int ret = NFQVerdictCacheAdd(t, p, verdict, mark_value, mark_modified);
     if (ret == 0) {
         NFQMutexUnlock(t);
         return TM_ECODE_OK;
@@ -1111,26 +1135,21 @@ TmEcode NFQSetVerdict(Packet *p)
             default:
             case NFQ_ACCEPT_MODE:
             case NFQ_ROUTE_MODE:
-                if (p->flags & PKT_MARK_MODIFIED) {
+                if (mark_modified) {
 #ifdef HAVE_NFQ_SET_VERDICT2
                     if (p->flags & PKT_STREAM_MODIFIED) {
-                        ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict,
-                                p->nfq_v.mark,
+                        ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict, mark_value,
                                 GET_PKT_LEN(p), GET_PKT_DATA(p));
                     } else {
-                        ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict,
-                                p->nfq_v.mark,
-                                0, NULL);
+                        ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict, mark_value, 0, NULL);
                     }
 #else /* fall back to old function */
                     if (p->flags & PKT_STREAM_MODIFIED) {
-                        ret = nfq_set_verdict_mark(t->qh, p->nfq_v.id, verdict,
-                                htonl(p->nfq_v.mark),
+                        ret = nfq_set_verdict_mark(t->qh, p->nfq_v.id, verdict, htonl(mark_value),
                                 GET_PKT_LEN(p), GET_PKT_DATA(p));
                     } else {
-                        ret = nfq_set_verdict_mark(t->qh, p->nfq_v.id, verdict,
-                                htonl(p->nfq_v.mark),
-                                0, NULL);
+                        ret = nfq_set_verdict_mark(
+                                t->qh, p->nfq_v.id, verdict, htonl(mark_value), 0, NULL);
                     }
 #endif /* HAVE_NFQ_SET_VERDICT2 */
                 } else {
@@ -1140,41 +1159,40 @@ TmEcode NFQSetVerdict(Packet *p)
                     } else {
                         ret = nfq_set_verdict(t->qh, p->nfq_v.id, verdict, 0, NULL);
                     }
-
                 }
                 break;
             case NFQ_REPEAT_MODE:
 #ifdef HAVE_NFQ_SET_VERDICT2
                 if (p->flags & PKT_STREAM_MODIFIED) {
                     ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict,
-                            (nfq_config.mark & nfq_config.mask) | (p->nfq_v.mark & ~nfq_config.mask),
+                            (nfq_config.mark & nfq_config.mask) | (mark_value & ~nfq_config.mask),
                             GET_PKT_LEN(p), GET_PKT_DATA(p));
                 } else {
                     ret = nfq_set_verdict2(t->qh, p->nfq_v.id, verdict,
-                            (nfq_config.mark & nfq_config.mask) | (p->nfq_v.mark & ~nfq_config.mask),
+                            (nfq_config.mark & nfq_config.mask) | (mark_value & ~nfq_config.mask),
                             0, NULL);
                 }
 #else /* fall back to old function */
                 if (p->flags & PKT_STREAM_MODIFIED) {
                     ret = nfq_set_verdict_mark(t->qh, p->nfq_v.id, verdict,
-                            htonl((nfq_config.mark & nfq_config.mask) | (p->nfq_v.mark & ~nfq_config.mask)),
+                            htonl((nfq_config.mark & nfq_config.mask) |
+                                    (mark_value & ~nfq_config.mask)),
                             GET_PKT_LEN(p), GET_PKT_DATA(p));
                 } else {
                     ret = nfq_set_verdict_mark(t->qh, p->nfq_v.id, verdict,
-                            htonl((nfq_config.mark & nfq_config.mask) | (p->nfq_v.mark & ~nfq_config.mask)),
+                            htonl((nfq_config.mark & nfq_config.mask) |
+                                    (mark_value & ~nfq_config.mask)),
                             0, NULL);
                 }
 #endif /* HAVE_NFQ_SET_VERDICT2 */
                 break;
         }
-    } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_TIME));
+    } while ((ret < 0) && (iter++ < NFQ_VERDICT_RETRY_COUNT));
 
     NFQMutexUnlock(t);
 
     if (ret < 0) {
-        SCLogWarning(SC_ERR_NFQ_SET_VERDICT,
-                     "nfq_set_verdict of %p failed %" PRId32 ": %s",
-                     p, ret, strerror(errno));
+        SCLogWarning("nfq_set_verdict of %p failed %" PRId32 ": %s", p, ret, strerror(errno));
         return TM_ECODE_FAILED;
     }
     return TM_ECODE_OK;
@@ -1185,25 +1203,36 @@ TmEcode NFQSetVerdict(Packet *p)
  */
 TmEcode VerdictNFQ(ThreadVars *tv, Packet *p, void *data)
 {
-    NFQThreadVars *ntv = (NFQThreadVars *)data;
-    /* update counters */
-    CaptureStatsUpdate(tv, &ntv->stats, p);
-
     /* if this is a tunnel packet we check if we are ready to verdict
      * already. */
-    if (IS_TUNNEL_PKT(p)) {
+    if (PacketIsTunnel(p)) {
+        Packet *root_p = p->root ? p->root : p;
+
         SCLogDebug("tunnel pkt: %p/%p %s", p, p->root, p->root ? "upper layer" : "root");
-        bool verdict = VerdictTunnelPacket(p);
+
+        SCSpinlock *lock = &root_p->persistent.tunnel_lock;
+        SCSpinLock(lock);
+        const bool do_verdict = VerdictTunnelPacketInternal(p);
+        // taken from root packet
+        const bool mark_modified = root_p->nfq_v.mark_modified;
+        const uint32_t mark_value = root_p->nfq_v.mark;
+        root_p->nfq_v.verdicted = do_verdict;
+        SCSpinUnlock(lock);
         /* don't verdict if we are not ready */
-        if (verdict == true) {
-            int ret = NFQSetVerdict(p->root ? p->root : p);
+        if (do_verdict) {
+            int ret = NFQSetVerdict(root_p, mark_value, mark_modified);
             if (ret != TM_ECODE_OK) {
                 return ret;
             }
         }
     } else {
         /* no tunnel, verdict normally */
-        int ret = NFQSetVerdict(p);
+
+        /* coverity[missing_lock] */
+        p->nfq_v.verdicted = true;
+
+        /* coverity[missing_lock] */
+        int ret = NFQSetVerdict(p, p->nfq_v.mark, p->nfq_v.mark_modified);
         if (ret != TM_ECODE_OK) {
             return ret;
         }
@@ -1271,7 +1300,7 @@ TmEcode DecodeNFQThreadDeinit(ThreadVars *tv, void *data)
 /**
  * \brief Clean global contexts. Must be called on exit.
  */
-void NFQContextsClean()
+void NFQContextsClean(void)
 {
     if (g_nfq_q != NULL) {
         SCFree(g_nfq_q);

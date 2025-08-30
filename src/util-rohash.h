@@ -21,10 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __UTIL_ROHASH_H__
-#define __UTIL_ROHASH_H__
-
-#include "queue.h"
+#ifndef SURICATA_UTIL_ROHASH_H
+#define SURICATA_UTIL_ROHASH_H
 
 typedef struct ROHashTable_ {
     uint8_t locked;
@@ -45,4 +43,4 @@ uint32_t ROHashMemorySize(ROHashTable *table);
 /* run time */
 void *ROHashLookup(ROHashTable *table, void *data, uint16_t size);
 
-#endif /* __UTIL_ROHASH_H__ */
+#endif /* SURICATA_UTIL_ROHASH_H */

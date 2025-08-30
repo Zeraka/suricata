@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 
 #include "detect.h"
@@ -38,6 +37,16 @@
 #include "pkt-var.h"
 #include "host.h"
 #include "util-profiling.h"
+#include "detect-engine-build.h"
+
+#define DETECT_CSUM_VALID   "valid"
+#define DETECT_CSUM_INVALID "invalid"
+
+typedef struct DetectCsumData_ {
+    /* Indicates if the csum-<protocol> keyword in a rule holds the
+       keyvalue "valid" or "invalid" */
+    int16_t valid;
+} DetectCsumData;
 
 /* prototypes for the "ipv4-csum" rule keyword */
 static int DetectIPV4CsumMatch(DetectEngineThreadCtx *,
@@ -133,6 +142,7 @@ void DetectCsumRegister (void)
     sigmatch_table[DETECT_IPV4_CSUM].Match = DetectIPV4CsumMatch;
     sigmatch_table[DETECT_IPV4_CSUM].Setup = DetectIPV4CsumSetup;
     sigmatch_table[DETECT_IPV4_CSUM].Free  = DetectIPV4CsumFree;
+    sigmatch_table[DETECT_IPV4_CSUM].desc = "match on IPv4 checksum";
 #ifdef UNITTESTS
     sigmatch_table[DETECT_IPV4_CSUM].RegisterTests = DetectCsumRegisterTests;
 #endif
@@ -141,31 +151,37 @@ void DetectCsumRegister (void)
     sigmatch_table[DETECT_TCPV4_CSUM].Match = DetectTCPV4CsumMatch;
     sigmatch_table[DETECT_TCPV4_CSUM].Setup = DetectTCPV4CsumSetup;
     sigmatch_table[DETECT_TCPV4_CSUM].Free  = DetectTCPV4CsumFree;
+    sigmatch_table[DETECT_TCPV4_CSUM].desc = "match on IPv4/TCP checksum";
 
     sigmatch_table[DETECT_TCPV6_CSUM].name = "tcpv6-csum";
     sigmatch_table[DETECT_TCPV6_CSUM].Match = DetectTCPV6CsumMatch;
     sigmatch_table[DETECT_TCPV6_CSUM].Setup = DetectTCPV6CsumSetup;
     sigmatch_table[DETECT_TCPV6_CSUM].Free  = DetectTCPV6CsumFree;
+    sigmatch_table[DETECT_TCPV6_CSUM].desc = "match on IPv6/TCP checksum";
 
     sigmatch_table[DETECT_UDPV4_CSUM].name = "udpv4-csum";
     sigmatch_table[DETECT_UDPV4_CSUM].Match = DetectUDPV4CsumMatch;
     sigmatch_table[DETECT_UDPV4_CSUM].Setup = DetectUDPV4CsumSetup;
     sigmatch_table[DETECT_UDPV4_CSUM].Free  = DetectUDPV4CsumFree;
+    sigmatch_table[DETECT_UDPV4_CSUM].desc = "match on IPv4/UDP checksum";
 
     sigmatch_table[DETECT_UDPV6_CSUM].name = "udpv6-csum";
     sigmatch_table[DETECT_UDPV6_CSUM].Match = DetectUDPV6CsumMatch;
     sigmatch_table[DETECT_UDPV6_CSUM].Setup = DetectUDPV6CsumSetup;
     sigmatch_table[DETECT_UDPV6_CSUM].Free  = DetectUDPV6CsumFree;
+    sigmatch_table[DETECT_UDPV6_CSUM].desc = "match on IPv6/UDP checksum";
 
     sigmatch_table[DETECT_ICMPV4_CSUM].name = "icmpv4-csum";
     sigmatch_table[DETECT_ICMPV4_CSUM].Match = DetectICMPV4CsumMatch;
     sigmatch_table[DETECT_ICMPV4_CSUM].Setup = DetectICMPV4CsumSetup;
     sigmatch_table[DETECT_ICMPV4_CSUM].Free  = DetectICMPV4CsumFree;
+    sigmatch_table[DETECT_ICMPV4_CSUM].desc = "match on IPv4/ICMP checksum";
 
     sigmatch_table[DETECT_ICMPV6_CSUM].name = "icmpv6-csum";
     sigmatch_table[DETECT_ICMPV6_CSUM].Match = DetectICMPV6CsumMatch;
     sigmatch_table[DETECT_ICMPV6_CSUM].Setup = DetectICMPV6CsumSetup;
     sigmatch_table[DETECT_ICMPV6_CSUM].Free  = DetectICMPV6CsumFree;
+    sigmatch_table[DETECT_ICMPV6_CSUM].desc = "match on IPv6/ICMPv6 checksum";
 }
 
 /**
@@ -187,13 +203,13 @@ static int DetectCsumParseArg(const char *key, DetectCsumData *cd)
     if (key[0] == '\"' && key[strlen(key) - 1] == '\"') {
         str = SCStrdup(key + 1);
         if (unlikely(str == NULL)) {
-            goto error;
+            return 0;
         }
         str[strlen(key) - 2] = '\0';
     } else {
         str = SCStrdup(key);
         if (unlikely(str == NULL)) {
-            goto error;
+            return 0;
         }
     }
 
@@ -204,9 +220,7 @@ static int DetectCsumParseArg(const char *key, DetectCsumData *cd)
         return 1;
     }
 
-error:
-    if (str != NULL)
-        SCFree(str);
+    SCFree(str);
     return 0;
 }
 
@@ -230,21 +244,22 @@ static int DetectIPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip4h == NULL || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv4(p))
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level3_comp_csum == -1)
-        p->level3_comp_csum = IPV4Checksum((uint16_t *)p->ip4h,
-                                           IPV4_GET_HLEN(p),
-                                           p->ip4h->ip_csum);
+    if (!p->l3.csum_set) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        p->l3.csum = IPV4Checksum((uint16_t *)ip4h, IPV4_GET_RAW_HLEN(ip4h), ip4h->ip_csum);
+        p->l3.csum_set = true;
+    }
 
-    if (p->level3_comp_csum == 0 && cd->valid == 1)
+    if (p->l3.csum == 0 && cd->valid == 1)
         return 1;
-    else if (p->level3_comp_csum != 0 && cd->valid == 0)
+    else if (p->l3.csum != 0 && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -264,45 +279,28 @@ static int DetectIPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectIPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_IPV4_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_IPV4_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectIPV4CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectIPV4CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectIPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /**
@@ -325,23 +323,23 @@ static int DetectTCPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip4h == NULL || p->tcph == NULL || p->proto != IPPROTO_TCP || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv4(p) || !PacketIsTCP(p) || p->proto != IPPROTO_TCP)
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1)
-        p->level4_comp_csum = TCPChecksum(p->ip4h->s_ip_addrs,
-                                          (uint16_t *)p->tcph,
-                                          (p->payload_len +
-                                              TCP_GET_HLEN(p)),
-                                          p->tcph->th_sum);
-
-    if (p->level4_comp_csum == 0 && cd->valid == 1)
+    if (!p->l4.csum_set) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        const TCPHdr *tcph = PacketGetTCP(p);
+        p->l4.csum = TCPChecksum(ip4h->s_ip_addrs, (uint16_t *)tcph,
+                (p->payload_len + TCP_GET_RAW_HLEN(tcph)), tcph->th_sum);
+        p->l4.csum_set = true;
+    }
+    if (p->l4.csum == 0 && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != 0 && cd->valid == 0)
+    else if (p->l4.csum != 0 && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -361,45 +359,28 @@ static int DetectTCPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectTCPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_TCPV4_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TCPV4_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectTCPV4CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectTCPV4CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectTCPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /**
@@ -422,23 +403,24 @@ static int DetectTCPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip6h == NULL || p->tcph == NULL || p->proto != IPPROTO_TCP || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv6(p) || !PacketIsTCP(p) || p->proto != IPPROTO_TCP)
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1)
-        p->level4_comp_csum = TCPV6Checksum(p->ip6h->s_ip6_addrs,
-                                            (uint16_t *)p->tcph,
-                                            (p->payload_len +
-                                                TCP_GET_HLEN(p)),
-                                            p->tcph->th_sum);
+    if (!p->l4.csum_set) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        const TCPHdr *tcph = PacketGetTCP(p);
+        p->l4.csum = TCPV6Checksum(ip6h->s_ip6_addrs, (uint16_t *)tcph,
+                (p->payload_len + TCP_GET_RAW_HLEN(tcph)), tcph->th_sum);
+        p->l4.csum_set = true;
+    }
 
-    if (p->level4_comp_csum == 0 && cd->valid == 1)
+    if (p->l4.csum == 0 && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != 0 && cd->valid == 0)
+    else if (p->l4.csum != 0 && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -458,45 +440,28 @@ static int DetectTCPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectTCPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_TCPV6_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TCPV6_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectTCPV6CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectTCPV6CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectTCPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /**
@@ -519,23 +484,26 @@ static int DetectUDPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip4h == NULL || p->udph == NULL || p->proto != IPPROTO_UDP || PKT_IS_PSEUDOPKT(p) || p->udph->uh_sum == 0)
+    if (!PacketIsIPv4(p) || !PacketIsUDP(p) || p->proto != IPPROTO_UDP)
+        return 0;
+
+    const UDPHdr *udph = PacketGetUDP(p);
+    if (udph->uh_sum == 0)
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1)
-        p->level4_comp_csum = UDPV4Checksum(p->ip4h->s_ip_addrs,
-                                            (uint16_t *)p->udph,
-                                            (p->payload_len +
-                                                UDP_HEADER_LEN),
-                                            p->udph->uh_sum);
-
-    if (p->level4_comp_csum == 0 && cd->valid == 1)
+    if (!p->l4.csum_set) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        p->l4.csum = UDPV4Checksum(ip4h->s_ip_addrs, (uint16_t *)udph,
+                (p->payload_len + UDP_HEADER_LEN), udph->uh_sum);
+        p->l4.csum_set = true;
+    }
+    if (p->l4.csum == 0 && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != 0 && cd->valid == 0)
+    else if (p->l4.csum != 0 && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -555,45 +523,28 @@ static int DetectUDPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectUDPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_UDPV4_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_UDPV4_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectUDPV4CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectUDPV4CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectUDPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /**
@@ -616,23 +567,23 @@ static int DetectUDPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip6h == NULL || p->udph == NULL || p->proto != IPPROTO_UDP || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv6(p) || !PacketIsUDP(p) || p->proto != IPPROTO_UDP)
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1)
-        p->level4_comp_csum = UDPV6Checksum(p->ip6h->s_ip6_addrs,
-                                            (uint16_t *)p->udph,
-                                            (p->payload_len +
-                                                UDP_HEADER_LEN),
-                                            p->udph->uh_sum);
-
-    if (p->level4_comp_csum == 0 && cd->valid == 1)
+    if (!p->l4.csum_set) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        const UDPHdr *udph = PacketGetUDP(p);
+        p->l4.csum = UDPV6Checksum(ip6h->s_ip6_addrs, (uint16_t *)udph,
+                (p->payload_len + UDP_HEADER_LEN), udph->uh_sum);
+        p->l4.csum_set = true;
+    }
+    if (p->l4.csum == 0 && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != 0 && cd->valid == 0)
+    else if (p->l4.csum != 0 && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -652,34 +603,22 @@ static int DetectUDPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectUDPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_UDPV6_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (void *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_UDPV6_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectUDPV6CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectUDPV6CsumFree(de_ctx, cd);
     return -1;
 }
 
@@ -689,8 +628,6 @@ static void DetectUDPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 
     if (cd != NULL)
         SCFree(cd);
-
-    return;
 }
 
 /**
@@ -713,21 +650,23 @@ static int DetectICMPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip4h == NULL || p->icmpv4h == NULL || p->proto != IPPROTO_ICMP || PKT_IS_PSEUDOPKT(p))
+    if (!PacketIsIPv4(p) || !PacketIsICMPv4(p) || p->proto != IPPROTO_ICMP)
         return 0;
 
     if (p->flags & PKT_IGNORE_CHECKSUM) {
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1)
-        p->level4_comp_csum = ICMPV4CalculateChecksum((uint16_t *)p->icmpv4h,
-                                                      SCNtohs(IPV4_GET_RAW_IPLEN(p->ip4h)) -
-                                                      IPV4_GET_RAW_HLEN(p->ip4h) * 4);
-
-    if (p->level4_comp_csum == p->icmpv4h->checksum && cd->valid == 1)
+    const ICMPV4Hdr *icmpv4h = PacketGetICMPv4(p);
+    if (!p->l4.csum_set) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        p->l4.csum = ICMPV4CalculateChecksum(
+                (uint16_t *)icmpv4h, IPV4_GET_RAW_IPLEN(ip4h) - IPV4_GET_RAW_HLEN(ip4h));
+        p->l4.csum_set = true;
+    }
+    if (p->l4.csum == icmpv4h->checksum && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != p->icmpv4h->checksum && cd->valid == 0)
+    else if (p->l4.csum != icmpv4h->checksum && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -747,45 +686,28 @@ static int DetectICMPV4CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectICMPV4CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    //printf("DetectCsumSetup: \'%s\'\n", csum_str);
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_ICMPV4_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ICMPV4_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectICMPV4CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectICMPV4CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectICMPV4CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /**
@@ -808,8 +730,11 @@ static int DetectICMPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
 {
     const DetectCsumData *cd = (const DetectCsumData *)ctx;
 
-    if (p->ip6h == NULL || p->icmpv6h == NULL || p->proto != IPPROTO_ICMPV6 || PKT_IS_PSEUDOPKT(p) ||
-        (GET_PKT_LEN(p) - ((uint8_t *)p->icmpv6h - GET_PKT_DATA(p))) <= 0) {
+    if (!PacketIsIPv6(p) || !PacketIsICMPv6(p) || p->proto != IPPROTO_ICMPV6) {
+        return 0;
+    }
+    const ICMPV6Hdr *icmpv6h = PacketGetICMPv6(p);
+    if ((GET_PKT_LEN(p) - ((uint8_t *)icmpv6h - GET_PKT_DATA(p))) <= 0) {
         return 0;
     }
 
@@ -817,17 +742,17 @@ static int DetectICMPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
         return cd->valid;
     }
 
-    if (p->level4_comp_csum == -1) {
-        uint16_t len = IPV6_GET_RAW_PLEN(p->ip6h) -
-            ((uint8_t *)p->icmpv6h - (uint8_t *)p->ip6h - IPV6_HEADER_LEN);
-        p->level4_comp_csum = ICMPV6CalculateChecksum(p->ip6h->s_ip6_addrs,
-                                                      (uint16_t *)p->icmpv6h,
-                                                      len);
+    if (!p->l4.csum_set) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        uint16_t len = IPV6_GET_RAW_PLEN(ip6h) -
+                       (uint16_t)((uint8_t *)icmpv6h - (uint8_t *)ip6h - IPV6_HEADER_LEN);
+        p->l4.csum = ICMPV6CalculateChecksum(ip6h->s_ip6_addrs, (uint16_t *)icmpv6h, len);
+        p->l4.csum_set = true;
     }
 
-    if (p->level4_comp_csum == p->icmpv6h->csum && cd->valid == 1)
+    if (p->l4.csum == icmpv6h->csum && cd->valid == 1)
         return 1;
-    else if (p->level4_comp_csum != p->icmpv6h->csum && cd->valid == 0)
+    else if (p->l4.csum != icmpv6h->csum && cd->valid == 0)
         return 1;
     else
         return 0;
@@ -847,49 +772,37 @@ static int DetectICMPV6CsumMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectICMPV6CsumSetup(DetectEngineCtx *de_ctx, Signature *s, const char *csum_str)
 {
-    DetectCsumData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_ICMPV6_CSUM;
-
-    if ( (cd = SCMalloc(sizeof(DetectCsumData))) == NULL)
-        goto error;
-    memset(cd, 0, sizeof(DetectCsumData));
+    DetectCsumData *cd = SCCalloc(1, sizeof(DetectCsumData));
+    if (cd == NULL)
+        return -1;
 
     if (DetectCsumParseArg(csum_str, cd) == 0)
         goto error;
 
-    sm->ctx = (SigMatchCtx *)cd;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ICMPV6_CSUM, (SigMatchCtx *)cd, DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
-    if (cd != NULL) DetectICMPV6CsumFree(de_ctx, cd);
-    if (sm != NULL) SCFree(sm);
-
+    DetectICMPV6CsumFree(de_ctx, cd);
     return -1;
 }
 
 static void DetectICMPV6CsumFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectCsumData *cd = (DetectCsumData *)ptr;
-
-    if (cd != NULL)
-        SCFree(cd);
-
-    return;
+    SCFree(ptr);
 }
 
 /* ---------------------------------- Unit Tests --------------------------- */
 
 #ifdef UNITTESTS
+#include "util-unittest-helper.h"
 #include "detect-engine.h"
+#include "detect-engine-alert.h"
+#include "packet.h"
 
 #define mystr(s) #s
 #define TEST1(kwstr) {\
@@ -924,21 +837,27 @@ static int DetectCsumValidArgsTestParse01(void)
 }
 #undef TEST1
 
-#define TEST2(kwstr) { \
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();\
-    FAIL_IF_NULL(de_ctx);\
-    Signature *s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any ("mystr(kwstr)"-csum:vaid; sid:1;)");\
-    FAIL_IF(s);\
-    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any ("mystr(kwstr)"-csum:invaalid; sid:2;)");\
-    FAIL_IF(s);\
-    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any ("mystr(kwstr)"-csum:vaLiid; sid:3;)");\
-    FAIL_IF(s);\
-    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any ("mystr(kwstr)"-csum:VALieD; sid:4;)");\
-    FAIL_IF(s);\
-    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any ("mystr(kwstr)"-csum:iNvamid; sid:5;)");\
-    FAIL_IF(s);\
-    DetectEngineCtxFree(de_ctx);\
-}
+#define TEST2(kwstr)                                                                               \
+    {                                                                                              \
+        DetectEngineCtx *de_ctx = DetectEngineCtxInit();                                           \
+        FAIL_IF_NULL(de_ctx);                                                                      \
+        Signature *s = DetectEngineAppendSig(                                                      \
+                de_ctx, "alert ip any any -> any any (" mystr(kwstr) "-csum:xxxx; sid:1;)");       \
+        FAIL_IF(s);                                                                                \
+        s = DetectEngineAppendSig(                                                                 \
+                de_ctx, "alert ip any any -> any any (" mystr(kwstr) "-csum:xxxxxxxx; sid:2;)");   \
+        FAIL_IF(s);                                                                                \
+        s = DetectEngineAppendSig(                                                                 \
+                de_ctx, "alert ip any any -> any any (" mystr(kwstr) "-csum:xxxxxx; sid:3;)");     \
+        FAIL_IF(s);                                                                                \
+        s = DetectEngineAppendSig(                                                                 \
+                de_ctx, "alert ip any any -> any any (" mystr(kwstr) "-csum:XXXXXX; sid:4;)");     \
+        FAIL_IF(s);                                                                                \
+        s = DetectEngineAppendSig(                                                                 \
+                de_ctx, "alert ip any any -> any any (" mystr(kwstr) "-csum:XxXxXxX; sid:5;)");    \
+        FAIL_IF(s);                                                                                \
+        DetectEngineCtxFree(de_ctx);                                                               \
+    }
 
 static int DetectCsumInvalidArgsTestParse02(void)
 {
@@ -985,7 +904,6 @@ static int DetectCsumValidArgsTestParse03(void)
 #undef TEST3
 #undef mystr
 
-#include "detect-engine.h"
 #include "stream-tcp.h"
 
 static int DetectCsumICMPV6Test01(void)
@@ -1021,7 +939,7 @@ static int DetectCsumICMPV6Test01(void)
     memset(&tv, 0, sizeof(tv));
     memset(&dtv, 0, sizeof(dtv));
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
     FlowInitConfig(FLOW_QUIET);
 
     de_ctx = DetectEngineCtxInit();
@@ -1045,8 +963,8 @@ static int DetectCsumICMPV6Test01(void)
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
-    PACKET_RECYCLE(p);
+    StreamTcpFreeConfig(true);
+    PacketRecycle(p);
     FlowShutdown();
     SCFree(p);
     PASS;

@@ -21,22 +21,14 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_ENGINE_FILE_H__
-#define __DETECT_ENGINE_FILE_H__
+#ifndef SURICATA_DETECT_ENGINE_FILE_H
+#define SURICATA_DETECT_ENGINE_FILE_H
 
-int DetectFileInspectHttp(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate, void *tx, uint64_t tx_id);
+uint8_t DetectFileInspectGeneric(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const struct DetectEngineAppInspectionEngine_ *engine, const Signature *s, Flow *f,
+        uint8_t flags, void *_alstate, void *tx, uint64_t tx_id);
 
-int DetectFileInspectSmtp(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate, void *tx, uint64_t tx_id);
+void DetectFileRegisterProto(
+        AppProto alproto, int direction, int to_client_progress, int to_server_progress);
 
-int DetectFileInspectGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate, void *tx, uint64_t tx_id);
-
-#endif /* __DETECT_ENGINE_FILE_H__ */
+#endif /* SURICATA_DETECT_ENGINE_FILE_H */

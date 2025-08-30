@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,68 +25,145 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
-#include "threads.h"
-
-#include "stream-tcp-private.h"
-#include "stream-tcp-reassemble.h"
-#include "stream-tcp.h"
-#include "stream.h"
 
 #include "app-layer.h"
+#include "app-layer-detect-proto.h"
 #include "app-layer-protos.h"
 #include "app-layer-parser.h"
+#include "app-layer-frames.h"
+#include "app-layer-events.h"
 #include "app-layer-ssl.h"
 
-#include "decode-events.h"
 #include "conf.h"
 
-#include "util-crypt.h"
-#include "util-spm.h"
-#include "util-unittest.h"
+#include "feature.h"
+
 #include "util-debug.h"
-#include "util-print.h"
-#include "util-pool.h"
-#include "util-byte.h"
 #include "util-ja3.h"
-#include "flow-util.h"
-#include "flow-private.h"
+#include "util-enum.h"
 #include "util-validate.h"
 
-SCEnumCharMap tls_decoder_event_table[ ] = {
+static SCEnumCharMap tls_state_client_table[] = {
+    {
+            "client_in_progress",
+            TLS_STATE_CLIENT_IN_PROGRESS,
+    },
+    {
+            "client_hello_done",
+            TLS_STATE_CLIENT_HELLO_DONE,
+    },
+    {
+            "client_cert_done",
+            TLS_STATE_CLIENT_CERT_DONE,
+    },
+    {
+            "client_handshake_done",
+            TLS_STATE_CLIENT_HANDSHAKE_DONE,
+    },
+    {
+            "client_finished",
+            TLS_STATE_CLIENT_FINISHED,
+    },
+    { NULL, -1 },
+};
+
+static SCEnumCharMap tls_state_server_table[] = {
+    {
+            "server_in_progress",
+            TLS_STATE_SERVER_IN_PROGRESS,
+    },
+    {
+            "server_hello",
+            TLS_STATE_SERVER_HELLO,
+    },
+    {
+            "server_cert_done",
+            TLS_STATE_SERVER_CERT_DONE,
+    },
+    {
+            "server_hello_done",
+            TLS_STATE_SERVER_HELLO_DONE,
+    },
+    {
+            "server_handshake_done",
+            TLS_STATE_SERVER_HANDSHAKE_DONE,
+    },
+    {
+            "server_finished",
+            TLS_STATE_SERVER_FINISHED,
+    },
+    { NULL, -1 },
+};
+
+SCEnumCharMap tls_frame_table[] = {
+    {
+            "pdu",
+            TLS_FRAME_PDU,
+    },
+    {
+            "hdr",
+            TLS_FRAME_HDR,
+    },
+    {
+            "data",
+            TLS_FRAME_DATA,
+    },
+    {
+            "alert",
+            TLS_FRAME_ALERT_DATA,
+    },
+    {
+            "heartbeat",
+            TLS_FRAME_HB_DATA,
+    },
+    {
+            "ssl2.hdr",
+            TLS_FRAME_SSLV2_HDR,
+    },
+    {
+            "ssl2.pdu",
+            TLS_FRAME_SSLV2_PDU,
+    },
+    { NULL, -1 },
+};
+
+SCEnumCharMap tls_decoder_event_table[] = {
     /* TLS protocol messages */
-    { "INVALID_SSLV2_HEADER",        TLS_DECODER_EVENT_INVALID_SSLV2_HEADER },
-    { "INVALID_TLS_HEADER",          TLS_DECODER_EVENT_INVALID_TLS_HEADER },
-    { "INVALID_RECORD_VERSION",      TLS_DECODER_EVENT_INVALID_RECORD_VERSION },
-    { "INVALID_RECORD_TYPE",         TLS_DECODER_EVENT_INVALID_RECORD_TYPE },
-    { "INVALID_HANDSHAKE_MESSAGE",   TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE },
-    { "HEARTBEAT_MESSAGE",           TLS_DECODER_EVENT_HEARTBEAT },
-    { "INVALID_HEARTBEAT_MESSAGE",   TLS_DECODER_EVENT_INVALID_HEARTBEAT },
-    { "OVERFLOW_HEARTBEAT_MESSAGE",  TLS_DECODER_EVENT_OVERFLOW_HEARTBEAT },
+    { "INVALID_SSLV2_HEADER", TLS_DECODER_EVENT_INVALID_SSLV2_HEADER },
+    { "INVALID_TLS_HEADER", TLS_DECODER_EVENT_INVALID_TLS_HEADER },
+    { "INVALID_RECORD_VERSION", TLS_DECODER_EVENT_INVALID_RECORD_VERSION },
+    { "INVALID_RECORD_TYPE", TLS_DECODER_EVENT_INVALID_RECORD_TYPE },
+    { "INVALID_RECORD_LENGTH", TLS_DECODER_EVENT_INVALID_RECORD_LENGTH },
+    { "INVALID_HANDSHAKE_MESSAGE", TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE },
+    { "HEARTBEAT_MESSAGE", TLS_DECODER_EVENT_HEARTBEAT },
+    { "INVALID_HEARTBEAT_MESSAGE", TLS_DECODER_EVENT_INVALID_HEARTBEAT },
+    { "OVERFLOW_HEARTBEAT_MESSAGE", TLS_DECODER_EVENT_OVERFLOW_HEARTBEAT },
     { "DATALEAK_HEARTBEAT_MISMATCH", TLS_DECODER_EVENT_DATALEAK_HEARTBEAT_MISMATCH },
-    { "HANDSHAKE_INVALID_LENGTH",    TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH },
-    { "MULTIPLE_SNI_EXTENSIONS",     TLS_DECODER_EVENT_MULTIPLE_SNI_EXTENSIONS },
-    { "INVALID_SNI_TYPE",            TLS_DECODER_EVENT_INVALID_SNI_TYPE },
-    { "INVALID_SNI_LENGTH",          TLS_DECODER_EVENT_INVALID_SNI_LENGTH },
-    { "TOO_MANY_RECORDS_IN_PACKET",  TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET },
+    { "HANDSHAKE_INVALID_LENGTH", TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH },
+    { "MULTIPLE_SNI_EXTENSIONS", TLS_DECODER_EVENT_MULTIPLE_SNI_EXTENSIONS },
+    { "INVALID_SNI_TYPE", TLS_DECODER_EVENT_INVALID_SNI_TYPE },
+    { "INVALID_SNI_LENGTH", TLS_DECODER_EVENT_INVALID_SNI_LENGTH },
+    { "TOO_MANY_RECORDS_IN_PACKET", TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET },
+    { "INVALID_ALERT_MESSAGE", TLS_DECODER_EVENT_INVALID_ALERT },
     /* certificate decoding messages */
-    { "INVALID_CERTIFICATE",         TLS_DECODER_EVENT_INVALID_CERTIFICATE },
-    { "CERTIFICATE_INVALID_LENGTH",  TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH },
+    { "INVALID_CERTIFICATE", TLS_DECODER_EVENT_INVALID_CERTIFICATE },
+    { "CERTIFICATE_INVALID_LENGTH", TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH },
     { "CERTIFICATE_INVALID_VERSION", TLS_DECODER_EVENT_CERTIFICATE_INVALID_VERSION },
-    { "CERTIFICATE_INVALID_SERIAL",  TLS_DECODER_EVENT_CERTIFICATE_INVALID_SERIAL },
-    { "CERTIFICATE_INVALID_ALGORITHMIDENTIFIER",  TLS_DECODER_EVENT_CERTIFICATE_INVALID_ALGORITHMIDENTIFIER },
+    { "CERTIFICATE_INVALID_SERIAL", TLS_DECODER_EVENT_CERTIFICATE_INVALID_SERIAL },
+    { "CERTIFICATE_INVALID_ALGORITHMIDENTIFIER",
+            TLS_DECODER_EVENT_CERTIFICATE_INVALID_ALGORITHMIDENTIFIER },
     { "CERTIFICATE_INVALID_X509NAME", TLS_DECODER_EVENT_CERTIFICATE_INVALID_X509NAME },
-    { "CERTIFICATE_INVALID_DATE",    TLS_DECODER_EVENT_CERTIFICATE_INVALID_DATE },
+    { "CERTIFICATE_INVALID_DATE", TLS_DECODER_EVENT_CERTIFICATE_INVALID_DATE },
     { "CERTIFICATE_INVALID_EXTENSIONS", TLS_DECODER_EVENT_CERTIFICATE_INVALID_EXTENSIONS },
-    { "CERTIFICATE_INVALID_DER",     TLS_DECODER_EVENT_CERTIFICATE_INVALID_DER },
+    { "CERTIFICATE_INVALID_DER", TLS_DECODER_EVENT_CERTIFICATE_INVALID_DER },
     { "CERTIFICATE_INVALID_SUBJECT", TLS_DECODER_EVENT_CERTIFICATE_INVALID_SUBJECT },
-    { "CERTIFICATE_INVALID_ISSUER",  TLS_DECODER_EVENT_CERTIFICATE_INVALID_ISSUER },
+    { "CERTIFICATE_INVALID_ISSUER", TLS_DECODER_EVENT_CERTIFICATE_INVALID_ISSUER },
     { "CERTIFICATE_INVALID_VALIDITY", TLS_DECODER_EVENT_CERTIFICATE_INVALID_VALIDITY },
-    { "ERROR_MESSAGE_ENCOUNTERED",   TLS_DECODER_EVENT_ERROR_MSG_ENCOUNTERED },
+    { "ERROR_MESSAGE_ENCOUNTERED", TLS_DECODER_EVENT_ERROR_MSG_ENCOUNTERED },
     /* used as a generic error event */
-    { "INVALID_SSL_RECORD",          TLS_DECODER_EVENT_INVALID_SSL_RECORD },
-    { NULL,                          -1 },
+    { "INVALID_SSL_RECORD", TLS_DECODER_EVENT_INVALID_SSL_RECORD },
+    { NULL, -1 },
 };
 
 enum {
@@ -108,21 +185,26 @@ enum {
     ERR_EXTRACT_VALIDITY,
 };
 
-/* JA3 fingerprints are disabled by default */
+/* JA3 and JA4 fingerprints are disabled by default */
 #define SSL_CONFIG_DEFAULT_JA3 0
+#ifdef HAVE_JA4
+#define SSL_CONFIG_DEFAULT_JA4 0
+#endif
 
 enum SslConfigEncryptHandling {
-    SSL_CNF_ENC_HANDLE_DEFAULT = 0, /**< disable raw content, continue tracking */
-    SSL_CNF_ENC_HANDLE_BYPASS = 1,  /**< skip processing of flow, bypass if possible */
-    SSL_CNF_ENC_HANDLE_FULL = 2,    /**< handle fully like any other proto */
+    SSL_CNF_ENC_HANDLE_TRACK_ONLY = 0, /**< disable raw content, continue tracking */
+    SSL_CNF_ENC_HANDLE_BYPASS = 1,     /**< skip processing of flow, bypass if possible */
+    SSL_CNF_ENC_HANDLE_FULL = 2,       /**< handle fully like any other proto */
 };
 
 typedef struct SslConfig_ {
     enum SslConfigEncryptHandling encrypt_mode;
-    /** dynamic setting for ja3: can be enabled on demand if not explicitly
-     *  disabled. */
+    /** dynamic setting for ja3 and ja4: can be enabled on demand if not
+     *  explicitly disabled. */
     SC_ATOMIC_DECLARE(int, enable_ja3);
     bool disable_ja3; /**< ja3 explicitly disabled. Don't enable on demand. */
+    SC_ATOMIC_DECLARE(int, enable_ja4);
+    bool disable_ja4; /**< ja4 explicitly disabled. Don't enable on demand. */
 } SslConfig;
 
 SslConfig ssl_config;
@@ -160,8 +242,9 @@ SslConfig ssl_config;
 #define SSLV2_MT_REQUEST_CERTIFICATE    7
 #define SSLV2_MT_CLIENT_CERTIFICATE     8
 
-#define SSLV3_RECORD_HDR_LEN            5
-#define SSLV3_MESSAGE_HDR_LEN           4
+#define SSLV3_RECORD_HDR_LEN 5
+/** max length according to RFC 5246 6.2.2 is 2^14 + 1024 */
+#define SSLV3_RECORD_MAX_LEN ((1 << 14) + 1024)
 
 #define SSLV3_CLIENT_HELLO_VERSION_LEN  2
 #define SSLV3_CLIENT_HELLO_RANDOM_LEN  32
@@ -175,6 +258,26 @@ SslConfig ssl_config;
 #define SHA1_STRING_LENGTH             60
 
 #define HAS_SPACE(n) ((uint64_t)(input - initial_input) + (uint64_t)(n) <= (uint64_t)(input_len))
+
+struct SSLDecoderResult {
+    int retval;      // nr bytes consumed from input, or < 0 on error
+    uint32_t needed; // more bytes needed
+};
+#define SSL_DECODER_ERROR(e)                                                                       \
+    (struct SSLDecoderResult)                                                                      \
+    {                                                                                              \
+        (e), 0                                                                                     \
+    }
+#define SSL_DECODER_OK(c)                                                                          \
+    (struct SSLDecoderResult)                                                                      \
+    {                                                                                              \
+        (uint32_t)(c), 0                                                                           \
+    }
+#define SSL_DECODER_INCOMPLETE(c, n)                                                               \
+    (struct SSLDecoderResult)                                                                      \
+    {                                                                                              \
+        (uint32_t)(c), (n)                                                                         \
+    }
 
 static inline int SafeMemcpy(void *dst, size_t dst_offset, size_t dst_size,
         const void *src, size_t src_offset, size_t src_size, size_t src_tocopy) WARN_UNUSED;
@@ -206,25 +309,11 @@ static inline int SafeMemcpy(void *dst, size_t dst_offset, size_t dst_size,
 #define ValidateRecordState(...)
 #endif
 
-#ifdef DEBUG_VALIDATION
-#define ValidateTrecBuffer(connp)                                               \
-    do {                                                                        \
-        DEBUG_VALIDATE_BUG_ON((connp)->trec_pos > (connp)->trec_len);           \
-        DEBUG_VALIDATE_BUG_ON((connp)->trec == NULL && (connp)->trec_len > 0);  \
-        DEBUG_VALIDATE_BUG_ON((connp)->trec == NULL && (connp)->trec_pos > 0);  \
-    } while(0)
-#else
-#define ValidateTrecBuffer(...)
-#endif
-
-#define SSLParserHSReset(connp)             \
-    do {                                    \
-        (connp)->trec_pos = 0;              \
-        (connp)->handshake_type = 0;        \
-        (connp)->hs_bytes_processed = 0;    \
-        (connp)->message_length = 0;        \
-        (connp)->message_start = 0;         \
-    } while(0)
+#define SSLParserHSReset(connp)                                                                    \
+    do {                                                                                           \
+        (connp)->handshake_type = 0;                                                               \
+        (connp)->message_length = 0;                                                               \
+    } while (0)
 
 #define SSLParserReset(state)                       \
     do {                                            \
@@ -233,36 +322,18 @@ static inline int SafeMemcpy(void *dst, size_t dst_offset, size_t dst_size,
         SSLParserHSReset((state)->curr_connp);      \
     } while(0)
 
-void SSLSetEvent(SSLState *ssl_state, uint8_t event)
-{
-    if (ssl_state == NULL) {
-        SCLogDebug("Could not set decoder event: %u", event);
-        return;
-    }
+#define SSLSetEvent(ssl_state, event)                                                              \
+    do {                                                                                           \
+        SCLogDebug("setting event %u", (event));                                                   \
+        if ((ssl_state) == NULL) {                                                                 \
+            SCLogDebug("could not set decoder event %u", event);                                   \
+        } else {                                                                                   \
+            AppLayerDecoderEventsSetEventRaw(&(ssl_state)->tx_data.events, (event));               \
+            (ssl_state)->events++;                                                                 \
+        }                                                                                          \
+    } while (0)
 
-    AppLayerDecoderEventsSetEventRaw(&ssl_state->decoder_events, event);
-    ssl_state->events++;
-}
-
-static AppLayerDecoderEvents *SSLGetEvents(void *tx)
-{
-    /* for TLS, TX == state, see GetTx */
-    SSLState *ssl_state = (SSLState *)tx;
-    return ssl_state->decoder_events;
-}
-
-static int SSLSetTxDetectState(void *vtx, DetectEngineState *de_state)
-{
-    SSLState *ssl_state = (SSLState *)vtx;
-    ssl_state->de_state = de_state;
-    return 0;
-}
-
-static DetectEngineState *SSLGetTxDetectState(void *vtx)
-{
-    SSLState *ssl_state = (SSLState *)vtx;
-    return ssl_state->de_state;
-}
+static void SSLStateCertSANFree(SSLStateConnp *connp);
 
 static void *SSLGetTx(void *state, uint64_t tx_id)
 {
@@ -276,35 +347,36 @@ static uint64_t SSLGetTxCnt(void *state)
     return 1;
 }
 
-static int SSLGetAlstateProgressCompletionStatus(uint8_t direction)
+static void UpdateClientState(SSLState *ssl_state, enum TlsStateClient s)
 {
-    return TLS_STATE_FINISHED;
+#ifdef DEBUG
+    enum TlsStateClient old = ssl_state->client_state;
+#endif
+    ssl_state->client_state = s;
+#ifdef DEBUG
+    SCLogDebug("toserver: state updated to %u from %u", s, old);
+#endif
+}
+
+static void UpdateServerState(SSLState *ssl_state, enum TlsStateServer s)
+{
+#ifdef DEBUG
+    enum TlsStateServer old = ssl_state->server_state;
+#endif
+    ssl_state->server_state = s;
+#ifdef DEBUG
+    SCLogDebug("toclient: state updated to %u from %u", s, old);
+#endif
 }
 
 static int SSLGetAlstateProgress(void *tx, uint8_t direction)
 {
     SSLState *ssl_state = (SSLState *)tx;
-
-    /* we don't care about direction, only that app-layer parser is done
-       and have sent an EOF */
-    if (ssl_state->flags & SSL_AL_FLAG_STATE_FINISHED) {
-        return TLS_STATE_FINISHED;
+    if (direction & STREAM_TOCLIENT) {
+        return ssl_state->server_state;
+    } else {
+        return ssl_state->client_state;
     }
-
-    /* we want the logger to log when the handshake is done, even if the
-       state is not finished */
-    if (ssl_state->flags & SSL_AL_FLAG_HANDSHAKE_DONE) {
-        return TLS_HANDSHAKE_DONE;
-    }
-
-    if (direction == STREAM_TOSERVER &&
-        (ssl_state->server_connp.cert0_subject != NULL ||
-         ssl_state->server_connp.cert0_issuerdn != NULL))
-    {
-        return TLS_STATE_CERT_READY;
-    }
-
-    return TLS_STATE_IN_PROGRESS;
 }
 
 static AppLayerTxData *SSLGetTxData(void *vtx)
@@ -313,93 +385,10 @@ static AppLayerTxData *SSLGetTxData(void *vtx)
     return &ssl_state->tx_data;
 }
 
-void SSLVersionToString(uint16_t version, char *buffer)
+static AppLayerStateData *SSLGetStateData(void *vstate)
 {
-    buffer[0] = '\0';
-
-    switch (version) {
-        case TLS_VERSION_UNKNOWN:
-            strlcat(buffer, "UNDETERMINED", 13);
-            break;
-        case SSL_VERSION_2:
-            strlcat(buffer, "SSLv2", 6);
-            break;
-        case SSL_VERSION_3:
-            strlcat(buffer, "SSLv3", 6);
-            break;
-        case TLS_VERSION_10:
-            strlcat(buffer, "TLSv1", 6);
-            break;
-        case TLS_VERSION_11:
-            strlcat(buffer, "TLS 1.1", 8);
-            break;
-        case TLS_VERSION_12:
-            strlcat(buffer, "TLS 1.2", 8);
-            break;
-        case TLS_VERSION_13:
-            strlcat(buffer, "TLS 1.3", 8);
-            break;
-        case TLS_VERSION_13_DRAFT28:
-            strlcat(buffer, "TLS 1.3 draft-28", 17);
-            break;
-        case TLS_VERSION_13_DRAFT27:
-            strlcat(buffer, "TLS 1.3 draft-27", 17);
-            break;
-        case TLS_VERSION_13_DRAFT26:
-            strlcat(buffer, "TLS 1.3 draft-26", 17);
-            break;
-        case TLS_VERSION_13_DRAFT25:
-            strlcat(buffer, "TLS 1.3 draft-25", 17);
-            break;
-        case TLS_VERSION_13_DRAFT24:
-            strlcat(buffer, "TLS 1.3 draft-24", 17);
-            break;
-        case TLS_VERSION_13_DRAFT23:
-            strlcat(buffer, "TLS 1.3 draft-23", 17);
-            break;
-        case TLS_VERSION_13_DRAFT22:
-            strlcat(buffer, "TLS 1.3 draft-22", 17);
-            break;
-        case TLS_VERSION_13_DRAFT21:
-            strlcat(buffer, "TLS 1.3 draft-21", 17);
-            break;
-        case TLS_VERSION_13_DRAFT20:
-            strlcat(buffer, "TLS 1.3 draft-20", 17);
-            break;
-        case TLS_VERSION_13_DRAFT19:
-            strlcat(buffer, "TLS 1.3 draft-19", 17);
-            break;
-        case TLS_VERSION_13_DRAFT18:
-            strlcat(buffer, "TLS 1.3 draft-18", 17);
-            break;
-        case TLS_VERSION_13_DRAFT17:
-            strlcat(buffer, "TLS 1.3 draft-17", 17);
-            break;
-        case TLS_VERSION_13_DRAFT16:
-            strlcat(buffer, "TLS 1.3 draft-16", 17);
-            break;
-        case TLS_VERSION_13_PRE_DRAFT16:
-            strlcat(buffer, "TLS 1.3 draft-<16", 18);
-            break;
-        case TLS_VERSION_13_DRAFT20_FB:
-            strlcat(buffer, "TLS 1.3 draft-20-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT21_FB:
-            strlcat(buffer, "TLS 1.3 draft-21-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT22_FB:
-            strlcat(buffer, "TLS 1.3 draft-22-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT23_FB:
-            strlcat(buffer, "TLS 1.3 draft-23-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT26_FB:
-            strlcat(buffer, "TLS 1.3 draft-26-fb", 20);
-            break;
-        default:
-            snprintf(buffer, 7, "0x%04x", version);
-            break;
-    }
+    SSLState *ssl_state = (SSLState *)vstate;
+    return &ssl_state->state_data;
 }
 
 static void TlsDecodeHSCertificateErrSetEvent(SSLState *ssl_state, uint32_t err)
@@ -445,33 +434,26 @@ static void TlsDecodeHSCertificateErrSetEvent(SSLState *ssl_state, uint32_t err)
     }
 }
 
-static inline int TlsDecodeHSCertificateFingerprint(SSLState *ssl_state,
-                                                    const uint8_t *input,
-                                                    uint32_t cert_len)
+static inline int TlsDecodeHSCertificateFingerprint(
+        SSLStateConnp *connp, const uint8_t *input, uint32_t cert_len)
 {
-    if (unlikely(ssl_state->server_connp.cert0_fingerprint != NULL))
+    if (unlikely(connp->cert0_fingerprint != NULL))
         return 0;
 
-    ssl_state->server_connp.cert0_fingerprint = SCCalloc(1, SHA1_STRING_LENGTH *
-                                                         sizeof(char));
-    if (ssl_state->server_connp.cert0_fingerprint == NULL)
+    connp->cert0_fingerprint = SCCalloc(1, SHA1_STRING_LENGTH);
+    if (connp->cert0_fingerprint == NULL)
         return -1;
 
-    uint8_t hash[SHA1_LENGTH];
-    if (ComputeSHA1(input, cert_len, hash, sizeof(hash)) == 1) {
-        for (int i = 0, x = 0; x < SHA1_LENGTH; x++)
-        {
-            i += snprintf(ssl_state->server_connp.cert0_fingerprint + i,
-                    SHA1_STRING_LENGTH - i, i == 0 ? "%02x" : ":%02x",
-                    hash[x]);
-        }
+    uint8_t hash[SC_SHA1_LEN];
+    if (SCSha1HashBuffer(input, cert_len, hash, sizeof(hash)) == 1) {
+        SCToHex_sep(
+                (uint8_t *)connp->cert0_fingerprint, SHA1_STRING_LENGTH, ':', hash, SC_SHA1_LEN);
     }
     return 0;
 }
 
-static inline int TlsDecodeHSCertificateAddCertToChain(SSLState *ssl_state,
-                                                       const uint8_t *input,
-                                                       uint32_t cert_len)
+static inline int TlsDecodeHSCertificateAddCertToChain(
+        SSLStateConnp *connp, const uint8_t *input, uint32_t cert_len)
 {
     SSLCertsChain *cert = SCCalloc(1, sizeof(SSLCertsChain));
     if (cert == NULL)
@@ -479,122 +461,157 @@ static inline int TlsDecodeHSCertificateAddCertToChain(SSLState *ssl_state,
 
     cert->cert_data = (uint8_t *)input;
     cert->cert_len = cert_len;
-    TAILQ_INSERT_TAIL(&ssl_state->server_connp.certs, cert, next);
+    TAILQ_INSERT_TAIL(&connp->certs, cert, next);
 
     return 0;
 }
 
-/** \retval consumed bytes consumed or -1 on error */
-static int TlsDecodeHSCertificate(SSLState *ssl_state,
-                                  const uint8_t * const initial_input,
-                                  const uint32_t input_len)
+static int TlsDecodeHSCertificate(SSLState *ssl_state, SSLStateConnp *connp,
+        const uint8_t *const initial_input, const uint32_t input_len, const int certn)
 {
     const uint8_t *input = (uint8_t *)initial_input;
     uint32_t err_code = 0;
     X509 *x509 = NULL;
+    int rc = 0;
 
     if (!(HAS_SPACE(3)))
-        return 0;
+        goto invalid_cert;
 
-    uint32_t cert_chain_len = *input << 16 | *(input + 1) << 8 | *(input + 2);
+    uint32_t cert_len = *input << 16 | *(input + 1) << 8 | *(input + 2);
     input += 3;
 
-    if (!(HAS_SPACE(cert_chain_len)))
-        return 0;
+    if (!(HAS_SPACE(cert_len)))
+        goto invalid_cert;
 
-    uint32_t processed_len = 0;
-    /* coverity[tainted_data] */
-    while (processed_len < cert_chain_len)
-    {
-        err_code = 0;
-        int rc = 0;
-
-        if (!(HAS_SPACE(3)))
-            goto invalid_cert;
-
-        uint32_t cert_len = *input << 16 | *(input + 1) << 8 | *(input + 2);
-        input += 3;
-
-        if (!(HAS_SPACE(cert_len)))
-            goto invalid_cert;
-
-        /* only store fields from the first certificate in the chain */
-        if (processed_len == 0 &&
-                ssl_state->server_connp.cert0_subject == NULL &&
-                ssl_state->server_connp.cert0_issuerdn == NULL &&
-                ssl_state->server_connp.cert0_serial == NULL)
-        {
-            int64_t not_before, not_after;
-
-            x509 = rs_x509_decode(input, cert_len, &err_code);
-            if (x509 == NULL) {
-                TlsDecodeHSCertificateErrSetEvent(ssl_state, err_code);
-                goto next;
-            }
-
-            char *str = rs_x509_get_subject(x509);
-            if (str == NULL) {
-                err_code = ERR_EXTRACT_SUBJECT;
-                goto error;
-            }
-            ssl_state->server_connp.cert0_subject = str;
-
-            str = rs_x509_get_issuer(x509);
-            if (str == NULL) {
-                err_code = ERR_EXTRACT_ISSUER;
-                goto error;
-            }
-            ssl_state->server_connp.cert0_issuerdn = str;
-
-            str = rs_x509_get_serial(x509);
-            if (str == NULL) {
-                err_code = ERR_INVALID_SERIAL;
-                goto error;
-            }
-            ssl_state->server_connp.cert0_serial = str;
-
-            rc = rs_x509_get_validity(x509, &not_before, &not_after);
-            if (rc != 0) {
-                err_code = ERR_EXTRACT_VALIDITY;
-                goto error;
-            }
-            ssl_state->server_connp.cert0_not_before = (time_t)not_before;
-            ssl_state->server_connp.cert0_not_after = (time_t)not_after;
-
-            rs_x509_free(x509);
-            x509 = NULL;
-
-            rc = TlsDecodeHSCertificateFingerprint(ssl_state, input, cert_len);
-            if (rc != 0) {
-                SCLogDebug("TlsDecodeHSCertificateFingerprint failed with %d", rc);
-                goto error;
-            }
+    /* only store fields from the first certificate in the chain */
+    if (certn == 0 && connp->cert0_subject == NULL && connp->cert0_issuerdn == NULL &&
+            connp->cert0_serial == NULL) {
+        x509 = SCX509Decode(input, cert_len, &err_code);
+        if (x509 == NULL) {
+            TlsDecodeHSCertificateErrSetEvent(ssl_state, err_code);
+            goto next;
         }
 
-        rc = TlsDecodeHSCertificateAddCertToChain(ssl_state, input, cert_len);
+        char *str = SCX509GetSubject(x509);
+        if (str == NULL) {
+            err_code = ERR_EXTRACT_SUBJECT;
+            goto error;
+        }
+        connp->cert0_subject = str;
+
+        str = SCX509GetIssuer(x509);
+        if (str == NULL) {
+            err_code = ERR_EXTRACT_ISSUER;
+            goto error;
+        }
+        connp->cert0_issuerdn = str;
+
+        connp->cert0_sans_len = SCX509GetSubjectAltNameLen(x509);
+        char **sans = SCCalloc(connp->cert0_sans_len, sizeof(char *));
+        if (sans == NULL) {
+            goto error;
+        }
+        for (uint16_t i = 0; i < connp->cert0_sans_len; i++) {
+            sans[i] = SCX509GetSubjectAltNameAt(x509, i);
+        }
+        connp->cert0_sans = sans;
+        str = SCX509GetSerial(x509);
+        if (str == NULL) {
+            err_code = ERR_INVALID_SERIAL;
+            goto error;
+        }
+        connp->cert0_serial = str;
+
+        rc = SCX509GetValidity(x509, &connp->cert0_not_before, &connp->cert0_not_after);
         if (rc != 0) {
-            SCLogDebug("TlsDecodeHSCertificateAddCertToChain failed with %d", rc);
+            err_code = ERR_EXTRACT_VALIDITY;
             goto error;
         }
 
-next:
-        input += cert_len;
-        processed_len += cert_len + 3;
+        SCX509Free(x509);
+        x509 = NULL;
+
+        rc = TlsDecodeHSCertificateFingerprint(connp, input, cert_len);
+        if (rc != 0) {
+            SCLogDebug("TlsDecodeHSCertificateFingerprint failed with %d", rc);
+            goto error;
+        }
     }
 
-    return (input - initial_input);
+    rc = TlsDecodeHSCertificateAddCertToChain(connp, input, cert_len);
+    if (rc != 0) {
+        SCLogDebug("TlsDecodeHSCertificateAddCertToChain failed with %d", rc);
+        goto error;
+    }
+
+next:
+    input += cert_len;
+    return (int)(input - initial_input);
 
 error:
     if (err_code != 0)
         TlsDecodeHSCertificateErrSetEvent(ssl_state, err_code);
     if (x509 != NULL)
-        rs_x509_free(x509);
+        SCX509Free(x509);
+
+    SSLStateCertSANFree(connp);
     return -1;
 
 invalid_cert:
     SCLogDebug("TLS invalid certificate");
     SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_CERTIFICATE);
     return -1;
+}
+
+/** \internal
+ * \brief parse cert data in a certificate handshake message
+ *        will be called with all data.
+ * \retval consumed bytes consumed or -1 on error
+ */
+static int TlsDecodeHSCertificates(SSLState *ssl_state, SSLStateConnp *connp,
+        const uint8_t *const initial_input, const uint32_t input_len)
+{
+    const uint8_t *input = (uint8_t *)initial_input;
+
+    if (!(HAS_SPACE(3)))
+        return -1;
+
+    const uint32_t cert_chain_len = *input << 16 | *(input + 1) << 8 | *(input + 2);
+    input += 3;
+
+    if (!(HAS_SPACE(cert_chain_len)))
+        return -1;
+
+    if (connp->certs_buffer != NULL) {
+        // TODO should we set an event here?
+        return -1;
+    }
+
+    connp->certs_buffer = SCCalloc(1, cert_chain_len);
+    if (connp->certs_buffer == NULL) {
+        return -1;
+    }
+    connp->certs_buffer_size = cert_chain_len;
+    memcpy(connp->certs_buffer, input, cert_chain_len);
+
+    int cert_cnt = 0;
+    uint32_t processed_len = 0;
+    /* coverity[tainted_data] */
+    while (processed_len < cert_chain_len) {
+        int rc = TlsDecodeHSCertificate(ssl_state, connp, connp->certs_buffer + processed_len,
+                connp->certs_buffer_size - processed_len, cert_cnt);
+        if (rc <= 0) { // 0 should be impossible, but lets be defensive
+            return -1;
+        }
+        DEBUG_VALIDATE_BUG_ON(processed_len + (uint32_t)rc > cert_chain_len);
+        if (processed_len + (uint32_t)rc > cert_chain_len) {
+            return -1;
+        }
+
+        processed_len += (uint32_t)rc;
+    }
+
+    return processed_len + 3;
 }
 
 /**
@@ -647,8 +664,13 @@ static inline int TLSDecodeHSHelloVersion(SSLState *ssl_state,
         return -1;
     }
 
-    uint16_t version = *input << 8 | *(input + 1);
+    uint16_t version = (uint16_t)(*input << 8) | *(input + 1);
     ssl_state->curr_connp->version = version;
+
+    if (ssl_state->current_flags &
+            (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+        SCTLSHandshakeSetTLSVersion(ssl_state->curr_connp->hs, version);
+    }
 
     /* TLSv1.3 draft1 to draft21 use the version field as earlier TLS
        versions, instead of using the supported versions extension. */
@@ -684,7 +706,7 @@ static inline int TLSDecodeHSHelloVersion(SSLState *ssl_state,
 
     input += SSLV3_CLIENT_HELLO_VERSION_LEN;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static inline int TLSDecodeHSHelloRandom(SSLState *ssl_state,
@@ -700,10 +722,18 @@ static inline int TLSDecodeHSHelloRandom(SSLState *ssl_state,
         return -1;
     }
 
+    if (ssl_state->current_flags & SSL_AL_FLAG_STATE_SERVER_HELLO) {
+        memcpy(ssl_state->server_connp.random, input, TLS_RANDOM_LEN);
+        ssl_state->flags |= TLS_TS_RANDOM_SET;
+    } else if (ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) {
+        memcpy(ssl_state->client_connp.random, input, TLS_RANDOM_LEN);
+        ssl_state->flags |= TLS_TC_RANDOM_SET;
+    }
+
     /* Skip random */
     input += SSLV3_CLIENT_HELLO_RANDOM_LEN;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static inline int TLSDecodeHSHelloSessionID(SSLState *ssl_state,
@@ -748,7 +778,7 @@ static inline int TLSDecodeHSHelloSessionID(SSLState *ssl_state,
 
     input += session_id_length;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -771,7 +801,7 @@ static inline int TLSDecodeHSHelloCipherSuites(SSLState *ssl_state,
     if (ssl_state->current_flags & SSL_AL_FLAG_STATE_SERVER_HELLO) {
         cipher_suites_length = 2;
     } else if (ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) {
-        cipher_suites_length = *input << 8 | *(input + 1);
+        cipher_suites_length = (uint16_t)(*input << 8) | *(input + 1);
         input += 2;
     } else {
         return -1;
@@ -785,45 +815,53 @@ static inline int TLSDecodeHSHelloCipherSuites(SSLState *ssl_state,
         goto invalid_length;
     }
 
-    if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-        JA3Buffer *ja3_cipher_suites = Ja3BufferInit();
+    const bool enable_ja3 =
+            SC_ATOMIC_GET(ssl_config.enable_ja3) && ssl_state->curr_connp->ja3_hash == NULL;
+
+    JA3Buffer *ja3_cipher_suites = NULL;
+
+    if (enable_ja3) {
+        ja3_cipher_suites = Ja3BufferInit();
         if (ja3_cipher_suites == NULL)
             return -1;
+    }
 
-        uint16_t processed_len = 0;
-        /* coverity[tainted_data] */
-        while (processed_len < cipher_suites_length)
-        {
-            if (!(HAS_SPACE(2))) {
+    uint16_t processed_len = 0;
+    /* coverity[tainted_data] */
+    while (processed_len < cipher_suites_length) {
+        if (!(HAS_SPACE(2))) {
+            if (enable_ja3) {
                 Ja3BufferFree(&ja3_cipher_suites);
-                goto invalid_length;
             }
+            goto invalid_length;
+        }
 
-            uint16_t cipher_suite = *input << 8 | *(input + 1);
-            input += 2;
+        uint16_t cipher_suite = (uint16_t)(*input << 8) | *(input + 1);
+        input += 2;
 
-            if (TLSDecodeValueIsGREASE(cipher_suite) != 1) {
+        if (TLSDecodeValueIsGREASE(cipher_suite) != 1) {
+            if (ssl_state->current_flags &
+                    (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+                SCTLSHandshakeAddCipher(ssl_state->curr_connp->hs, cipher_suite);
+            }
+            if (enable_ja3) {
                 int rc = Ja3BufferAddValue(&ja3_cipher_suites, cipher_suite);
                 if (rc != 0) {
                     return -1;
                 }
             }
-
-            processed_len += 2;
         }
+        processed_len += 2;
+    }
 
-        int rc = Ja3BufferAppendBuffer(&ssl_state->curr_connp->ja3_str,
-                                   &ja3_cipher_suites);
+    if (enable_ja3) {
+        int rc = Ja3BufferAppendBuffer(&ssl_state->curr_connp->ja3_str, &ja3_cipher_suites);
         if (rc == -1) {
             return -1;
         }
-
-    } else {
-        /* Skip cipher suites */
-        input += cipher_suites_length;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -854,7 +892,7 @@ static inline int TLSDecodeHSHelloCompressionMethods(SSLState *ssl_state,
         input += compression_methods_length;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid_length");
@@ -897,7 +935,7 @@ static inline int TLSDecodeHSHelloExtensionSni(SSLState *ssl_state,
     if (!(HAS_SPACE(2)))
         goto invalid_length;
 
-    uint16_t sni_len = *input << 8 | *(input + 1);
+    uint16_t sni_len = (uint16_t)(*input << 8) | *(input + 1);
     input += 2;
 
     /* host_name contains the fully qualified domain name,
@@ -916,7 +954,7 @@ static inline int TLSDecodeHSHelloExtensionSni(SSLState *ssl_state,
         SSLSetEvent(ssl_state,
                 TLS_DECODER_EVENT_MULTIPLE_SNI_EXTENSIONS);
         input += sni_len;
-        return (input - initial_input);
+        return (int)(input - initial_input);
     }
 
     const size_t sni_strlen = sni_len + 1;
@@ -935,7 +973,7 @@ static inline int TLSDecodeHSHelloExtensionSni(SSLState *ssl_state,
 
     input += sni_len;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -969,8 +1007,18 @@ static inline int TLSDecodeHSHelloExtensionSupportedVersions(SSLState *ssl_state
         if (!(HAS_SPACE(supported_ver_len)))
             goto invalid_length;
 
-        /* Use the first (and prefered) version as client version */
-        ssl_state->curr_connp->version = *input << 8 | *(input + 1);
+        /* Use the first (and preferred) valid version as client version,
+         * skip over GREASE and other possible noise. */
+        uint16_t i = 0;
+        while (i + 1 < (uint16_t)supported_ver_len) {
+            uint16_t ver = (uint16_t)(input[i] << 8) | input[i + 1];
+            if (TLSVersionValid(ver)) {
+                ssl_state->curr_connp->version = ver;
+                SCTLSHandshakeSetTLSVersion(ssl_state->curr_connp->hs, ver);
+                break;
+            }
+            i += 2;
+        }
 
         /* Set a flag to indicate that we have seen this extension */
         ssl_state->flags |= SSL_AL_FLAG_CH_VERSION_EXTENSION;
@@ -981,7 +1029,7 @@ static inline int TLSDecodeHSHelloExtensionSupportedVersions(SSLState *ssl_state
         if (!(HAS_SPACE(2)))
             goto invalid_length;
 
-        uint16_t ver = *input << 8 | *(input + 1);
+        uint16_t ver = (uint16_t)(*input << 8) | *(input + 1);
 
         if ((ssl_state->flags & SSL_AL_FLAG_CH_VERSION_EXTENSION) &&
                 (ver > TLS_VERSION_12)) {
@@ -992,7 +1040,7 @@ static inline int TLSDecodeHSHelloExtensionSupportedVersions(SSLState *ssl_state
         input += 2;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1016,14 +1064,13 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurves(SSLState *ssl_state,
     if (!(HAS_SPACE(2)))
         goto invalid_length;
 
-    uint16_t elliptic_curves_len = *input << 8 | *(input + 1);
+    uint16_t elliptic_curves_len = (uint16_t)(*input << 8) | *(input + 1);
     input += 2;
 
     if (!(HAS_SPACE(elliptic_curves_len)))
         goto invalid_length;
 
-    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
-            SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) && ja3_elliptic_curves) {
         uint16_t ec_processed_len = 0;
         /* coverity[tainted_data] */
         while (ec_processed_len < elliptic_curves_len)
@@ -1031,7 +1078,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurves(SSLState *ssl_state,
             if (!(HAS_SPACE(2)))
                 goto invalid_length;
 
-            uint16_t elliptic_curve = *input << 8 | *(input + 1);
+            uint16_t elliptic_curve = (uint16_t)(*input << 8) | *(input + 1);
             input += 2;
 
             if (TLSDecodeValueIsGREASE(elliptic_curve) != 1) {
@@ -1049,7 +1096,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurves(SSLState *ssl_state,
         input += elliptic_curves_len;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1079,8 +1126,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurvePF(SSLState *ssl_state,
     if (!(HAS_SPACE(ec_pf_len)))
         goto invalid_length;
 
-    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
-            SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) && ja3_elliptic_curves_pf) {
         uint8_t ec_pf_processed_len = 0;
         /* coverity[tainted_data] */
         while (ec_pf_processed_len < ec_pf_len)
@@ -1103,12 +1149,108 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurvePF(SSLState *ssl_state,
         input += ec_pf_len;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
     SSLSetEvent(ssl_state,
                 TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
+
+    return -1;
+}
+
+static inline int TLSDecodeHSHelloExtensionSigAlgorithms(
+        SSLState *ssl_state, const uint8_t *const initial_input, const uint32_t input_len)
+{
+    const uint8_t *input = initial_input;
+
+    /* Empty extension */
+    if (input_len == 0)
+        return 0;
+
+    if (!(HAS_SPACE(2)))
+        goto invalid_length;
+
+    uint16_t sigalgo_len = (uint16_t)(*input << 8) | *(input + 1);
+    input += 2;
+
+    /* Signature algorithms length should always be divisible by 2 */
+    if ((sigalgo_len % 2) != 0) {
+        goto invalid_length;
+    }
+
+    if (!(HAS_SPACE(sigalgo_len)))
+        goto invalid_length;
+
+    if (ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) {
+        uint16_t sigalgo_processed_len = 0;
+        while (sigalgo_processed_len < sigalgo_len) {
+            uint16_t sigalgo = (uint16_t)(*input << 8) | *(input + 1);
+            input += 2;
+            sigalgo_processed_len += 2;
+
+            SCTLSHandshakeAddSigAlgo(ssl_state->curr_connp->hs, sigalgo);
+        }
+    } else {
+        /* Skip signature algorithms */
+        input += sigalgo_len;
+    }
+
+    return (int)(input - initial_input);
+
+invalid_length:
+    SCLogDebug("Signature algorithm list invalid length");
+    SSLSetEvent(ssl_state, TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
+
+    return -1;
+}
+
+static inline int TLSDecodeHSHelloExtensionALPN(
+        SSLState *ssl_state, const uint8_t *const initial_input, const uint32_t input_len)
+{
+    const uint8_t *input = initial_input;
+
+    /* Empty extension */
+    if (input_len == 0)
+        return 0;
+
+    if (!(HAS_SPACE(2)))
+        goto invalid_length;
+
+    uint16_t alpn_len = (uint16_t)(*input << 8) | *(input + 1);
+    input += 2;
+
+    if (!(HAS_SPACE(alpn_len)))
+        goto invalid_length;
+
+    /* We use 32 bits here to avoid potentially overflowing a value that
+       needs to be compared to an unsigned 16-bit value. */
+    uint32_t alpn_processed_len = 0;
+    while (alpn_processed_len < alpn_len) {
+        uint8_t protolen = *input;
+        input += 1;
+        alpn_processed_len += 1;
+
+        if (!(HAS_SPACE(protolen)))
+            goto invalid_length;
+
+        /* Check if reading another protolen bytes would exceed the
+           overall ALPN length; if so, skip and continue */
+        if (alpn_processed_len + protolen > ((uint32_t)alpn_len)) {
+            input += alpn_len - alpn_processed_len;
+            break;
+        }
+        SCTLSHandshakeAddALPN(ssl_state->curr_connp->hs, (const char *)input, protolen);
+
+        alpn_processed_len += protolen;
+        input += protolen;
+    }
+
+    return (int)(input - initial_input);
+
+invalid_length:
+    SCLogDebug("ALPN list invalid length");
+    SSLSetEvent(ssl_state, TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
 
     return -1;
 }
@@ -1121,7 +1263,9 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
 
     int ret;
     int rc;
-    const bool ja3 = (SC_ATOMIC_GET(ssl_config.enable_ja3) == 1);
+    // if ja3_hash is already computed, do not use new hello to augment ja3_str
+    const bool ja3 =
+            (SC_ATOMIC_GET(ssl_config.enable_ja3) == 1) && ssl_state->curr_connp->ja3_hash == NULL;
 
     JA3Buffer *ja3_extensions = NULL;
     JA3Buffer *ja3_elliptic_curves = NULL;
@@ -1147,7 +1291,7 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
     if (!(HAS_SPACE(2)))
         goto end;
 
-    uint16_t extensions_len = *input << 8 | *(input + 1);
+    uint16_t extensions_len = (uint16_t)(*input << 8) | *(input + 1);
     input += 2;
 
     if (!(HAS_SPACE(extensions_len)))
@@ -1160,13 +1304,13 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
         if (!(HAS_SPACE(2)))
             goto invalid_length;
 
-        uint16_t ext_type = *input << 8 | *(input + 1);
+        uint16_t ext_type = (uint16_t)(*input << 8) | *(input + 1);
         input += 2;
 
         if (!(HAS_SPACE(2)))
             goto invalid_length;
 
-        uint16_t ext_len = *input << 8 | *(input + 1);
+        uint16_t ext_len = (uint16_t)(*input << 8) | *(input + 1);
         input += 2;
 
         if (!(HAS_SPACE(ext_len)))
@@ -1210,6 +1354,28 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
                     goto end;
 
                 input += ret;
+
+                break;
+            }
+
+            case SSL_EXTENSION_SIGNATURE_ALGORITHMS: {
+                /* coverity[tainted_data] */
+                ret = TLSDecodeHSHelloExtensionSigAlgorithms(ssl_state, input, ext_len);
+                if (ret < 0)
+                    goto end;
+
+                input += ret;
+
+                break;
+            }
+
+            case SSL_EXTENSION_ALPN: {
+                /* coverity[tainted_data] */
+                ret = TLSDecodeHSHelloExtensionALPN(ssl_state, input, ext_len);
+                if (ret < 0)
+                    goto end;
+
+                input += ext_len;
 
                 break;
             }
@@ -1267,6 +1433,13 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
             }
         }
 
+        if (ssl_state->current_flags &
+                (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+            if (TLSDecodeValueIsGREASE(ext_type) != 1) {
+                SCTLSHandshakeAddExtension(ssl_state->curr_connp->hs, ext_type);
+            }
+        }
+
         processed_len += ext_len + 4;
     }
 
@@ -1290,7 +1463,7 @@ end:
         }
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1369,94 +1542,13 @@ static int TLSDecodeHandshakeHello(SSLState *ssl_state,
         ssl_state->curr_connp->ja3_hash = Ja3GenerateHash(ssl_state->curr_connp->ja3_str);
     }
 
-end:
-    ssl_state->curr_connp->hs_bytes_processed = 0;
-    return 0;
-}
-
-/** \internal
- *  \brief Get Certificates len so we can know now much (more) we need to buffer
- *  If we already have a few bytes queued up in 'trec' we use those or a mix of
- *  those with the input.
- */
-static uint32_t GetCertsLen(SSLStateConnp *curr_connp, const uint8_t *input,
-        const uint32_t input_len)
-{
-    if (curr_connp->trec != NULL && curr_connp->trec_pos > 0) {
-        if (curr_connp->trec_pos >= 3) {
-            const uint8_t * const ptr = curr_connp->trec;
-            uint32_t len = (*ptr << 16 | *(ptr + 1) << 8 | *(ptr + 2)) + 3;
-            SCLogDebug("length %u (trec)", len);
-            return len;
-        } else if (input_len + curr_connp->trec_pos >= 3) {
-            uint8_t buf[3] = { 0, 0, 0, }; // init to 0 to make scan-build happy
-            uint32_t i = 0;
-            for (uint32_t x = 0; x < curr_connp->trec_pos && i < 3;  x++) {
-                buf[i++] = curr_connp->trec[x];
-            }
-            for (uint32_t x = 0; x < input_len && i < 3;  x++) {
-                buf[i++] = input[x];
-            }
-            uint32_t len = (buf[0] << 16 | buf[1] << 8 | buf[2]) + 3;
-            SCLogDebug("length %u (part trec, part input)", len);
-            return len;
-        }
-        return 0;
-    } else if (input_len >= 3) {
-        uint32_t len = (*input << 16 | *(input + 1) << 8 | *(input + 2)) + 3;
-        SCLogDebug("length %u (input)", len);
-        return len;
+    if (ssl_state->curr_connp == &ssl_state->client_connp) {
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HELLO_DONE);
     } else {
-        SCLogDebug("length unknown (input len %u)", input_len);
-        return 0;
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO);
     }
-}
-
-/** \internal
- *  \brief setup or grow the `trec` space in the connp
- */
-static int EnsureRecordSpace(SSLStateConnp *curr_connp, const uint8_t * const input,
-        const uint32_t input_len)
-{
-    ValidateTrecBuffer(curr_connp);
-
-    uint32_t certs_len = GetCertsLen(curr_connp, input, input_len);
-    if (certs_len == 0) {
-        SCLogDebug("cert_len unknown still, create small buffer to start");
-        certs_len = 256;
-    }
-
-    if (curr_connp->trec == NULL) {
-        curr_connp->trec_len = certs_len;
-        curr_connp->trec = SCMalloc(curr_connp->trec_len);
-        if (unlikely(curr_connp->trec == NULL))
-            goto error;
-    }
-
-    if (certs_len > curr_connp->trec_len) {
-        curr_connp->trec_len = certs_len;
-        void *ptmp = SCRealloc(curr_connp->trec, curr_connp->trec_len);
-        if (unlikely(ptmp == NULL)) {
-            SCFree(curr_connp->trec);
-            curr_connp->trec = NULL;
-            goto error;
-        }
-        curr_connp->trec = ptmp;
-    }
-    ValidateTrecBuffer(curr_connp);
+end:
     return 0;
-error:
-    curr_connp->trec_len = 0;
-    curr_connp->trec_pos = 0;
-    ValidateTrecBuffer(curr_connp);
-    return -1;
-}
-
-static inline bool
-HaveEntireRecord(const SSLStateConnp *curr_connp, const uint32_t input_len)
-{
-    return (curr_connp->bytes_processed + input_len) >=
-                      (curr_connp->record_length + SSLV3_RECORD_HDR_LEN);
 }
 
 #ifdef DEBUG_VALIDATION
@@ -1468,82 +1560,54 @@ RecordAlreadyProcessed(const SSLStateConnp *curr_connp)
 }
 #endif
 
-static inline int SSLv3ParseHandshakeTypeCertificate(SSLState *ssl_state,
-        const uint8_t * const initial_input,
-        const uint32_t input_len)
+static inline int SSLv3ParseHandshakeTypeCertificate(SSLState *ssl_state, SSLStateConnp *connp,
+        const uint8_t *const initial_input, const uint32_t input_len)
 {
-    ValidateTrecBuffer(ssl_state->curr_connp);
-    const uint32_t certs_len = GetCertsLen(ssl_state->curr_connp, initial_input, input_len);
-    SCLogDebug("certs_len %u", certs_len);
-
-    if (EnsureRecordSpace(ssl_state->curr_connp, initial_input, input_len) < 0) {
-        /* error, skip input data */
-        ssl_state->curr_connp->bytes_processed += input_len;
-        return -1;
-    }
-    ValidateTrecBuffer(ssl_state->curr_connp);
-
-    uint32_t write_len = 0;
-    if (certs_len != 0 && ssl_state->curr_connp->trec_pos + input_len >= certs_len) {
-        write_len = certs_len - ssl_state->curr_connp->trec_pos;
-        /* get data left in this frag. The length field may indicate more
-         * data than just in this record. */
-        uint32_t cur_frag_left = ssl_state->curr_connp->record_length +
-                SSLV3_RECORD_HDR_LEN - ssl_state->curr_connp->bytes_processed;
-        SCLogDebug("write_len %u cur_frag_left %u", write_len, cur_frag_left);
-        write_len = MIN(write_len, cur_frag_left);
-    } else {
-        uint32_t cur_frag_left = (ssl_state->curr_connp->record_length +
-                SSLV3_RECORD_HDR_LEN - ssl_state->curr_connp->bytes_processed);
-        SCLogDebug("cur_frag_left %u", cur_frag_left);
-        write_len = MIN(input_len, cur_frag_left);
-        SCLogDebug("write_len %u", write_len);
-    }
-    if (write_len == 0) {
-        /* no (new) data, so we're done */
-        ValidateTrecBuffer(ssl_state->curr_connp);
-        return 0;
-    }
-    BUG_ON(write_len > input_len);
-
-    if (SafeMemcpy(ssl_state->curr_connp->trec,
-                ssl_state->curr_connp->trec_pos,
-                ssl_state->curr_connp->trec_len,
-                initial_input, 0, input_len, write_len) != 0) {
-        return -1;
-    }
-    ssl_state->curr_connp->trec_pos += write_len;
-    SCLogDebug("ssl_state->curr_connp->trec_pos %u", ssl_state->curr_connp->trec_pos);
-    DEBUG_VALIDATE_BUG_ON(certs_len != 0 && certs_len < ssl_state->curr_connp->trec_pos);
-
-    /* if we didn't yet get enough to determine the certs len, or we can
-     * see we didn't buffer enough for the certs, don't bother trying to
-     * parse it the data */
-    if (certs_len == 0 || certs_len > ssl_state->curr_connp->trec_pos) {
-        ssl_state->curr_connp->bytes_processed += write_len;
-        SCLogDebug("bytes_processed %u record_len %u",
-                ssl_state->curr_connp->bytes_processed, ssl_state->curr_connp->record_length);
-        ValidateTrecBuffer(ssl_state->curr_connp);
-        return write_len;
-    }
-
-    int rc = TlsDecodeHSCertificate(ssl_state, ssl_state->curr_connp->trec,
-            ssl_state->curr_connp->trec_pos);
+    int rc = TlsDecodeHSCertificates(ssl_state, connp, initial_input, input_len);
     SCLogDebug("rc %d", rc);
     if (rc > 0) {
-        DEBUG_VALIDATE_BUG_ON(rc != (int)ssl_state->curr_connp->trec_pos);
-        SSLParserHSReset(ssl_state->curr_connp);
+        DEBUG_VALIDATE_BUG_ON(rc > (int)input_len);
+        SSLParserHSReset(connp);
     } else if (rc < 0) {
         SCLogDebug("error parsing cert, reset state");
-        SSLParserHSReset(ssl_state->curr_connp);
+        SSLParserHSReset(connp);
         /* fall through to still consume the cert bytes */
     }
-    ssl_state->curr_connp->bytes_processed += write_len;
-    ValidateTrecBuffer(ssl_state->curr_connp);
-    return write_len;
+    if (connp == &ssl_state->client_connp) {
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_CERT_DONE);
+    } else {
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_CERT_DONE);
+    }
+    return input_len;
+}
+
+static int SupportedHandshakeType(const uint8_t type)
+{
+    switch (type) {
+        case SSLV3_HS_CLIENT_HELLO:
+        case SSLV3_HS_SERVER_HELLO:
+        case SSLV3_HS_SERVER_KEY_EXCHANGE:
+        case SSLV3_HS_CLIENT_KEY_EXCHANGE:
+        case SSLV3_HS_CERTIFICATE:
+        case SSLV3_HS_HELLO_REQUEST:
+        case SSLV3_HS_CERTIFICATE_REQUEST:
+        case SSLV3_HS_CERTIFICATE_VERIFY:
+        case SSLV3_HS_FINISHED:
+        case SSLV3_HS_CERTIFICATE_URL:
+        case SSLV3_HS_CERTIFICATE_STATUS:
+        case SSLV3_HS_NEW_SESSION_TICKET:
+        case SSLV3_HS_SERVER_HELLO_DONE:
+            return true;
+            break;
+
+        default:
+            return false;
+            break;
+    }
 }
 
 /**
+ *  \param input_len length of bytes after record header. Can be 0 (e.g. for server hello done).
  *  \retval parsed number of consumed bytes
  *  \retval < 0 error
  */
@@ -1553,37 +1617,24 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
     const uint8_t *initial_input = input;
     int rc;
 
-    if (input_len == 0) {
-        return 0;
-    }
     DEBUG_VALIDATE_BUG_ON(RecordAlreadyProcessed(ssl_state->curr_connp));
 
     switch (ssl_state->curr_connp->handshake_type) {
         case SSLV3_HS_CLIENT_HELLO:
             ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_HELLO;
 
-            /* Only parse the message if it is complete */
-            if (input_len >= ssl_state->curr_connp->message_length &&
-                      input_len >= 40) {
-                rc = TLSDecodeHandshakeHello(ssl_state, input, input_len);
-                if (rc < 0)
-                    return rc;
-            }
-
+            rc = TLSDecodeHandshakeHello(ssl_state, input, input_len);
+            if (rc < 0)
+                return rc;
             break;
 
         case SSLV3_HS_SERVER_HELLO:
             ssl_state->current_flags = SSL_AL_FLAG_STATE_SERVER_HELLO;
 
-            /* Only parse the message if it is complete */
-            if (input_len >= ssl_state->curr_connp->message_length &&
-                    input_len >= 40) {
-                rc = TLSDecodeHandshakeHello(ssl_state, input,
-                                             ssl_state->curr_connp->message_length);
-                if (rc < 0)
-                    return rc;
-            }
-
+            DEBUG_VALIDATE_BUG_ON(ssl_state->curr_connp->message_length != input_len);
+            rc = TLSDecodeHandshakeHello(ssl_state, input, input_len);
+            if (rc < 0)
+                return rc;
             break;
 
         case SSLV3_HS_SERVER_KEY_EXCHANGE:
@@ -1595,19 +1646,20 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
             break;
 
         case SSLV3_HS_CERTIFICATE:
-            /* For now, only decode the server certificate */
-            if (direction == 0) {
-                SCLogDebug("Incorrect SSL Record type sent in the toserver "
-                           "direction!");
-                break;
-            }
             rc = SSLv3ParseHandshakeTypeCertificate(ssl_state,
-                    initial_input, input_len);
-            return rc;
+                    direction ? &ssl_state->server_connp : &ssl_state->client_connp, initial_input,
+                    input_len);
+            if (rc < 0)
+                return rc;
             break;
 
         case SSLV3_HS_HELLO_REQUEST:
+            break;
         case SSLV3_HS_CERTIFICATE_REQUEST:
+            if (direction) {
+                ssl_state->current_flags = SSL_AL_FLAG_NEED_CLIENT_CERT;
+            }
+            break;
         case SSLV3_HS_CERTIFICATE_VERIFY:
         case SSLV3_HS_FINISHED:
         case SSLV3_HS_CERTIFICATE_URL:
@@ -1616,6 +1668,11 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
         case SSLV3_HS_NEW_SESSION_TICKET:
             SCLogDebug("new session ticket");
             break;
+        case SSLV3_HS_SERVER_HELLO_DONE:
+            if (direction) {
+                UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO_DONE);
+            }
+            break;
         default:
             SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
             return -1;
@@ -1623,25 +1680,10 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
 
     ssl_state->flags |= ssl_state->current_flags;
 
-    SCLogDebug("message: start %u length %u", ssl_state->curr_connp->message_start, ssl_state->curr_connp->message_length);
+    SCLogDebug("message: length %u", ssl_state->curr_connp->message_length);
     SCLogDebug("input_len %u ssl_state->curr_connp->bytes_processed %u", input_len, ssl_state->curr_connp->bytes_processed);
 
-    uint32_t write_len = 0;
-    if (ssl_state->curr_connp->message_start + ssl_state->curr_connp->message_length <
-            ssl_state->curr_connp->bytes_processed + input_len) {
-        SCLogDebug("msg done");
-
-        write_len = (ssl_state->curr_connp->message_start + ssl_state->curr_connp->message_length) -
-            ssl_state->curr_connp->bytes_processed;
-        DEBUG_VALIDATE_BUG_ON(write_len > input_len);
-        ssl_state->curr_connp->bytes_processed += write_len;
-        SSLParserHSReset(ssl_state->curr_connp);
-        SCLogDebug("write_len %u", write_len);
-        return write_len;
-    } else {
-        ssl_state->curr_connp->bytes_processed += input_len;
-        return input_len;
-    }
+    return input_len;
 }
 
 static int SSLv3ParseHandshakeProtocol(SSLState *ssl_state, const uint8_t *input,
@@ -1651,67 +1693,202 @@ static int SSLv3ParseHandshakeProtocol(SSLState *ssl_state, const uint8_t *input
 
     if (input_len == 0 || ssl_state->curr_connp->bytes_processed ==
             (ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN)) {
-        return 0;
+        SCReturnInt(0);
     }
 
-    SCLogDebug("bytes_processed %u", ssl_state->curr_connp->bytes_processed);
-    SCLogDebug("ssl_state->curr_connp->hs_bytes_processed %u input %p input_len %u",
-            ssl_state->curr_connp->hs_bytes_processed, input, input_len);
+    while (input_len) {
+        SCLogDebug("input_len %u", input_len);
 
-    switch (ssl_state->curr_connp->hs_bytes_processed) {
-        case 0:
-            ssl_state->curr_connp->handshake_type = *(input++);
-            ssl_state->curr_connp->bytes_processed++;
-            ssl_state->curr_connp->hs_bytes_processed++;
-            if (--input_len == 0 || ssl_state->curr_connp->bytes_processed ==
-                    (ssl_state->curr_connp->record_length +
-                    SSLV3_RECORD_HDR_LEN)) {
-                return (input - initial_input);
+        if (ssl_state->curr_connp->hs_buffer != NULL) {
+            SCLogDebug("partial handshake record in place");
+            const uint32_t need = ssl_state->curr_connp->hs_buffer_message_size -
+                                  ssl_state->curr_connp->hs_buffer_offset;
+            const uint32_t add = MIN(need, input_len);
+
+            /* grow buffer to next multiple of 4k that fits all data we have */
+            if (ssl_state->curr_connp->hs_buffer_offset + add >
+                    ssl_state->curr_connp->hs_buffer_size) {
+                const uint32_t avail = ssl_state->curr_connp->hs_buffer_offset + add;
+                const uint32_t new_size = avail + (4096 - (avail % 4096));
+                SCLogDebug("new_size %u, avail %u", new_size, avail);
+                void *ptr = SCRealloc(ssl_state->curr_connp->hs_buffer, new_size);
+                if (ptr == NULL)
+                    return -1;
+                ssl_state->curr_connp->hs_buffer = ptr;
+                ssl_state->curr_connp->hs_buffer_size = new_size;
             }
 
-            /* fall through */
-        case 1:
-            ssl_state->curr_connp->message_length = *(input++) << 16;
-            ssl_state->curr_connp->bytes_processed++;
-            ssl_state->curr_connp->hs_bytes_processed++;
-            if (--input_len == 0 || ssl_state->curr_connp->bytes_processed ==
-                    (ssl_state->curr_connp->record_length +
-                    SSLV3_RECORD_HDR_LEN)) {
-                return (input - initial_input);
+            SCLogDebug("ssl_state->curr_connp->hs_buffer_offset %u "
+                       "ssl_state->curr_connp->hs_buffer_size %u",
+                    ssl_state->curr_connp->hs_buffer_offset, ssl_state->curr_connp->hs_buffer_size);
+            SCLogDebug("to add %u total %u", add, ssl_state->curr_connp->hs_buffer_offset + add);
+
+            if (SafeMemcpy(ssl_state->curr_connp->hs_buffer,
+                        ssl_state->curr_connp->hs_buffer_offset,
+                        ssl_state->curr_connp->hs_buffer_size, input, 0, add, add) != 0) {
+                SCLogDebug("copy failed");
+                return -1;
+            }
+            ssl_state->curr_connp->hs_buffer_offset += add;
+
+            if (ssl_state->curr_connp->hs_buffer_message_size <=
+                    ssl_state->curr_connp->hs_buffer_offset) {
+                DEBUG_VALIDATE_BUG_ON(ssl_state->curr_connp->hs_buffer_message_size !=
+                                      ssl_state->curr_connp->hs_buffer_offset);
+
+                ssl_state->curr_connp->handshake_type =
+                        ssl_state->curr_connp->hs_buffer_message_type;
+                ssl_state->curr_connp->message_length =
+                        ssl_state->curr_connp->hs_buffer_message_size;
+
+                SCLogDebug("got all data now: handshake_type %u message_length %u",
+                        ssl_state->curr_connp->handshake_type,
+                        ssl_state->curr_connp->message_length);
+
+                int retval = SSLv3ParseHandshakeType(ssl_state, ssl_state->curr_connp->hs_buffer,
+                        ssl_state->curr_connp->hs_buffer_offset, direction);
+                if (retval < 0) {
+                    SSLParserHSReset(ssl_state->curr_connp);
+                    return (retval);
+                }
+                SCLogDebug("retval %d", retval);
+
+                /* data processed, reset buffer */
+                SCFree(ssl_state->curr_connp->hs_buffer);
+                ssl_state->curr_connp->hs_buffer = NULL;
+                ssl_state->curr_connp->hs_buffer_size = 0;
+                ssl_state->curr_connp->hs_buffer_message_size = 0;
+                ssl_state->curr_connp->hs_buffer_message_type = 0;
+                ssl_state->curr_connp->hs_buffer_offset = 0;
+            } else {
+                SCLogDebug("partial data");
             }
 
-            /* fall through */
-        case 2:
-            ssl_state->curr_connp->message_length |= *(input++) << 8;
-            ssl_state->curr_connp->bytes_processed++;
-            ssl_state->curr_connp->hs_bytes_processed++;
-            if (--input_len == 0 || ssl_state->curr_connp->bytes_processed ==
-                    (ssl_state->curr_connp->record_length +
-                    SSLV3_RECORD_HDR_LEN)) {
-                return (input - initial_input);
+            input += add;
+            input_len -= add;
+            SCLogDebug("input_len %u", input_len);
+            SSLParserHSReset(ssl_state->curr_connp);
+            continue;
+        }
+
+        SCLogDebug("bytes_processed %u", ssl_state->curr_connp->bytes_processed);
+        SCLogDebug("input %p input_len %u", input, input_len);
+
+        if (input_len < 4) {
+            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
+            SCReturnInt(-1);
+        }
+
+        ssl_state->curr_connp->handshake_type = input[0];
+        ssl_state->curr_connp->message_length = input[1] << 16 | input[2] << 8 | input[3];
+        SCLogDebug("handshake_type %u message len %u input %p input_len %u",
+                ssl_state->curr_connp->handshake_type, ssl_state->curr_connp->message_length, input,
+                input_len);
+        input += 4;
+        input_len -= 4;
+
+        const uint32_t record_len = ssl_state->curr_connp->message_length;
+        /* see if we support this type. We check here to not use the fragment
+         * handling on things we don't support. */
+        const bool supported_type = SupportedHandshakeType(ssl_state->curr_connp->handshake_type);
+        SCLogDebug("supported_type %s handshake_type %u/%02x", supported_type ? "true" : "false",
+                ssl_state->curr_connp->handshake_type, ssl_state->curr_connp->handshake_type);
+        if (!supported_type) {
+            uint32_t avail_record_len = MIN(input_len, record_len);
+            input += avail_record_len;
+            input_len -= avail_record_len;
+
+            SSLParserHSReset(ssl_state->curr_connp);
+
+            if ((direction && (ssl_state->flags & SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC)) ||
+                    (!direction && (ssl_state->flags & SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC))) {
+                // after Change Cipher Spec we get Encrypted Handshake Messages
+            } else {
+                SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE);
             }
+            continue;
+        }
 
-            /* fall through */
-        case 3:
-            ssl_state->curr_connp->message_length |= *(input++);
-            ssl_state->curr_connp->bytes_processed++;
-            ssl_state->curr_connp->hs_bytes_processed++;
-            --input_len;
-            ssl_state->curr_connp->message_start = ssl_state->curr_connp->bytes_processed;
+        /* if the message length exceeds our input_len, we have a tls fragment. */
+        if (record_len > input_len) {
+            const uint32_t avail = input_len;
+            const uint32_t size = avail + (4096 - (avail % 4096));
+            SCLogDebug("initial buffer size %u, based on input %u", size, avail);
+            ssl_state->curr_connp->hs_buffer = SCCalloc(1, size);
+            if (ssl_state->curr_connp->hs_buffer == NULL) {
+                return -1;
+            }
+            ssl_state->curr_connp->hs_buffer_size = size;
+            ssl_state->curr_connp->hs_buffer_message_size = record_len;
+            ssl_state->curr_connp->hs_buffer_message_type = ssl_state->curr_connp->handshake_type;
 
-            /* fall through */
+            if (input_len > 0) {
+                if (SafeMemcpy(ssl_state->curr_connp->hs_buffer, 0,
+                            ssl_state->curr_connp->hs_buffer_size, input, 0, input_len,
+                            input_len) != 0) {
+                    return -1;
+                }
+                ssl_state->curr_connp->hs_buffer_offset = input_len;
+            }
+            SCLogDebug("opened record buffer %p size %u offset %u type %u msg_size %u",
+                    ssl_state->curr_connp->hs_buffer, ssl_state->curr_connp->hs_buffer_size,
+                    ssl_state->curr_connp->hs_buffer_offset,
+                    ssl_state->curr_connp->hs_buffer_message_type,
+                    ssl_state->curr_connp->hs_buffer_message_size);
+            input += input_len;
+            SSLParserHSReset(ssl_state->curr_connp);
+            return (int)(input - initial_input);
+
+        } else {
+            /* full record, parse it now */
+            int retval = SSLv3ParseHandshakeType(
+                    ssl_state, input, ssl_state->curr_connp->message_length, direction);
+            if (retval < 0 || retval > (int)input_len) {
+                DEBUG_VALIDATE_BUG_ON(retval > (int)input_len);
+                return (retval);
+            }
+            SCLogDebug("retval %d input_len %u", retval, input_len);
+            input += retval;
+            input_len -= retval;
+
+            SSLParserHSReset(ssl_state->curr_connp);
+        }
+        SCLogDebug("input_len left %u", input_len);
     }
-    SCLogDebug("message len %u input %p", ssl_state->curr_connp->message_length, input);
+    return (int)(input - initial_input);
+}
 
-    int retval = SSLv3ParseHandshakeType(ssl_state, input, input_len, direction);
-    if (retval < 0 || retval > (int)input_len) {
-        DEBUG_VALIDATE_BUG_ON(retval > (int)input_len);
-        return retval;
+/**
+ * \internal
+ * \brief TLS Alert parser
+ *
+ * \param sslstate  Pointer to the SSL state.
+ * \param input     Pointer to the received input data.
+ * \param input_len Length in bytes of the received data.
+ * \param direction 1 toclient, 0 toserver
+ *
+ * \retval The number of bytes parsed on success, 0 if nothing parsed, -1 on failure.
+ */
+static int SSLv3ParseAlertProtocol(
+        SSLState *ssl_state, const uint8_t *input, uint32_t input_len, uint8_t direction)
+{
+    if (input_len < 2) {
+        SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_ALERT);
+        return -1;
     }
-    SCLogDebug("retval %d input_len %u", retval, input_len);
-    input += retval;
 
-    return (input - initial_input);
+    /* assume a record > 2 to be an encrypted alert record */
+    if (input_len == 2) {
+        uint8_t level = input[0];
+        // uint8_t desc = input[1];
+
+        /* if level Fatal, we consider the tx finished */
+        if (level == 2) {
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
+        }
+    }
+    return 0;
 }
 
 /**
@@ -1730,7 +1907,7 @@ static int SSLv3ParseHeartbeatProtocol(SSLState *ssl_state, const uint8_t *input
 {
     uint8_t hb_type;
     uint16_t payload_len;
-    uint16_t padding_len;
+    uint32_t padding_len;
 
     /* expect at least 3 bytes: heartbeat type (1) + length (2) */
     if (input_len < 3) {
@@ -1766,8 +1943,7 @@ static int SSLv3ParseHeartbeatProtocol(SSLState *ssl_state, const uint8_t *input
             return (ssl_state->curr_connp->record_length - 3);
         }
 
-        payload_len = (*input++) << 8;
-        payload_len |= (*input++);
+        payload_len = (uint16_t)(*input << 8) | *(input + 1);
 
         /* check that the requested payload length is really present in
            the record (CVE-2014-0160) */
@@ -1868,8 +2044,7 @@ static int SSLv3ParseRecord(uint8_t direction, SSLState *ssl_state,
             if (input_len >= 5) {
                 ssl_state->curr_connp->content_type = input[0];
                 if (!skip_version) {
-                    ssl_state->curr_connp->version = input[1] << 8;
-                    ssl_state->curr_connp->version |= input[2];
+                    ssl_state->curr_connp->version = (uint16_t)(input[1] << 8) | input[2];
                 }
                 ssl_state->curr_connp->record_length = input[3] << 8;
                 ssl_state->curr_connp->record_length |= input[4];
@@ -1884,7 +2059,7 @@ static int SSLv3ParseRecord(uint8_t direction, SSLState *ssl_state,
             /* fall through */
         case 1:
             if (!skip_version) {
-                ssl_state->curr_connp->version = *(input++) << 8;
+                ssl_state->curr_connp->version = (uint16_t)(*(input++) << 8);
             } else {
                 input++;
             }
@@ -1918,7 +2093,7 @@ static int SSLv3ParseRecord(uint8_t direction, SSLState *ssl_state,
 
     ssl_state->curr_connp->bytes_processed += (input - initial_input);
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static int SSLv2ParseRecord(uint8_t direction, SSLState *ssl_state,
@@ -2002,14 +2177,13 @@ static int SSLv2ParseRecord(uint8_t direction, SSLState *ssl_state,
 
     ssl_state->curr_connp->bytes_processed += (input - initial_input);
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
-static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
-                       AppLayerParserState *pstate, const uint8_t *input,
-                       uint32_t input_len)
+static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_state,
+        AppLayerParserState *pstate, const uint8_t *input, uint32_t input_len,
+        const StreamSlice stream_slice)
 {
-    int retval = 0;
     const uint8_t *initial_input = input;
 
     if (ssl_state->curr_connp->bytes_processed == 0) {
@@ -2018,38 +2192,64 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
         } else {
             ssl_state->curr_connp->record_lengths_length = 3;
         }
+
+        SCLogDebug("record start: ssl2.hdr frame");
+        AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input,
+                ssl_state->curr_connp->record_lengths_length + 1, direction, TLS_FRAME_SSLV2_HDR);
     }
 
+    SCLogDebug("direction %u ssl_state->curr_connp->record_lengths_length + 1 %u, "
+               "ssl_state->curr_connp->bytes_processed %u",
+            direction, ssl_state->curr_connp->record_lengths_length + 1,
+            ssl_state->curr_connp->bytes_processed);
     /* the +1 is because we read one extra byte inside SSLv2ParseRecord
        to read the msg_type */
     if (ssl_state->curr_connp->bytes_processed <
             (ssl_state->curr_connp->record_lengths_length + 1)) {
-        retval = SSLv2ParseRecord(direction, ssl_state, input, input_len);
+        const int retval = SSLv2ParseRecord(direction, ssl_state, input, input_len);
+        SCLogDebug("retval %d ssl_state->curr_connp->record_length %u", retval,
+                ssl_state->curr_connp->record_length);
         if (retval < 0 || retval > (int)input_len) {
             DEBUG_VALIDATE_BUG_ON(retval > (int)input_len);
             SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSLV2_HEADER);
-            return -1;
+            return SSL_DECODER_ERROR(-1);
         }
+
+        AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input,
+                ssl_state->curr_connp->record_lengths_length + ssl_state->curr_connp->record_length,
+                direction, TLS_FRAME_SSLV2_PDU);
+        SCLogDebug("record start: ssl2.pdu frame");
+
         input += retval;
         input_len -= retval;
     }
 
+    /* if we don't have the full record, we return incomplete */
+    if (ssl_state->curr_connp->record_lengths_length + ssl_state->curr_connp->record_length >
+            input_len + ssl_state->curr_connp->bytes_processed) {
+        uint32_t needed = ssl_state->curr_connp->record_length;
+        SCLogDebug("record len %u input_len %u parsed %u: need %u bytes more data",
+                ssl_state->curr_connp->record_length, input_len, (uint32_t)(input - initial_input),
+                needed);
+        return SSL_DECODER_INCOMPLETE((input - initial_input), needed);
+    }
+
     if (input_len == 0) {
-        return (input - initial_input);
+        return SSL_DECODER_OK((input - initial_input));
     }
 
     /* record_length should never be zero */
     if (ssl_state->curr_connp->record_length == 0) {
         SCLogDebug("SSLv2 record length is zero");
         SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSLV2_HEADER);
-        return -1;
+        return SSL_DECODER_ERROR(-1);
     }
 
-    /* record_lenghts_length should never be zero */
+    /* record_lengths_length should never be zero */
     if (ssl_state->curr_connp->record_lengths_length == 0) {
         SCLogDebug("SSLv2 record lengths length is zero");
         SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSLV2_HEADER);
-        return -1;
+        return SSL_DECODER_ERROR(-1);
     }
 
     switch (ssl_state->curr_connp->content_type) {
@@ -2061,128 +2261,25 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
             break;
 
         case SSLV2_MT_CLIENT_HELLO:
-            ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_HELLO;
-            ssl_state->current_flags |= SSL_AL_FLAG_SSL_CLIENT_HS;
-
-            if (ssl_state->curr_connp->record_lengths_length == 3) {
-                switch (ssl_state->curr_connp->bytes_processed) {
-                    case 4:
-                        if (input_len >= 6) {
-                            ssl_state->curr_connp->session_id_length = input[4] << 8;
-                            ssl_state->curr_connp->session_id_length |= input[5];
-                            input += 6;
-                            input_len -= 6;
-                            ssl_state->curr_connp->bytes_processed += 6;
-                            if (ssl_state->curr_connp->session_id_length == 0) {
-                                ssl_state->current_flags |= SSL_AL_FLAG_SSL_NO_SESSION_ID;
-                            }
-
-                            break;
-                        } else {
-                            input++;
-                            ssl_state->curr_connp->bytes_processed++;
-                            if (--input_len == 0)
-                                break;
-                        }
-
-                        /* fall through */
-                    case 5:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 6:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 7:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 8:
-                        ssl_state->curr_connp->session_id_length = *(input++) << 8;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 9:
-                        ssl_state->curr_connp->session_id_length |= *(input++);
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                }
-
-            } else {
-                switch (ssl_state->curr_connp->bytes_processed) {
-                    case 3:
-                        if (input_len >= 6) {
-                            ssl_state->curr_connp->session_id_length = input[4] << 8;
-                            ssl_state->curr_connp->session_id_length |= input[5];
-                            input += 6;
-                            input_len -= 6;
-                            ssl_state->curr_connp->bytes_processed += 6;
-                            if (ssl_state->curr_connp->session_id_length == 0) {
-                                ssl_state->current_flags |= SSL_AL_FLAG_SSL_NO_SESSION_ID;
-                            }
-
-                            break;
-                        } else {
-                            input++;
-                            ssl_state->curr_connp->bytes_processed++;
-                            if (--input_len == 0)
-                                break;
-                        }
-
-                        /* fall through */
-                    case 4:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 5:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 6:
-                        input++;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 7:
-                        ssl_state->curr_connp->session_id_length = *(input++) << 8;
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                    case 8:
-                        ssl_state->curr_connp->session_id_length |= *(input++);
-                        ssl_state->curr_connp->bytes_processed++;
-                        if (--input_len == 0)
-                            break;
-
-                        /* fall through */
-                }
+            if (input_len < 6) {
+                SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
+                return SSL_DECODER_ERROR(-1);
             }
 
+            ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_HELLO;
+            ssl_state->current_flags |= SSL_AL_FLAG_SSL_CLIENT_HS;
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_HELLO_DONE);
+
+            const uint16_t version = (uint16_t)(input[0] << 8) | input[1];
+            SCLogDebug("SSLv2: version %04x", version);
+            ssl_state->curr_connp->version = version;
+            uint16_t session_id_length = (input[5]) | (uint16_t)(input[4] << 8);
+            input += 6;
+            input_len -= 6;
+            ssl_state->curr_connp->bytes_processed += 6;
+            if (session_id_length == 0) {
+                ssl_state->current_flags |= SSL_AL_FLAG_SSL_NO_SESSION_ID;
+            }
             break;
 
         case SSLV2_MT_CLIENT_MASTER_KEY:
@@ -2201,6 +2298,7 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
             } else {
                 ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_KEYX;
             }
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_CERT_DONE);
 
             /* fall through */
         case SSLV2_MT_SERVER_VERIFY:
@@ -2236,13 +2334,12 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
                     (ssl_state->flags & SSL_AL_FLAG_SSL_SERVER_SSN_ENCRYPTED))
                 {
                     if (ssl_config.encrypt_mode != SSL_CNF_ENC_HANDLE_FULL) {
-                        AppLayerParserStateSetFlag(pstate,
-                                APP_LAYER_PARSER_NO_INSPECTION);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION);
                     }
 
                     if (ssl_config.encrypt_mode == SSL_CNF_ENC_HANDLE_BYPASS) {
-                        AppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
-                        AppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
                     }
                     SCLogDebug("SSLv2 No reassembly & inspection has been set");
                 }
@@ -2253,6 +2350,7 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
         case SSLV2_MT_SERVER_HELLO:
             ssl_state->current_flags = SSL_AL_FLAG_STATE_SERVER_HELLO;
             ssl_state->current_flags |= SSL_AL_FLAG_SSL_SERVER_HS;
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO);
 
             break;
     }
@@ -2269,36 +2367,116 @@ static int SSLv2Decode(uint8_t direction, SSLState *ssl_state,
                 ssl_state->curr_connp->bytes_processed;
         input += diff;
         SSLParserReset(ssl_state);
-        return (input - initial_input);
 
-    /* we still don't have the entire record for the one we are
-       currently parsing */
+        /* we still don't have the entire record for the one we are
+           currently parsing */
     } else {
         input += input_len;
         ssl_state->curr_connp->bytes_processed += input_len;
-        return (input - initial_input);
     }
+    return SSL_DECODER_OK((input - initial_input));
 }
 
-static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
-                       AppLayerParserState *pstate, const uint8_t *input,
-                       const uint32_t input_len)
+static struct SSLDecoderResult SSLv3Decode(uint8_t direction, SSLState *ssl_state,
+        AppLayerParserState *pstate, const uint8_t *input, const uint32_t input_len,
+        const StreamSlice stream_slice)
 {
     uint32_t parsed = 0;
     uint32_t record_len; /* slice of input_len for the current record */
+    const bool first_call = (ssl_state->curr_connp->bytes_processed == 0);
 
     if (ssl_state->curr_connp->bytes_processed < SSLV3_RECORD_HDR_LEN) {
+        const uint16_t prev_version = ssl_state->curr_connp->version;
+
         int retval = SSLv3ParseRecord(direction, ssl_state, input, input_len);
         if (retval < 0 || retval > (int)input_len) {
             DEBUG_VALIDATE_BUG_ON(retval > (int)input_len);
             SCLogDebug("SSLv3ParseRecord returned %d", retval);
             SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_TLS_HEADER);
-            return -1;
+            return SSL_DECODER_ERROR(-1);
         }
-        parsed += retval;
+        parsed = retval;
+
+        SCLogDebug("%s input %p record_length %u", (direction == 0) ? "toserver" : "toclient",
+                input, ssl_state->curr_connp->record_length);
+
+        /* first the hdr frame at our first chance */
+        if (first_call) {
+            AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input, SSLV3_RECORD_HDR_LEN,
+                    direction, TLS_FRAME_HDR);
+        }
+
+        /* parser is streaming for the initial header, then switches to incomplete
+         * API: so if we don't have the hdr yet, return consumed bytes and wait
+         * until we are called again with new data. */
+        if (ssl_state->curr_connp->bytes_processed < SSLV3_RECORD_HDR_LEN) {
+            SCLogDebug(
+                    "incomplete header, return %u bytes consumed and wait for more data", parsed);
+            return SSL_DECODER_OK(parsed);
+        }
+
+        /* pdu frame needs record length, so only create it when hdr fully parsed. */
+        AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input,
+                ssl_state->curr_connp->record_length + retval, direction, TLS_FRAME_PDU);
         record_len = MIN(input_len - parsed, ssl_state->curr_connp->record_length);
-        SCLogDebug("record_len %u (input_len %u, parsed %u, ssl_state->curr_connp->record_length %u)",
+        SCLogDebug(
+                "record_len %u (input_len %u, parsed %u, ssl_state->curr_connp->record_length %u)",
                 record_len, input_len, parsed, ssl_state->curr_connp->record_length);
+
+        bool unknown_record = false;
+        switch (ssl_state->curr_connp->content_type) {
+            case SSLV3_CHANGE_CIPHER_SPEC:
+            case SSLV3_ALERT_PROTOCOL:
+            case SSLV3_HANDSHAKE_PROTOCOL:
+            case SSLV3_APPLICATION_PROTOCOL:
+            case SSLV3_HEARTBEAT_PROTOCOL:
+                break;
+            default:
+                unknown_record = true;
+                break;
+        }
+
+        /* unknown record type. For TLS 1.0, 1.1 and 1.2 this is ok. For the rest it is fatal. Based
+         * on Wireshark logic. */
+        if (prev_version == TLS_VERSION_10 || prev_version == TLS_VERSION_11) {
+            if (unknown_record) {
+                SCLogDebug("unknown record, ignore it");
+                SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_TYPE);
+
+                ssl_state->curr_connp->bytes_processed = 0; // TODO review this reset logic
+                ssl_state->curr_connp->content_type = 0;
+                ssl_state->curr_connp->record_length = 0;
+                // restore last good version
+                ssl_state->curr_connp->version = prev_version;
+                return SSL_DECODER_OK(input_len); // consume everything
+            }
+        } else {
+            if (unknown_record) {
+                SCLogDebug("unknown record, fatal");
+                SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_TYPE);
+                return SSL_DECODER_ERROR(-1);
+            }
+        }
+
+        /* record_length should never be zero */
+        if (ssl_state->curr_connp->record_length == 0) {
+            SCLogDebug("SSLv3 Record length is 0");
+            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_LENGTH);
+            return SSL_DECODER_ERROR(-1);
+        }
+
+        if (!TLSVersionValid(ssl_state->curr_connp->version)) {
+            SCLogDebug("ssl_state->curr_connp->version %04x", ssl_state->curr_connp->version);
+            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_VERSION);
+            return SSL_DECODER_ERROR(-1);
+        }
+
+        if (ssl_state->curr_connp->bytes_processed == SSLV3_RECORD_HDR_LEN &&
+                ssl_state->curr_connp->record_length > SSLV3_RECORD_MAX_LEN) {
+            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_LENGTH);
+            return SSL_DECODER_ERROR(-1);
+        }
+        DEBUG_VALIDATE_BUG_ON(ssl_state->curr_connp->bytes_processed > SSLV3_RECORD_HDR_LEN);
     } else {
         ValidateRecordState(ssl_state->curr_connp);
 
@@ -2308,19 +2486,29 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
     SCLogDebug("record length %u processed %u got %u",
             ssl_state->curr_connp->record_length, ssl_state->curr_connp->bytes_processed, record_len);
 
-    if (record_len == 0) {
-        return parsed;
+    /* if we don't have the full record, we return incomplete */
+    if (ssl_state->curr_connp->record_length > input_len - parsed) {
+        /* no need to use incomplete api buffering for application
+         * records that we'll not use anyway. */
+        if (ssl_state->curr_connp->content_type == SSLV3_APPLICATION_PROTOCOL) {
+            SCLogDebug("application record");
+        } else {
+            uint32_t needed = ssl_state->curr_connp->record_length;
+            SCLogDebug("record len %u input_len %u parsed %u: need %u bytes more data",
+                    ssl_state->curr_connp->record_length, input_len, parsed, needed);
+            DEBUG_VALIDATE_BUG_ON(needed > SSLV3_RECORD_MAX_LEN);
+            return SSL_DECODER_INCOMPLETE(parsed, needed);
+        }
     }
 
-    /* record_length should never be zero */
-    if (ssl_state->curr_connp->record_length == 0) {
-        SCLogDebug("SSLv3 Record length is 0");
-        SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_TLS_HEADER);
-        return -1;
+    if (record_len == 0) {
+        return SSL_DECODER_OK(parsed);
     }
+
+    AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input + parsed,
+            ssl_state->curr_connp->record_length, direction, TLS_FRAME_DATA);
 
     switch (ssl_state->curr_connp->content_type) {
-
         /* we don't need any data from these types */
         case SSLV3_CHANGE_CIPHER_SPEC:
             ssl_state->flags |= SSL_AL_FLAG_CHANGE_CIPHER_SPEC;
@@ -2329,13 +2517,23 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
                 ssl_state->flags |= SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC;
             } else {
                 ssl_state->flags |= SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC;
+
+                // TODO TLS 1.3
+                UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
             }
-
             break;
 
-        case SSLV3_ALERT_PROTOCOL:
-            break;
+        case SSLV3_ALERT_PROTOCOL: {
+            AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input + parsed,
+                    ssl_state->curr_connp->record_length, direction, TLS_FRAME_ALERT_DATA);
 
+            int retval = SSLv3ParseAlertProtocol(ssl_state, input + parsed, record_len, direction);
+            if (retval < 0) {
+                SCLogDebug("SSLv3ParseAlertProtocol returned %d", retval);
+                return SSL_DECODER_ERROR(-1);
+            }
+            break;
+        }
         case SSLV3_APPLICATION_PROTOCOL:
             /* In TLSv1.3 early data (0-RTT) could be sent before the
                handshake is complete (rfc8446, section 2.3). We should
@@ -2345,38 +2543,40 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
                     ((ssl_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0))
                 break;
 
-            /* if we see (encrypted) aplication data, then this means the
+            /* if we see (encrypted) application data, then this means the
                handshake must be done */
-            ssl_state->flags |= SSL_AL_FLAG_HANDSHAKE_DONE;
+            if (ssl_state->curr_connp == &ssl_state->client_connp) {
+                UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+            } else {
+                UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
+            }
 
             if (ssl_config.encrypt_mode != SSL_CNF_ENC_HANDLE_FULL) {
                 SCLogDebug("setting APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD");
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD);
             }
 
             /* Encrypted data, reassembly not asked, bypass asked, let's sacrifice
              * heartbeat lke inspection to be able to be able to bypass the flow */
             if (ssl_config.encrypt_mode == SSL_CNF_ENC_HANDLE_BYPASS) {
                 SCLogDebug("setting APP_LAYER_PARSER_NO_REASSEMBLY");
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_REASSEMBLY);
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_INSPECTION);
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_BYPASS_READY);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
             }
-
             break;
 
         case SSLV3_HANDSHAKE_PROTOCOL: {
             if (ssl_state->flags & SSL_AL_FLAG_CHANGE_CIPHER_SPEC) {
                 /* In TLSv1.3, ChangeCipherSpec is only used for middlebox
-                   compability (rfc8446, appendix D.4). */
-                if ((ssl_state->client_connp.version > TLS_VERSION_12) &&
-                       ((ssl_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0)) {
+                   compatibility (rfc8446, appendix D.4). */
+                // Client hello flags is needed to have a valid version
+                if ((ssl_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
+                        (ssl_state->client_connp.version > TLS_VERSION_12) &&
+                        ((ssl_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0)) {
                     /* do nothing */
                 } else {
+                    // if we started parsing this, we must stop
                     break;
                 }
             }
@@ -2385,90 +2585,56 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
                 SSLParserReset(ssl_state);
                 SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
                 SCLogDebug("record len < 4 => %u", ssl_state->curr_connp->record_length);
-                return -1;
+                return SSL_DECODER_ERROR(-1);
             }
 
             int retval = SSLv3ParseHandshakeProtocol(ssl_state, input + parsed,
                                                      record_len, direction);
+            SCLogDebug("retval %d", retval);
             if (retval < 0 || retval > (int)record_len) {
                 DEBUG_VALIDATE_BUG_ON(retval > (int)record_len);
-                SSLSetEvent(ssl_state,
-                        TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE);
-                SSLSetEvent(ssl_state,
-                        TLS_DECODER_EVENT_INVALID_SSL_RECORD);
+                SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_HANDSHAKE_MESSAGE);
                 SCLogDebug("SSLv3ParseHandshakeProtocol returned %d", retval);
-                return -1;
+                return SSL_DECODER_ERROR(-1);
             }
-            SCLogDebug("retval %d", retval);
-
-            parsed += retval;
-            record_len -= retval;
-            (void)record_len; /* for scan-build */
-
-            SCLogDebug("bytes_processed %u (record+hdr %u)", ssl_state->curr_connp->bytes_processed,
-                    (ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN));
             ValidateRecordState(ssl_state->curr_connp);
-
-            if (ssl_state->curr_connp->bytes_processed >=
-                    ssl_state->curr_connp->record_length +
-                    SSLV3_RECORD_HDR_LEN) {
-                SCLogDebug("record ready");
-                SSLParserReset(ssl_state);
-            }
-
-            SCLogDebug("trigger RAW! (post HS)");
-            AppLayerParserTriggerRawStreamReassembly(ssl_state->f,
-                    direction == 0 ? STREAM_TOSERVER : STREAM_TOCLIENT);
-            return parsed;
+            break;
         }
         case SSLV3_HEARTBEAT_PROTOCOL: {
+            AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input + parsed,
+                    ssl_state->curr_connp->record_length, direction, TLS_FRAME_HB_DATA);
             int retval = SSLv3ParseHeartbeatProtocol(ssl_state, input + parsed,
                                                  record_len, direction);
             if (retval < 0) {
                 SCLogDebug("SSLv3ParseHeartbeatProtocol returned %d", retval);
-                return -1;
+                return SSL_DECODER_ERROR(-1);
             }
             break;
         }
         default:
-            /* \todo fix the event from invalid rule to unknown rule */
-            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_RECORD_TYPE);
-            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
+            // should be unreachable now that we check after header parsing
+            DEBUG_VALIDATE_BUG_ON(1);
             SCLogDebug("unsupported record type");
-            return -1;
+            return SSL_DECODER_ERROR(-1);
     }
 
-    if (HaveEntireRecord(ssl_state->curr_connp, record_len)) {
-        DEBUG_VALIDATE_BUG_ON(((ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN) <
-                ssl_state->curr_connp->bytes_processed));
+    parsed += record_len;
+    ssl_state->curr_connp->bytes_processed += record_len;
 
-        if ((ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN) <
-                ssl_state->curr_connp->bytes_processed) {
-            /* defensive checks. Something is wrong. */
-            SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
-            SCLogDebug("defensive checks. Something is wrong.");
-            return -1;
-        }
-
+    if (ssl_state->curr_connp->bytes_processed >=
+            ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN) {
         SCLogDebug("record complete, trigger RAW");
-        AppLayerParserTriggerRawStreamReassembly(ssl_state->f,
-                direction == 0 ? STREAM_TOSERVER : STREAM_TOCLIENT);
-
-        /* looks like we have another record */
-        uint32_t diff = ssl_state->curr_connp->record_length +
-                SSLV3_RECORD_HDR_LEN - ssl_state->curr_connp->bytes_processed;
-        parsed += diff;
+        AppLayerParserTriggerRawStreamInspection(
+                ssl_state->f, direction == 0 ? STREAM_TOSERVER : STREAM_TOCLIENT);
         SSLParserReset(ssl_state);
         ValidateRecordState(ssl_state->curr_connp);
-        return parsed;
+        return SSL_DECODER_OK(parsed);
 
-    /* we still don't have the entire record for the one we are
-       currently parsing */
     } else {
-        parsed += record_len;
-        ssl_state->curr_connp->bytes_processed += record_len;
+        /* we still don't have the entire record for the one we are
+           currently parsing */
         ValidateRecordState(ssl_state->curr_connp);
-        return parsed;
+        return SSL_DECODER_OK(parsed);
     }
 }
 
@@ -2477,14 +2643,12 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
  * \brief SSLv2, SSLv23, SSLv3, TLSv1.1, TLSv1.2, TLSv1.3 parser.
  *
  *        On parsing error, this should be the only function that should reset
- *        the parser state, to avoid multiple functions in the chain reseting
+ *        the parser state, to avoid multiple functions in the chain resetting
  *        the parser state.
  *
  * \param direction 0 for toserver, 1 for toclient.
  * \param alstate   Pointer to the state.
  * \param pstate    Application layer parser state for this session.
- * \param input     Pointer the received input data.
- * \param input_len Length in bytes of the received data.
  * \param output    Pointer to the list of parsed output elements.
  *
  * \todo On reaching an inconsistent state, check if the input has
@@ -2492,19 +2656,27 @@ static int SSLv3Decode(uint8_t direction, SSLState *ssl_state,
  *
  * \retval >=0 On success.
  */
-static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate, AppLayerParserState *pstate,
-                     const uint8_t *input, uint32_t ilen)
+static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate,
+        AppLayerParserState *pstate, StreamSlice stream_slice)
 {
     SSLState *ssl_state = (SSLState *)alstate;
+    ssl_state->tx_data.updated_tc = true;
+    ssl_state->tx_data.updated_ts = true;
     uint32_t counter = 0;
-    int32_t input_len = (int32_t)ilen;
     ssl_state->f = f;
+    const uint8_t *input = StreamSliceGetData(&stream_slice);
+    const uint8_t *init_input = input;
+    int32_t input_len = (int32_t)StreamSliceGetDataLen(&stream_slice);
 
-    if (input == NULL &&
-            ((direction == 0 && AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) ||
-             (direction == 1 && AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)))) {
+    if ((input == NULL || input_len == 0) &&
+            ((direction == 0 && SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) ||
+                    (direction == 1 &&
+                            SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)))) {
         /* flag session as finished if APP_LAYER_PARSER_EOF is set */
-        ssl_state->flags |= SSL_AL_FLAG_STATE_FINISHED;
+        if (direction == 0)
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+        else
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
         SCReturnStruct(APP_LAYER_OK);
     } else if (input == NULL || input_len == 0) {
         SCReturnStruct(APP_LAYER_ERROR);
@@ -2545,8 +2717,8 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate, AppLa
                 SCLogDebug("SSL/TLS version reset");
             }
         }
-        SCLogDebug("record %u: bytes_processed %u, version %02X", counter,
-                ssl_state->curr_connp->bytes_processed, ssl_state->curr_connp->version);
+        SCLogDebug("record %u: bytes_processed %u, version %02X, input_len %u", counter,
+                ssl_state->curr_connp->bytes_processed, ssl_state->curr_connp->version, input_len);
 
         if (ssl_state->curr_connp->version == SSL_VERSION_2) {
             if (ssl_state->curr_connp->bytes_processed == 0) {
@@ -2554,20 +2726,25 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate, AppLa
             } else {
                 SCLogDebug("Continuing parsing SSLv2 record");
             }
-            int retval = SSLv2Decode(direction, ssl_state, pstate, input,
-                    input_len);
-            if (retval < 0 || retval > input_len) {
-                DEBUG_VALIDATE_BUG_ON(retval > input_len);
-                SCLogDebug("Error parsing SSLv2. Reseting parser "
-                        "state. Let's get outta here");
+            struct SSLDecoderResult r =
+                    SSLv2Decode(direction, ssl_state, pstate, input, input_len, stream_slice);
+            if (r.retval < 0 || r.retval > input_len) {
+                DEBUG_VALIDATE_BUG_ON(r.retval > input_len);
+                SCLogDebug("Error parsing SSLv2. Resetting parser "
+                           "state. Let's get outta here");
                 SSLParserReset(ssl_state);
                 SSLSetEvent(ssl_state,
                         TLS_DECODER_EVENT_INVALID_SSL_RECORD);
-                return APP_LAYER_OK;
+                return APP_LAYER_ERROR;
+            } else if (r.needed) {
+                input += r.retval;
+                SCLogDebug("returning consumed %" PRIuMAX " needed %u",
+                        (uintmax_t)(input - init_input), r.needed);
+                SCReturnStruct(APP_LAYER_INCOMPLETE((uint32_t)(input - init_input), r.needed));
             }
-            input_len -= retval;
-            input += retval;
-            SCLogDebug("SSLv2 decoder consumed %d bytes: %u left", retval, input_len);
+            input_len -= r.retval;
+            input += r.retval;
+            SCLogDebug("SSLv2 decoder consumed %d bytes: %u left", r.retval, input_len);
         } else {
             if (ssl_state->curr_connp->bytes_processed == 0) {
                 SCLogDebug("New TLS record: record_length %u",
@@ -2576,18 +2753,23 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate, AppLa
                 SCLogDebug("Continuing parsing TLS record: record_length %u, bytes_processed %u",
                         ssl_state->curr_connp->record_length, ssl_state->curr_connp->bytes_processed);
             }
-            int retval = SSLv3Decode(direction, ssl_state, pstate, input,
-                    input_len);
-            if (retval < 0 || retval > input_len) {
-                DEBUG_VALIDATE_BUG_ON(retval > input_len);
-                SCLogDebug("Error parsing TLS. Reseting parser "
-                        "state.  Let's get outta here");
+            struct SSLDecoderResult r =
+                    SSLv3Decode(direction, ssl_state, pstate, input, input_len, stream_slice);
+            if (r.retval < 0 || r.retval > input_len) {
+                DEBUG_VALIDATE_BUG_ON(r.retval > input_len);
+                SCLogDebug("Error parsing TLS. Resetting parser "
+                           "state.  Let's get outta here");
                 SSLParserReset(ssl_state);
                 return APP_LAYER_ERROR;
+            } else if (r.needed) {
+                input += r.retval;
+                SCLogDebug("returning consumed %" PRIuMAX " needed %u",
+                        (uintmax_t)(input - init_input), r.needed);
+                SCReturnStruct(APP_LAYER_INCOMPLETE((uint32_t)(input - init_input), r.needed));
             }
-            input_len -= retval;
-            input += retval;
-            SCLogDebug("TLS decoder consumed %d bytes: %u left", retval, input_len);
+            input_len -= r.retval;
+            input += r.retval;
+            SCLogDebug("TLS decoder consumed %d bytes: %u left", r.retval, input_len);
 
             if (ssl_state->curr_connp->bytes_processed == SSLV3_RECORD_HDR_LEN
                     && ssl_state->curr_connp->record_length == 0) {
@@ -2600,51 +2782,70 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate, AppLa
     } /* while (input_len) */
 
     /* mark handshake as done if we have subject and issuer */
-    if (ssl_state->server_connp.cert0_subject &&
-            ssl_state->server_connp.cert0_issuerdn) {
-        SCLogDebug("SSL_AL_FLAG_HANDSHAKE_DONE");
-        ssl_state->flags |= SSL_AL_FLAG_HANDSHAKE_DONE;
+    if ((ssl_state->flags & SSL_AL_FLAG_NEED_CLIENT_CERT) &&
+            ssl_state->client_connp.cert0_subject && ssl_state->client_connp.cert0_issuerdn) {
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
+    } else if ((ssl_state->flags & SSL_AL_FLAG_NEED_CLIENT_CERT) == 0 &&
+               ssl_state->server_connp.cert0_subject && ssl_state->server_connp.cert0_issuerdn) {
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
     }
 
     /* flag session as finished if APP_LAYER_PARSER_EOF is set */
-    if (AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) &&
-        AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)) {
-        SCLogDebug("SSL_AL_FLAG_STATE_FINISHED");
-        ssl_state->flags |= SSL_AL_FLAG_STATE_FINISHED;
+    if (SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) &&
+            SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)) {
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
     }
 
     return APP_LAYER_OK;
 }
 
 static AppLayerResult SSLParseClientRecord(Flow *f, void *alstate, AppLayerParserState *pstate,
-                         const uint8_t *input, uint32_t input_len,
-                         void *local_data, const uint8_t flags)
+        StreamSlice stream_slice, void *local_data)
 {
-    return SSLDecode(f, 0 /* toserver */, alstate, pstate, input, input_len);
+    return SSLDecode(f, 0 /* toserver */, alstate, pstate, stream_slice);
 }
 
 static AppLayerResult SSLParseServerRecord(Flow *f, void *alstate, AppLayerParserState *pstate,
-                         const uint8_t *input, uint32_t input_len,
-                         void *local_data, const uint8_t flags)
+        StreamSlice stream_slice, void *local_data)
 {
-    return SSLDecode(f, 1 /* toclient */, alstate, pstate, input, input_len);
+    return SSLDecode(f, 1 /* toclient */, alstate, pstate, stream_slice);
 }
 
 /**
  * \internal
  * \brief Function to allocate the SSL state memory.
  */
-static void *SSLStateAlloc(void)
+static void *SSLStateAlloc(void *orig_state, AppProto proto_orig)
 {
-    SSLState *ssl_state = SCMalloc(sizeof(SSLState));
+    SSLState *ssl_state = SCCalloc(1, sizeof(SSLState));
     if (unlikely(ssl_state == NULL))
         return NULL;
-    memset(ssl_state, 0, sizeof(SSLState));
     ssl_state->client_connp.cert_log_flag = 0;
     ssl_state->server_connp.cert_log_flag = 0;
+    memset(ssl_state->client_connp.random, 0, TLS_RANDOM_LEN);
+    memset(ssl_state->server_connp.random, 0, TLS_RANDOM_LEN);
+    ssl_state->client_connp.hs = SCTLSHandshakeNew();
+    ssl_state->server_connp.hs = SCTLSHandshakeNew();
     TAILQ_INIT(&ssl_state->server_connp.certs);
+    TAILQ_INIT(&ssl_state->client_connp.certs);
 
     return (void *)ssl_state;
+}
+
+static void SSLStateCertSANFree(SSLStateConnp *connp)
+{
+    if (connp->cert0_sans) {
+        for (uint16_t i = 0; i < connp->cert0_sans_len; i++) {
+            SCRustCStringFree(connp->cert0_sans[i]);
+        }
+        SCFree(connp->cert0_sans);
+    }
 }
 
 /**
@@ -2656,29 +2857,27 @@ static void SSLStateFree(void *p)
     SSLState *ssl_state = (SSLState *)p;
     SSLCertsChain *item;
 
-    if (ssl_state->client_connp.trec)
-        SCFree(ssl_state->client_connp.trec);
     if (ssl_state->client_connp.cert0_subject)
-        rs_cstring_free(ssl_state->client_connp.cert0_subject);
+        SCRustCStringFree(ssl_state->client_connp.cert0_subject);
     if (ssl_state->client_connp.cert0_issuerdn)
-        rs_cstring_free(ssl_state->client_connp.cert0_issuerdn);
+        SCRustCStringFree(ssl_state->client_connp.cert0_issuerdn);
     if (ssl_state->client_connp.cert0_serial)
-        rs_cstring_free(ssl_state->client_connp.cert0_serial);
+        SCRustCStringFree(ssl_state->client_connp.cert0_serial);
     if (ssl_state->client_connp.cert0_fingerprint)
         SCFree(ssl_state->client_connp.cert0_fingerprint);
     if (ssl_state->client_connp.sni)
         SCFree(ssl_state->client_connp.sni);
     if (ssl_state->client_connp.session_id)
         SCFree(ssl_state->client_connp.session_id);
+    if (ssl_state->client_connp.hs_buffer)
+        SCFree(ssl_state->client_connp.hs_buffer);
 
-    if (ssl_state->server_connp.trec)
-        SCFree(ssl_state->server_connp.trec);
     if (ssl_state->server_connp.cert0_subject)
-        rs_cstring_free(ssl_state->server_connp.cert0_subject);
+        SCRustCStringFree(ssl_state->server_connp.cert0_subject);
     if (ssl_state->server_connp.cert0_issuerdn)
-        rs_cstring_free(ssl_state->server_connp.cert0_issuerdn);
+        SCRustCStringFree(ssl_state->server_connp.cert0_issuerdn);
     if (ssl_state->server_connp.cert0_serial)
-        rs_cstring_free(ssl_state->server_connp.cert0_serial);
+        SCRustCStringFree(ssl_state->server_connp.cert0_serial);
     if (ssl_state->server_connp.cert0_fingerprint)
         SCFree(ssl_state->server_connp.cert0_fingerprint);
     if (ssl_state->server_connp.sni)
@@ -2686,31 +2885,44 @@ static void SSLStateFree(void *p)
     if (ssl_state->server_connp.session_id)
         SCFree(ssl_state->server_connp.session_id);
 
+    if (ssl_state->client_connp.hs)
+        SCTLSHandshakeFree(ssl_state->client_connp.hs);
     if (ssl_state->client_connp.ja3_str)
         Ja3BufferFree(&ssl_state->client_connp.ja3_str);
     if (ssl_state->client_connp.ja3_hash)
         SCFree(ssl_state->client_connp.ja3_hash);
+    if (ssl_state->server_connp.hs)
+        SCTLSHandshakeFree(ssl_state->server_connp.hs);
     if (ssl_state->server_connp.ja3_str)
         Ja3BufferFree(&ssl_state->server_connp.ja3_str);
     if (ssl_state->server_connp.ja3_hash)
         SCFree(ssl_state->server_connp.ja3_hash);
+    if (ssl_state->server_connp.hs_buffer)
+        SCFree(ssl_state->server_connp.hs_buffer);
 
-    AppLayerDecoderEventsFreeEvents(&ssl_state->decoder_events);
+    SSLStateCertSANFree(&ssl_state->server_connp);
+    SSLStateCertSANFree(&ssl_state->client_connp);
 
-    if (ssl_state->de_state != NULL) {
-        DetectEngineStateFree(ssl_state->de_state);
-    }
+    SCAppLayerTxDataCleanup(&ssl_state->tx_data);
 
     /* Free certificate chain */
+    if (ssl_state->server_connp.certs_buffer)
+        SCFree(ssl_state->server_connp.certs_buffer);
     while ((item = TAILQ_FIRST(&ssl_state->server_connp.certs))) {
         TAILQ_REMOVE(&ssl_state->server_connp.certs, item, next);
         SCFree(item);
     }
     TAILQ_INIT(&ssl_state->server_connp.certs);
+    /* Free certificate chain */
+    if (ssl_state->client_connp.certs_buffer)
+        SCFree(ssl_state->client_connp.certs_buffer);
+    while ((item = TAILQ_FIRST(&ssl_state->client_connp.certs))) {
+        TAILQ_REMOVE(&ssl_state->client_connp.certs, item, next);
+        SCFree(item);
+    }
+    TAILQ_INIT(&ssl_state->client_connp.certs);
 
     SCFree(ssl_state);
-
-    return;
 }
 
 static void SSLStateTransactionFree(void *state, uint64_t tx_id)
@@ -2718,8 +2930,8 @@ static void SSLStateTransactionFree(void *state, uint64_t tx_id)
     /* do nothing */
 }
 
-static AppProto SSLProbingParser(Flow *f, uint8_t direction,
-        const uint8_t *input, uint32_t ilen, uint8_t *rdir)
+static AppProto SSLProbingParser(
+        const Flow *f, uint8_t direction, const uint8_t *input, uint32_t ilen, uint8_t *rdir)
 {
     /* probably a rst/fin sending an eof */
     if (ilen < 3)
@@ -2734,29 +2946,59 @@ static AppProto SSLProbingParser(Flow *f, uint8_t direction,
     return ALPROTO_FAILED;
 }
 
-static int SSLStateGetEventInfo(const char *event_name,
-                         int *event_id, AppLayerEventType *event_type)
+static int SSLStateGetStateIdByName(const char *name, const uint8_t direction)
 {
-    *event_id = SCMapEnumNameToValue(event_name, tls_decoder_event_table);
-    if (*event_id == -1) {
-        SCLogError(SC_ERR_INVALID_ENUM_MAP, "event \"%s\" not present in "
-                   "ssl's enum map table.",  event_name);
-        /* yes this is fatal */
+    SCEnumCharMap *map =
+            direction == STREAM_TOSERVER ? tls_state_client_table : tls_state_server_table;
+
+    int id = SCMapEnumNameToValue(name, map);
+    if (id < 0) {
         return -1;
     }
-
-    *event_type = APP_LAYER_EVENT_TYPE_TRANSACTION;
-
-    return 0;
+    return id;
 }
 
-static int SSLStateGetEventInfoById(int event_id, const char **event_name,
-                                    AppLayerEventType *event_type)
+static const char *SSLStateGetStateNameById(const int id, const uint8_t direction)
+{
+    SCEnumCharMap *map =
+            direction == STREAM_TOSERVER ? tls_state_client_table : tls_state_server_table;
+    const char *name = SCMapEnumValueToName(id, map);
+    return name;
+}
+
+static int SSLStateGetFrameIdByName(const char *frame_name)
+{
+    int id = SCMapEnumNameToValue(frame_name, tls_frame_table);
+    if (id < 0) {
+        return -1;
+    }
+    return id;
+}
+
+static const char *SSLStateGetFrameNameById(const uint8_t frame_id)
+{
+    const char *name = SCMapEnumValueToName(frame_id, tls_frame_table);
+    return name;
+}
+
+static int SSLStateGetEventInfo(
+        const char *event_name, uint8_t *event_id, AppLayerEventType *event_type)
+{
+    if (SCAppLayerGetEventIdByName(event_name, tls_decoder_event_table, event_id) == 0) {
+        *event_type = APP_LAYER_EVENT_TYPE_TRANSACTION;
+        return 0;
+    }
+    return -1;
+}
+
+static int SSLStateGetEventInfoById(
+        uint8_t event_id, const char **event_name, AppLayerEventType *event_type)
 {
     *event_name = SCMapEnumValueToName(event_id, tls_decoder_event_table);
     if (*event_name == NULL) {
-        SCLogError(SC_ERR_INVALID_ENUM_MAP, "event \"%d\" not present in "
-                   "ssl's enum map table.",  event_id);
+        SCLogError("event \"%d\" not present in "
+                   "ssl's enum map table.",
+                event_id);
         /* yes this is fatal */
         return -1;
     }
@@ -2768,126 +3010,105 @@ static int SSLStateGetEventInfoById(int event_id, const char **event_name,
 
 static int SSLRegisterPatternsForProtocolDetection(void)
 {
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 00 02|", 5, 2, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCSwPP(IPPROTO_TCP, ALPROTO_TLS, "|01 00 02|", 5, 2,
+                STREAM_TOSERVER, SSLProbingParser, 0, 3) < 0) {
         return -1;
     }
 
     /** SSLv3 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 00|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 00|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 00|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 00|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 01|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 01|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 01|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 01|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1.1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 02|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 02|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 02|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 02|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1.2 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 03|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 03|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 03|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 03|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /***** toclient direction *****/
 
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1.1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1.2 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
@@ -2896,12 +3117,12 @@ static int SSLRegisterPatternsForProtocolDetection(void)
      * Updated by Anoop Saldanha.  Disabled it for now.  We'll get back to
      * it after some tests */
 #if 0
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
                                                "|01 03 00|", 5, 2, STREAM_TOSERVER) < 0)
     {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
                                                "|00 02|", 7, 5, STREAM_TOCLIENT) < 0)
     {
         return -1;
@@ -2910,6 +3131,56 @@ static int SSLRegisterPatternsForProtocolDetection(void)
 
     return 0;
 }
+
+#ifdef HAVE_JA3
+static void CheckJA3Enabled(void)
+{
+    const char *strval = NULL;
+    /* Check if we should generate JA3 fingerprints */
+    int enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    if (SCConfGet("app-layer.protocols.tls.ja3-fingerprints", &strval) != 1) {
+        enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    } else if (strcmp(strval, "auto") == 0) {
+        enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    } else if (SCConfValIsFalse(strval)) {
+        enable_ja3 = 0;
+        ssl_config.disable_ja3 = true;
+    } else if (SCConfValIsTrue(strval)) {
+        enable_ja3 = true;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja3, enable_ja3);
+    if (!ssl_config.disable_ja3 && !g_disable_hashing) {
+        /* The feature is available, i.e. _could_ be activated by a rule or
+            even is enabled in the configuration. */
+        ProvidesFeature(FEATURE_JA3);
+    }
+}
+#endif /* HAVE_JA3 */
+
+#ifdef HAVE_JA4
+static void CheckJA4Enabled(void)
+{
+    const char *strval = NULL;
+    /* Check if we should generate JA4 fingerprints */
+    int enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    if (SCConfGet("app-layer.protocols.tls.ja4-fingerprints", &strval) != 1) {
+        enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    } else if (strcmp(strval, "auto") == 0) {
+        enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    } else if (SCConfValIsFalse(strval)) {
+        enable_ja4 = 0;
+        ssl_config.disable_ja4 = true;
+    } else if (SCConfValIsTrue(strval)) {
+        enable_ja4 = true;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja4, enable_ja4);
+    if (!ssl_config.disable_ja4 && !g_disable_hashing) {
+        /* The feature is available, i.e. _could_ be activated by a rule or
+            even is enabled in the configuration. */
+        ProvidesFeature(FEATURE_JA4);
+    }
+}
+#endif /* HAVE_JA4 */
 
 /**
  * \brief Function to register the SSL protocol parser and other functions
@@ -2921,32 +3192,22 @@ void RegisterSSLParsers(void)
     SC_ATOMIC_INIT(ssl_config.enable_ja3);
 
     /** SSLv2  and SSLv23*/
-    if (AppLayerProtoDetectConfProtoDetectionEnabled("tcp", proto_name)) {
+    if (SCAppLayerProtoDetectConfProtoDetectionEnabled("tcp", proto_name)) {
         AppLayerProtoDetectRegisterProtocol(ALPROTO_TLS, proto_name);
 
         if (SSLRegisterPatternsForProtocolDetection() < 0)
             return;
 
         if (RunmodeIsUnittests()) {
-            AppLayerProtoDetectPPRegister(IPPROTO_TCP,
-                                          "443",
-                                          ALPROTO_TLS,
-                                          0, 3,
-                                          STREAM_TOSERVER,
-                                          SSLProbingParser, NULL);
+            SCAppLayerProtoDetectPPRegister(
+                    IPPROTO_TCP, "443", ALPROTO_TLS, 0, 3, STREAM_TOSERVER, SSLProbingParser, NULL);
         } else {
-            if (AppLayerProtoDetectPPParseConfPorts("tcp", IPPROTO_TCP,
-                                                    proto_name, ALPROTO_TLS,
-                                                    0, 3,
-                                                    SSLProbingParser, NULL) == 0) {
+            if (SCAppLayerProtoDetectPPParseConfPorts("tcp", IPPROTO_TCP, proto_name, ALPROTO_TLS,
+                        0, 3, SSLProbingParser, NULL) == 0) {
                 SCLogConfig("no TLS config found, "
                             "enabling TLS detection on port 443.");
-                AppLayerProtoDetectPPRegister(IPPROTO_TCP,
-                                              "443",
-                                              ALPROTO_TLS,
-                                              0, 3,
-                                              STREAM_TOSERVER,
-                                              SSLProbingParser, NULL);
+                SCAppLayerProtoDetectPPRegister(IPPROTO_TCP, "443", ALPROTO_TLS, 0, 3,
+                        STREAM_TOSERVER, SSLProbingParser, NULL);
             }
         }
     } else {
@@ -2955,99 +3216,98 @@ void RegisterSSLParsers(void)
         return;
     }
 
-    if (AppLayerParserConfParserEnabled("tcp", proto_name)) {
+    if (SCAppLayerParserConfParserEnabled("tcp", proto_name)) {
         AppLayerParserRegisterParser(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER,
                                      SSLParseClientRecord);
 
         AppLayerParserRegisterParser(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOCLIENT,
                                      SSLParseServerRecord);
-
+        AppLayerParserRegisterGetStateFuncs(
+                IPPROTO_TCP, ALPROTO_TLS, SSLStateGetStateIdByName, SSLStateGetStateNameById);
+        AppLayerParserRegisterGetFrameFuncs(
+                IPPROTO_TCP, ALPROTO_TLS, SSLStateGetFrameIdByName, SSLStateGetFrameNameById);
         AppLayerParserRegisterGetEventInfo(IPPROTO_TCP, ALPROTO_TLS, SSLStateGetEventInfo);
         AppLayerParserRegisterGetEventInfoById(IPPROTO_TCP, ALPROTO_TLS, SSLStateGetEventInfoById);
 
         AppLayerParserRegisterStateFuncs(IPPROTO_TCP, ALPROTO_TLS, SSLStateAlloc, SSLStateFree);
 
-        AppLayerParserRegisterParserAcceptableDataDirection(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER);
+        SCAppLayerParserRegisterParserAcceptableDataDirection(
+                IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER);
 
         AppLayerParserRegisterTxFreeFunc(IPPROTO_TCP, ALPROTO_TLS, SSLStateTransactionFree);
 
-        AppLayerParserRegisterGetEventsFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetEvents);
-
-        AppLayerParserRegisterDetectStateFuncs(IPPROTO_TCP, ALPROTO_TLS,
-                                               SSLGetTxDetectState, SSLSetTxDetectState);
-
         AppLayerParserRegisterGetTx(IPPROTO_TCP, ALPROTO_TLS, SSLGetTx);
         AppLayerParserRegisterTxDataFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetTxData);
+        AppLayerParserRegisterStateDataFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetStateData);
 
         AppLayerParserRegisterGetTxCnt(IPPROTO_TCP, ALPROTO_TLS, SSLGetTxCnt);
 
         AppLayerParserRegisterGetStateProgressFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetAlstateProgress);
 
-        AppLayerParserRegisterGetStateProgressCompletionStatus(ALPROTO_TLS,
-                                                               SSLGetAlstateProgressCompletionStatus);
+        AppLayerParserRegisterStateProgressCompletionStatus(
+                ALPROTO_TLS, TLS_STATE_CLIENT_FINISHED, TLS_STATE_SERVER_FINISHED);
 
-        ConfNode *enc_handle = ConfGetNode("app-layer.protocols.tls.encryption-handling");
+        SCConfNode *enc_handle = SCConfGetNode("app-layer.protocols.tls.encryption-handling");
         if (enc_handle != NULL && enc_handle->val != NULL) {
             SCLogDebug("have app-layer.protocols.tls.encryption-handling = %s", enc_handle->val);
             if (strcmp(enc_handle->val, "full") == 0) {
                 ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_FULL;
             } else if (strcmp(enc_handle->val, "bypass") == 0) {
                 ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
+            } else if (strcmp(enc_handle->val, "track-only") == 0) {
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             } else if (strcmp(enc_handle->val, "default") == 0) {
-                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_DEFAULT;
+                SCLogWarning("app-layer.protocols.tls.encryption-handling = default is deprecated "
+                             "and will be removed in Suricata 9, use \"track-only\" instead, "
+                             "(see ticket #7642)");
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             } else {
-                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_DEFAULT;
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             }
         } else {
             /* Get the value of no reassembly option from the config file */
-            if (ConfGetNode("app-layer.protocols.tls.no-reassemble") == NULL) {
+            if (SCConfGetNode("app-layer.protocols.tls.no-reassemble") == NULL) {
                 int value = 0;
-                if (ConfGetBool("tls.no-reassemble", &value) == 1 && value == 1)
+                if (SCConfGetBool("tls.no-reassemble", &value) == 1 && value == 1)
                     ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
             } else {
                 int value = 0;
-                if (ConfGetBool("app-layer.protocols.tls.no-reassemble", &value) == 1 && value == 1)
+                if (SCConfGetBool("app-layer.protocols.tls.no-reassemble", &value) == 1 &&
+                        value == 1)
                     ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
             }
         }
         SCLogDebug("ssl_config.encrypt_mode %u", ssl_config.encrypt_mode);
 
-        /* Check if we should generate JA3 fingerprints */
-        int enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        const char *strval = NULL;
-        if (ConfGetValue("app-layer.protocols.tls.ja3-fingerprints", &strval) != 1) {
-            enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        } else if (strcmp(strval, "auto") == 0) {
-            enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        } else if (ConfValIsFalse(strval)) {
-            enable_ja3 = 0;
-            ssl_config.disable_ja3 = true;
-        } else if (ConfValIsTrue(strval)) {
-            enable_ja3 = true;
-        }
-        SC_ATOMIC_SET(ssl_config.enable_ja3, enable_ja3);
+#ifdef HAVE_JA3
+        CheckJA3Enabled();
+#endif /* HAVE_JA3 */
+#ifdef HAVE_JA4
+        CheckJA4Enabled();
+#endif /* HAVE_JA4 */
 
-#ifndef HAVE_NSS
-        if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-            SCLogWarning(SC_WARN_NO_JA3_SUPPORT,
-                         "no MD5 calculation support built in (LibNSS), disabling JA3");
-            SC_ATOMIC_SET(ssl_config.enable_ja3, 0);
+        if (g_disable_hashing) {
+            if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+                SCLogWarning("MD5 calculation has been disabled, disabling JA3");
+                SC_ATOMIC_SET(ssl_config.enable_ja3, 0);
+            }
+            if (SC_ATOMIC_GET(ssl_config.enable_ja4)) {
+                SCLogWarning("Hashing has been disabled, disabling JA4");
+                SC_ATOMIC_SET(ssl_config.enable_ja4, 0);
+            }
+        } else {
+            if (RunmodeIsUnittests()) {
+#ifdef HAVE_JA3
+                SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
+#endif /* HAVE_JA3 */
+#ifdef HAVE_JA4
+                SC_ATOMIC_SET(ssl_config.enable_ja4, 1);
+#endif /* HAVE_JA4 */
+            }
         }
-#else
-        if (RunmodeIsUnittests()) {
-            SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
-        }
-#endif
-
     } else {
-        SCLogConfig("Parsed disabled for %s protocol. Protocol detection"
-                  "still on.", proto_name);
+        SCLogConfig("Parser disabled for %s protocol. Protocol detection still on.", proto_name);
     }
-
-#ifdef UNITTESTS
-    AppLayerParserRegisterProtocolUnittests(IPPROTO_TCP, ALPROTO_TLS, SSLParserRegisterTests);
-#endif
-    return;
 }
 
 /**
@@ -3058,2475 +3318,55 @@ void RegisterSSLParsers(void)
  */
 void SSLEnableJA3(void)
 {
-#ifdef HAVE_NSS
-    if (ssl_config.disable_ja3) {
+    if (g_disable_hashing || ssl_config.disable_ja3) {
         return;
     }
     if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
         return;
     }
     SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
-#endif
 }
 
+/**
+ * \brief if not explicitly disabled in config, enable ja4 support
+ *
+ * Implemented using atomic to allow rule reloads to do this at
+ * runtime.
+ */
+void SSLEnableJA4(void)
+{
+    // only caller has #ifdef HAVE_JA4
+    if (g_disable_hashing || ssl_config.disable_ja4) {
+        return;
+    }
+    if (SC_ATOMIC_GET(ssl_config.enable_ja4)) {
+        return;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja4, 1);
+}
+
+/**
+ * \brief return whether ja3 is effectively enabled
+ *
+ * This means that it either has been enabled explicitly or has been
+ * enabled by having loaded a rule while not being explicitly disabled.
+ *
+ * \retval true if enabled, false otherwise
+ */
 bool SSLJA3IsEnabled(void)
 {
-#ifdef HAVE_NSS
-    if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-        return true;
-    }
-#endif
-    return false;
-}
-
-/***************************************Unittests******************************/
-
-#ifdef UNITTESTS
-
-/**
- *\test Send a get request in one chunk.
- */
-static int SSLParserTest01(void)
-{
-    Flow f;
-    uint8_t tlsbuf[] = { 0x16, 0x03, 0x01 };
-    uint32_t tlslen = sizeof(tlsbuf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER | STREAM_EOF, tlsbuf, tlslen);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/** \test Send a get request in two chunks. */
-static int SSLParserTest02(void)
-{
-    Flow f;
-    uint8_t tlsbuf1[] = { 0x16 };
-    uint32_t tlslen1 = sizeof(tlsbuf1);
-    uint8_t tlsbuf2[] = { 0x03, 0x01 };
-    uint32_t tlslen2 = sizeof(tlsbuf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, tlsbuf1, tlslen1);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf2, tlslen2);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/** \test Send a get request in three chunks. */
-static int SSLParserTest03(void)
-{
-    Flow f;
-    uint8_t tlsbuf1[] = { 0x16 };
-    uint32_t tlslen1 = sizeof(tlsbuf1);
-    uint8_t tlsbuf2[] = { 0x03 };
-    uint32_t tlslen2 = sizeof(tlsbuf2);
-    uint8_t tlsbuf3[] = { 0x01 };
-    uint32_t tlslen3 = sizeof(tlsbuf3);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, tlsbuf1, tlslen1);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf2, tlslen2);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf3, tlslen3);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/** \test Send a get request in three chunks + more data. */
-static int SSLParserTest04(void)
-{
-    Flow f;
-    uint8_t tlsbuf1[] = { 0x16 };
-    uint32_t tlslen1 = sizeof(tlsbuf1);
-    uint8_t tlsbuf2[] = { 0x03 };
-    uint32_t tlslen2 = sizeof(tlsbuf2);
-    uint8_t tlsbuf3[] = { 0x01 };
-    uint32_t tlslen3 = sizeof(tlsbuf3);
-    uint8_t tlsbuf4[] = { 0x01, 0x00, 0x00, 0xad, 0x03, 0x01 };
-    uint32_t tlslen4 = sizeof(tlsbuf4);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, tlsbuf1, tlslen1);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf2, tlslen2);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf3, tlslen3);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            tlsbuf4, tlslen4);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-#if 0
-/** \test   Test the setting up of no reassembly and no payload inspection flag
- *          after detection of the TLS handshake completion */
-static int SSLParserTest05(void)
-{
-    int result = 1;
-    Flow f;
-    uint8_t tlsbuf[] = { 0x16, 0x03, 0x01, 0x00, 0x01 };
-    uint32_t tlslen = sizeof(tlsbuf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x17;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    SSLState *ssl_state = f.alstate;
-    if (ssl_state == NULL) {
-        printf("no tls state: ");
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.content_type != 0x17) {
-        printf("expected content_type %" PRIu8 ", got %" PRIu8 ": ", 0x17,
-                ssl_state->client_connp.content_type);
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.version != TLS_VERSION_10) {
-        printf("expected version %04" PRIu16 ", got %04" PRIu16 ": ",
-                TLS_VERSION_10, ssl_state->client_connp.client_version);
-        result = 0;
-        goto end;
-    }
-
-    AppLayerParserStateStore *parser_state_store = (AppLayerParserStateStore *)
-                                                    ssn.alparser;
-    AppLayerParserState *parser_state = &parser_state_store->to_server;
-
-    if (!(parser_state->flags & APP_LAYER_PARSER_NO_INSPECTION) &&
-        !(ssn.client.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY) &&
-        !(ssn.server.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY))
-    {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-    if (!(f.flags & FLOW_NOPAYLOAD_INSPECTION)) {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    return result;
-}
-#endif
-
-#if 0
-/** \test   Test the setting up of no reassembly and no payload inspection flag
- *          after detection of the valid TLS handshake completion, the rouge
- *          0x17 packet will not be considered in the detection process */
-static int SSLParserTest06(void)
-{
-    int result = 1;
-    Flow f;
-    uint8_t tlsbuf[] = { 0x16, 0x03, 0x01, 0x00, 0x01 };
-    uint32_t tlslen = sizeof(tlsbuf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x17;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    SSLState *ssl_state = f.alstate;
-    if (ssl_state == NULL) {
-        printf("no tls state: ");
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.content_type != 0x17) {
-        printf("expected content_type %" PRIu8 ", got %" PRIu8 ": ", 0x17,
-                ssl_state->client_connp._content_type);
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.version != TLS_VERSION_10) {
-        printf("expected version %04" PRIu16 ", got %04" PRIu16 ": ",
-                TLS_VERSION_10, ssl_state->client_connp.version);
-        result = 0;
-        goto end;
-    }
-
-    AppLayerParserStateStore *parser_state_store = (AppLayerParserStateStore *)
-                                                    ssn.alparser;
-    AppLayerParserState *parser_state = &parser_state_store->to_server;
-
-    if ((parser_state->flags & APP_LAYER_PARSER_NO_INSPECTION) ||
-            (ssn.client.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY) ||
-            (ssn.server.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY)) {
-        printf("The flags should not be set\n");
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x17;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    if (!(parser_state->flags & APP_LAYER_PARSER_NO_INSPECTION) &&
-            !(ssn.client.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY) &&
-            !(ssn.server.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY)) {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-    if (!(f.flags & FLOW_NOPAYLOAD_INSPECTION)) {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    return result;
-}
-#endif
-
-/** \test multimsg test */
-static int SSLParserMultimsgTest01(void)
-{
-    Flow f;
-    /* 3 msgs */
-    uint8_t tlsbuf1[] = {
-        0x16, 0x03, 0x01, 0x00, 0x86, 0x10, 0x00, 0x00,
-        0x82, 0x00, 0x80, 0xd3, 0x6f, 0x1f, 0x63, 0x82,
-        0x8d, 0x75, 0x77, 0x8c, 0x91, 0xbc, 0xa1, 0x3d,
-        0xbb, 0xe1, 0xb5, 0xd3, 0x31, 0x92, 0x59, 0x2b,
-        0x2c, 0x43, 0x96, 0xa3, 0xaa, 0x23, 0x92, 0xd0,
-        0x91, 0x2a, 0x5e, 0x10, 0x5b, 0xc8, 0xc1, 0xe2,
-        0xd3, 0x5c, 0x8b, 0x8c, 0x91, 0x9e, 0xc2, 0xf2,
-        0x9c, 0x3c, 0x4f, 0x37, 0x1e, 0x20, 0x5e, 0x33,
-        0xd5, 0xf0, 0xd6, 0xaf, 0x89, 0xf5, 0xcc, 0xb2,
-        0xcf, 0xc1, 0x60, 0x3a, 0x46, 0xd5, 0x4e, 0x2a,
-        0xb6, 0x6a, 0xb9, 0xfc, 0x32, 0x8b, 0xe0, 0x6e,
-        0xa0, 0xed, 0x25, 0xa0, 0xa4, 0x82, 0x81, 0x73,
-        0x90, 0xbf, 0xb5, 0xde, 0xeb, 0x51, 0x8d, 0xde,
-        0x5b, 0x6f, 0x94, 0xee, 0xba, 0xe5, 0x69, 0xfa,
-        0x1a, 0x80, 0x30, 0x54, 0xeb, 0x12, 0x01, 0xb9,
-        0xfe, 0xbf, 0x82, 0x95, 0x01, 0x7b, 0xb0, 0x97,
-        0x14, 0xc2, 0x06, 0x3c, 0x69, 0xfb, 0x1c, 0x66,
-        0x47, 0x17, 0xd9, 0x14, 0x03, 0x01, 0x00, 0x01,
-        0x01, 0x16, 0x03, 0x01, 0x00, 0x30, 0xf6, 0xbc,
-        0x0d, 0x6f, 0xe8, 0xbb, 0xaa, 0xbf, 0x14, 0xeb,
-        0x7b, 0xcc, 0x6c, 0x28, 0xb0, 0xfc, 0xa6, 0x01,
-        0x2a, 0x97, 0x96, 0x17, 0x5e, 0xe8, 0xb4, 0x4e,
-        0x78, 0xc9, 0x04, 0x65, 0x53, 0xb6, 0x93, 0x3d,
-        0xeb, 0x44, 0xee, 0x86, 0xf9, 0x80, 0x49, 0x45,
-        0x21, 0x34, 0xd1, 0xee, 0xc8, 0x9c
-    };
-    uint32_t tlslen1 = sizeof(tlsbuf1);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, tlsbuf1, tlslen1);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != TLS_VERSION_10);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/** \test multimsg test server */
-static int SSLParserMultimsgTest02(void)
-{
-    Flow f;
-    /* 3 msgs */
-    uint8_t tlsbuf1[] = {
-        0x16, 0x03, 0x01, 0x00, 0x86, 0x10, 0x00, 0x00,
-        0x82, 0x00, 0x80, 0xd3, 0x6f, 0x1f, 0x63, 0x82,
-        0x8d, 0x75, 0x77, 0x8c, 0x91, 0xbc, 0xa1, 0x3d,
-        0xbb, 0xe1, 0xb5, 0xd3, 0x31, 0x92, 0x59, 0x2b,
-        0x2c, 0x43, 0x96, 0xa3, 0xaa, 0x23, 0x92, 0xd0,
-        0x91, 0x2a, 0x5e, 0x10, 0x5b, 0xc8, 0xc1, 0xe2,
-        0xd3, 0x5c, 0x8b, 0x8c, 0x91, 0x9e, 0xc2, 0xf2,
-        0x9c, 0x3c, 0x4f, 0x37, 0x1e, 0x20, 0x5e, 0x33,
-        0xd5, 0xf0, 0xd6, 0xaf, 0x89, 0xf5, 0xcc, 0xb2,
-        0xcf, 0xc1, 0x60, 0x3a, 0x46, 0xd5, 0x4e, 0x2a,
-        0xb6, 0x6a, 0xb9, 0xfc, 0x32, 0x8b, 0xe0, 0x6e,
-        0xa0, 0xed, 0x25, 0xa0, 0xa4, 0x82, 0x81, 0x73,
-        0x90, 0xbf, 0xb5, 0xde, 0xeb, 0x51, 0x8d, 0xde,
-        0x5b, 0x6f, 0x94, 0xee, 0xba, 0xe5, 0x69, 0xfa,
-        0x1a, 0x80, 0x30, 0x54, 0xeb, 0x12, 0x01, 0xb9,
-        0xfe, 0xbf, 0x82, 0x95, 0x01, 0x7b, 0xb0, 0x97,
-        0x14, 0xc2, 0x06, 0x3c, 0x69, 0xfb, 0x1c, 0x66,
-        0x47, 0x17, 0xd9, 0x14, 0x03, 0x01, 0x00, 0x01,
-        0x01, 0x16, 0x03, 0x01, 0x00, 0x30, 0xf6, 0xbc,
-        0x0d, 0x6f, 0xe8, 0xbb, 0xaa, 0xbf, 0x14, 0xeb,
-        0x7b, 0xcc, 0x6c, 0x28, 0xb0, 0xfc, 0xa6, 0x01,
-        0x2a, 0x97, 0x96, 0x17, 0x5e, 0xe8, 0xb4, 0x4e,
-        0x78, 0xc9, 0x04, 0x65, 0x53, 0xb6, 0x93, 0x3d,
-        0xeb, 0x44, 0xee, 0x86, 0xf9, 0x80, 0x49, 0x45,
-        0x21, 0x34, 0xd1, 0xee, 0xc8, 0x9c
-    };
-    uint32_t tlslen1 = sizeof(tlsbuf1);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOCLIENT, tlsbuf1, tlslen1);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->server_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->server_connp.version != 0x0301);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
+    return SC_ATOMIC_GET(ssl_config.enable_ja3);
 }
 
 /**
- *  \test   Test the detection of SSLv3 protocol from the given packet
+ * \brief return whether ja4 is effectively enabled
+ *
+ * This means that it either has been enabled explicitly or has been
+ * enabled by having loaded a rule while not being explicitly disabled.
+ *
+ * \retval true if enabled, false otherwise
  */
-static int SSLParserTest07(void)
+bool SSLJA4IsEnabled(void)
 {
-    Flow f;
-    uint8_t tlsbuf[] = { 0x16, 0x03, 0x00, 0x00, 0x4c, 0x01,
-            0x00, 0x00, 0x48, 0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f, 0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f };
-    uint32_t tlslen = sizeof(tlsbuf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, tlsbuf, tlslen);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-#if 0
-/** \test   Test the setting up of no reassembly and no payload inspection flag
- *          after detection of the SSLv3 handshake completion */
-static int SSLParserTest08(void)
-{
-    int result = 1;
-    Flow f;
-    uint8_t tlsbuf[] = { 0x16, 0x03, 0x00, 0x00, 0x01 };
-    uint32_t tlslen = sizeof(tlsbuf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    int r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x14;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    tlsbuf[0] = 0x17;
-
-    r = AppLayerParserParse(alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER, tlsbuf, tlslen);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        result = 0;
-        goto end;
-    }
-
-    SSLState *ssl_state = f.alstate;
-    if (ssl_state == NULL) {
-        printf("no tls state: ");
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.content_type != 0x17) {
-        printf("expected content_type %" PRIu8 ", got %" PRIu8 ": ", 0x17,
-                ssl_state->client_connp.content_type);
-        result = 0;
-        goto end;
-    }
-
-    if (ssl_state->client_connp.version != SSL_VERSION_3) {
-        printf("expected version %04" PRIu16 ", got %04" PRIu16 ": ",
-                SSL_VERSION_3, ssl_state->client_connp.version);
-        result = 0;
-        goto end;
-    }
-
-    AppLayerParserStateStore *parser_state_store = (AppLayerParserStateStore *)
-                                                    ssn.alparser;
-    AppLayerParserState *parser_state = &parser_state_store->to_server;
-
-    if (!(parser_state->flags & APP_LAYER_PARSER_NO_INSPECTION) &&
-            !(ssn.client.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY) &&
-            !(ssn.server.flags & STREAMTCP_STREAM_FLAG_NOREASSEMBLY)) {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-    if (!(f.flags & FLOW_NOPAYLOAD_INSPECTION)) {
-        printf("The flags should be set\n");
-        result = 0;
-        goto end;
-    }
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    return result;
-}
-
-#endif
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest09(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-            0x16,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-            0x03, 0x00, 0x00, 0x4c, 0x01,
-            0x00, 0x00, 0x48, 0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f, 0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f
-    };
-    uint32_t buf2_len = sizeof(buf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest10(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-        0x16, 0x03,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-            0x00, 0x00, 0x4c, 0x01,
-            0x00, 0x00, 0x48, 0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f, 0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f
-    };
-    uint32_t buf2_len = sizeof(buf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest11(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-            0x16, 0x03, 0x00, 0x00, 0x4c, 0x01,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-            0x00, 0x00, 0x48, 0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f, 0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f
-    };
-    uint32_t buf2_len = sizeof(buf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest12(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-            0x16, 0x03, 0x00, 0x00, 0x4c, 0x01,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-            0x00, 0x00, 0x48,
-    };
-    uint32_t buf2_len = sizeof(buf2);
-
-    uint8_t buf3[] = {
-            0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f, 0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f
-    };
-    uint32_t buf3_len = sizeof(buf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf3, buf3_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest13(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-            0x16, 0x03, 0x00, 0x00, 0x4c, 0x01,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-            0x00, 0x00, 0x48,
-    };
-    uint32_t buf2_len = sizeof(buf2);
-
-    uint8_t buf3[] = {
-            0x03, 0x00, 0x57, 0x04, 0x9f,
-            0x8c, 0x66, 0x61, 0xf6, 0x3d, 0x4f,
-    };
-    uint32_t buf3_len = sizeof(buf3);
-
-    uint8_t buf4[] = {
-            0xbf, 0xbb,
-            0xa7, 0x47, 0x21, 0x76, 0x6c, 0x21, 0x08, 0x9f,
-            0xef, 0x3d, 0x0e, 0x5f, 0x65, 0x1a, 0xe1, 0x93,
-            0xb8, 0xaf, 0xd2, 0x82, 0xbd, 0x00, 0x00, 0x06,
-            0x00, 0x0a, 0x00, 0x16, 0x00, 0xff, 0x01, 0x00,
-            0x00, 0x19, 0x00, 0x00, 0x00, 0x15, 0x00, 0x13,
-            0x00, 0x00, 0x10, 0x61, 0x62, 0x63, 0x64, 0x65,
-            0x66, 0x67, 0x68, 0x2e, 0x65, 0x66, 0x67, 0x68,
-            0x2e, 0x6e, 0x6f
-    };
-    uint32_t buf4_len = sizeof(buf4);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf3, buf3_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf4, buf4_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest14(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x00,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-        0x16, 0x03, 0x00, 0x00, 0x00,
-    };
-    uint32_t buf2_len = sizeof(buf2);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest15(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x01, 0x01,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r == 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest16(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x02, 0x01, 0x00
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r == 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest17(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x03, 0x01, 0x00, 0x00
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r == 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest18(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00,
-        0x6b,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-        0x16, 0x03, 0x00, 0x00, 0x00,
-    };
-    uint32_t buf2_len = sizeof(buf2);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest19(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00,
-        0x6b, 0x16, 0x03, 0x00, 0x00, 0x00,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest20(void)
-{
-    Flow f;
-
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x03, 0x01, 0x00, 0x00,
-        0x16, 0x03, 0x00, 0x00, 0x00,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r == 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test SSLv2 Record parsing.
- */
-static int SSLParserTest21(void)
-{
-    Flow f;
-    uint8_t buf[] = {
-        0x80, 0x31, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00,
-        0x01,
-    };
-    uint32_t buf_len = sizeof(buf);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER | STREAM_EOF, buf, buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *app_state = f.alstate;
-    FAIL_IF_NULL(app_state);
-
-    FAIL_IF(app_state->client_connp.content_type != SSLV2_MT_CLIENT_HELLO);
-
-    FAIL_IF(app_state->client_connp.version != SSL_VERSION_2);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test SSLv2 Record parsing.
- */
-static int SSLParserTest22(void)
-{
-    Flow f;
-    uint8_t buf[] = {
-        0x80, 0x31, 0x04, 0x00, 0x01, 0x00,
-        0x02, 0x00, 0x00, 0x00, 0x10, 0x07, 0x00, 0xc0,
-        0x05, 0x00, 0x80, 0x03, 0x00, 0x80, 0x01, 0x00,
-        0x80, 0x08, 0x00, 0x80, 0x06, 0x00, 0x40, 0x04,
-        0x00, 0x80, 0x02, 0x00, 0x80, 0x76, 0x64, 0x75,
-        0x2d, 0xa7, 0x98, 0xfe, 0xc9, 0x12, 0x92, 0xc1,
-        0x2f, 0x34, 0x84, 0x20, 0xc5};
-    uint32_t buf_len = sizeof(buf);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    //AppLayerDetectProtoThreadInit();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOCLIENT | STREAM_EOF, buf, buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *app_state = f.alstate;
-    FAIL_IF_NULL(app_state);
-
-    FAIL_IF(app_state->server_connp.content_type != SSLV2_MT_SERVER_HELLO);
-
-    FAIL_IF(app_state->server_connp.version != SSL_VERSION_2);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test SSLv2 Record parsing.
- */
-static int SSLParserTest23(void)
-{
-    Flow f;
-    uint8_t chello_buf[] = {
-        0x80, 0x67, 0x01, 0x03, 0x00, 0x00, 0x4e, 0x00,
-        0x00, 0x00, 0x10, 0x01, 0x00, 0x80, 0x03, 0x00,
-        0x80, 0x07, 0x00, 0xc0, 0x06, 0x00, 0x40, 0x02,
-        0x00, 0x80, 0x04, 0x00, 0x80, 0x00, 0x00, 0x39,
-        0x00, 0x00, 0x38, 0x00, 0x00, 0x35, 0x00, 0x00,
-        0x33, 0x00, 0x00, 0x32, 0x00, 0x00, 0x04, 0x00,
-        0x00, 0x05, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x16,
-        0x00, 0x00, 0x13, 0x00, 0xfe, 0xff, 0x00, 0x00,
-        0x0a, 0x00, 0x00, 0x15, 0x00, 0x00, 0x12, 0x00,
-        0xfe, 0xfe, 0x00, 0x00, 0x09, 0x00, 0x00, 0x64,
-        0x00, 0x00, 0x62, 0x00, 0x00, 0x03, 0x00, 0x00,
-        0x06, 0xa8, 0xb8, 0x93, 0xbb, 0x90, 0xe9, 0x2a,
-        0xa2, 0x4d, 0x6d, 0xcc, 0x1c, 0xe7, 0x2a, 0x80,
-        0x21
-    };
-    uint32_t chello_buf_len = sizeof(chello_buf);
-
-    uint8_t shello_buf[] = {
-        0x16, 0x03, 0x00, 0x00, 0x4a, 0x02,
-        0x00, 0x00, 0x46, 0x03, 0x00, 0x44, 0x4c, 0x94,
-        0x8f, 0xfe, 0x81, 0xed, 0x93, 0x65, 0x02, 0x88,
-        0xa3, 0xf8, 0xeb, 0x63, 0x86, 0x0e, 0x2c, 0xf6,
-        0x8d, 0xd0, 0x0f, 0x2c, 0x2a, 0xd6, 0x4f, 0xcd,
-        0x2d, 0x3c, 0x16, 0xd7, 0xd6, 0x20, 0xa0, 0xfb,
-        0x60, 0x86, 0x3d, 0x1e, 0x76, 0xf3, 0x30, 0xfe,
-        0x0b, 0x01, 0xfd, 0x1a, 0x01, 0xed, 0x95, 0xf6,
-        0x7b, 0x8e, 0xc0, 0xd4, 0x27, 0xbf, 0xf0, 0x6e,
-        0xc7, 0x56, 0xb1, 0x47, 0xce, 0x98, 0x00, 0x35,
-        0x00, 0x16, 0x03, 0x00, 0x03, 0x44, 0x0b, 0x00,
-        0x03, 0x40, 0x00, 0x03, 0x3d, 0x00, 0x03, 0x3a,
-        0x30, 0x82, 0x03, 0x36, 0x30, 0x82, 0x02, 0x9f,
-        0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01,
-        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
-        0xf7, 0x0d, 0x01, 0x01, 0x04, 0x05, 0x00, 0x30,
-        0x81, 0xa9, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03,
-        0x55, 0x04, 0x06, 0x13, 0x02, 0x58, 0x59, 0x31,
-        0x15, 0x30, 0x13, 0x06, 0x03, 0x55, 0x04, 0x08,
-        0x13, 0x0c, 0x53, 0x6e, 0x61, 0x6b, 0x65, 0x20,
-        0x44, 0x65, 0x73, 0x65, 0x72, 0x74, 0x31, 0x13,
-        0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x07, 0x13,
-        0x0a, 0x53, 0x6e, 0x61, 0x6b, 0x65, 0x20, 0x54,
-        0x6f, 0x77, 0x6e, 0x31, 0x17, 0x30, 0x15, 0x06,
-        0x03, 0x55, 0x04, 0x0a, 0x13, 0x0e, 0x53, 0x6e,
-        0x61, 0x6b, 0x65, 0x20, 0x4f, 0x69, 0x6c, 0x2c,
-        0x20, 0x4c, 0x74, 0x64, 0x31, 0x1e, 0x30, 0x1c,
-        0x06, 0x03, 0x55, 0x04, 0x0b, 0x13, 0x15, 0x43,
-        0x65, 0x72, 0x74, 0x69, 0x66, 0x69, 0x63, 0x61,
-        0x74, 0x65, 0x20, 0x41, 0x75, 0x74, 0x68, 0x6f,
-        0x72, 0x69, 0x74, 0x79, 0x31, 0x15, 0x30, 0x13,
-        0x06, 0x03, 0x55, 0x04, 0x03, 0x13, 0x0c, 0x53,
-        0x6e, 0x61, 0x6b, 0x65, 0x20, 0x4f, 0x69, 0x6c,
-        0x20, 0x43, 0x41, 0x31, 0x1e, 0x30, 0x1c, 0x06,
-        0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
-        0x09, 0x01, 0x16, 0x0f, 0x63, 0x61, 0x40, 0x73,
-        0x6e, 0x61, 0x6b, 0x65, 0x6f, 0x69, 0x6c, 0x2e,
-        0x64, 0x6f, 0x6d, 0x30, 0x1e, 0x17, 0x0d, 0x30,
-        0x33, 0x30, 0x33, 0x30, 0x35, 0x31, 0x36, 0x34,
-        0x37, 0x34, 0x35, 0x5a, 0x17, 0x0d, 0x30, 0x38,
-        0x30, 0x33, 0x30, 0x33, 0x31, 0x36, 0x34, 0x37,
-        0x34, 0x35, 0x5a, 0x30, 0x81, 0xa7, 0x31, 0x0b,
-        0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
-        0x02, 0x58, 0x59, 0x31, 0x15, 0x30, 0x13, 0x06,
-        0x03, 0x55, 0x04, 0x08, 0x13, 0x0c, 0x53, 0x6e,
-        0x61, 0x6b, 0x65, 0x20, 0x44, 0x65, 0x73, 0x65,
-        0x72, 0x74, 0x31, 0x13, 0x30, 0x11, 0x06, 0x03,
-        0x55, 0x04, 0x07, 0x13, 0x0a, 0x53, 0x6e, 0x61,
-        0x6b, 0x65, 0x20, 0x54, 0x6f, 0x77, 0x6e, 0x31,
-        0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04, 0x0a,
-        0x13, 0x0e, 0x53, 0x6e, 0x61, 0x6b, 0x65, 0x20,
-        0x4f, 0x69, 0x6c, 0x2c, 0x20, 0x4c, 0x74, 0x64,
-        0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04,
-        0x0b, 0x13, 0x0e, 0x57, 0x65, 0x62, 0x73, 0x65,
-        0x72, 0x76, 0x65, 0x72, 0x20, 0x54, 0x65, 0x61,
-        0x6d, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55,
-        0x04, 0x03, 0x13, 0x10, 0x77, 0x77, 0x77, 0x2e,
-        0x73, 0x6e, 0x61, 0x6b, 0x65, 0x6f, 0x69, 0x6c,
-        0x2e, 0x64, 0x6f, 0x6d, 0x31, 0x1f, 0x30, 0x1d,
-        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
-        0x01, 0x09, 0x01, 0x16, 0x10, 0x77, 0x77, 0x77,
-        0x40, 0x73, 0x6e, 0x61, 0x6b, 0x65, 0x6f, 0x69,
-        0x6c, 0x2e, 0x64, 0x6f, 0x6d, 0x30, 0x81, 0x9f,
-        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
-        0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x03,
-        0x81, 0x8d, 0x00, 0x30, 0x81, 0x89, 0x02, 0x81,
-        0x81, 0x00, 0xa4, 0x6e, 0x53, 0x14, 0x0a, 0xde,
-        0x2c, 0xe3, 0x60, 0x55, 0x9a, 0xf2, 0x42, 0xa6,
-        0xaf, 0x47, 0x12, 0x2f, 0x17, 0xce, 0xfa, 0xba,
-        0xdc, 0x4e, 0x63, 0x56, 0x34, 0xb9, 0xba, 0x73,
-        0x4b, 0x78, 0x44, 0x3d, 0xc6, 0x6c, 0x69, 0xa4,
-        0x25, 0xb3, 0x61, 0x02, 0x9d, 0x09, 0x04, 0x3f,
-        0x72, 0x3d, 0xd8, 0x27, 0xd3, 0xb0, 0x5a, 0x45,
-        0x77, 0xb7, 0x36, 0xe4, 0x26, 0x23, 0xcc, 0x12,
-        0xb8, 0xae, 0xde, 0xa7, 0xb6, 0x3a, 0x82, 0x3c,
-        0x7c, 0x24, 0x59, 0x0a, 0xf8, 0x96, 0x43, 0x8b,
-        0xa3, 0x29, 0x36, 0x3f, 0x91, 0x7f, 0x5d, 0xc7,
-        0x23, 0x94, 0x29, 0x7f, 0x0a, 0xce, 0x0a, 0xbd,
-        0x8d, 0x9b, 0x2f, 0x19, 0x17, 0xaa, 0xd5, 0x8e,
-        0xec, 0x66, 0xa2, 0x37, 0xeb, 0x3f, 0x57, 0x53,
-        0x3c, 0xf2, 0xaa, 0xbb, 0x79, 0x19, 0x4b, 0x90,
-        0x7e, 0xa7, 0xa3, 0x99, 0xfe, 0x84, 0x4c, 0x89,
-        0xf0, 0x3d, 0x02, 0x03, 0x01, 0x00, 0x01, 0xa3,
-        0x6e, 0x30, 0x6c, 0x30, 0x1b, 0x06, 0x03, 0x55,
-        0x1d, 0x11, 0x04, 0x14, 0x30, 0x12, 0x81, 0x10,
-        0x77, 0x77, 0x77, 0x40, 0x73, 0x6e, 0x61, 0x6b,
-        0x65, 0x6f, 0x69, 0x6c, 0x2e, 0x64, 0x6f, 0x6d,
-        0x30, 0x3a, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-        0x86, 0xf8, 0x42, 0x01, 0x0d, 0x04, 0x2d, 0x16,
-        0x2b, 0x6d, 0x6f, 0x64, 0x5f, 0x73, 0x73, 0x6c,
-        0x20, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74,
-        0x65, 0x64, 0x20, 0x63, 0x75, 0x73, 0x74, 0x6f,
-        0x6d, 0x20, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72,
-        0x20, 0x63, 0x65, 0x72, 0x74, 0x69, 0x66, 0x69,
-        0x63, 0x61, 0x74, 0x65, 0x30, 0x11, 0x06, 0x09,
-        0x60, 0x86, 0x48, 0x01, 0x86, 0xf8, 0x42, 0x01,
-        0x01, 0x04, 0x04, 0x03, 0x02, 0x06, 0x40, 0x30,
-        0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
-        0x0d, 0x01, 0x01, 0x04, 0x05, 0x00, 0x03, 0x81,
-        0x81, 0x00, 0xae, 0x79, 0x79, 0x22, 0x90, 0x75,
-        0xfd, 0xa6, 0xd5, 0xc4, 0xb8, 0xc4, 0x99, 0x4e,
-        0x1c, 0x05, 0x7c, 0x91, 0x59, 0xbe, 0x89, 0x0d,
-        0x3d, 0xc6, 0x8c, 0xa3, 0xcf, 0xf6, 0xba, 0x23,
-        0xdf, 0xb8, 0xae, 0x44, 0x68, 0x8a, 0x8f, 0xb9,
-        0x8b, 0xcb, 0x12, 0xda, 0xe6, 0xa2, 0xca, 0xa5,
-        0xa6, 0x55, 0xd9, 0xd2, 0xa1, 0xad, 0xba, 0x9b,
-        0x2c, 0x44, 0x95, 0x1d, 0x4a, 0x90, 0x59, 0x7f,
-        0x83, 0xae, 0x81, 0x5e, 0x3f, 0x92, 0xe0, 0x14,
-        0x41, 0x82, 0x4e, 0x7f, 0x53, 0xfd, 0x10, 0x23,
-        0xeb, 0x8a, 0xeb, 0xe9, 0x92, 0xea, 0x61, 0xf2,
-        0x8e, 0x19, 0xa1, 0xd3, 0x49, 0xc0, 0x84, 0x34,
-        0x1e, 0x2e, 0x6e, 0xf6, 0x98, 0xe2, 0x87, 0x53,
-        0xd6, 0x55, 0xd9, 0x1a, 0x8a, 0x92, 0x5c, 0xad,
-        0xdc, 0x1e, 0x1c, 0x30, 0xa7, 0x65, 0x9d, 0xc2,
-        0x4f, 0x60, 0xd2, 0x6f, 0xdb, 0xe0, 0x9f, 0x9e,
-        0xbc, 0x41, 0x16, 0x03, 0x00, 0x00, 0x04, 0x0e,
-        0x00, 0x00, 0x00
-    };
-    uint32_t shello_buf_len = sizeof(shello_buf);
-
-    uint8_t client_change_cipher_spec_buf[] = {
-        0x16, 0x03, 0x00, 0x00, 0x84, 0x10, 0x00, 0x00,
-        0x80, 0x65, 0x51, 0x2d, 0xa6, 0xd4, 0xa7, 0x38,
-        0xdf, 0xac, 0x79, 0x1f, 0x0b, 0xd9, 0xb2, 0x61,
-        0x7d, 0x73, 0x88, 0x32, 0xd9, 0xf2, 0x62, 0x3a,
-        0x8b, 0x11, 0x04, 0x75, 0xca, 0x42, 0xff, 0x4e,
-        0xd9, 0xcc, 0xb9, 0xfa, 0x86, 0xf3, 0x16, 0x2f,
-        0x09, 0x73, 0x51, 0x66, 0xaa, 0x29, 0xcd, 0x80,
-        0x61, 0x0f, 0xe8, 0x13, 0xce, 0x5b, 0x8e, 0x0a,
-        0x23, 0xf8, 0x91, 0x5e, 0x5f, 0x54, 0x70, 0x80,
-        0x8e, 0x7b, 0x28, 0xef, 0xb6, 0x69, 0xb2, 0x59,
-        0x85, 0x74, 0x98, 0xe2, 0x7e, 0xd8, 0xcc, 0x76,
-        0x80, 0xe1, 0xb6, 0x45, 0x4d, 0xc7, 0xcd, 0x84,
-        0xce, 0xb4, 0x52, 0x79, 0x74, 0xcd, 0xe6, 0xd7,
-        0xd1, 0x9c, 0xad, 0xef, 0x63, 0x6c, 0x0f, 0xf7,
-        0x05, 0xe4, 0x4d, 0x1a, 0xd3, 0xcb, 0x9c, 0xd2,
-        0x51, 0xb5, 0x61, 0xcb, 0xff, 0x7c, 0xee, 0xc7,
-        0xbc, 0x5e, 0x15, 0xa3, 0xf2, 0x52, 0x0f, 0xbb,
-        0x32, 0x14, 0x03, 0x00, 0x00, 0x01, 0x01, 0x16,
-        0x03, 0x00, 0x00, 0x40, 0xa9, 0xd8, 0xd7, 0x35,
-        0xbc, 0x39, 0x56, 0x98, 0xad, 0x87, 0x61, 0x2a,
-        0xc4, 0x8f, 0xcc, 0x03, 0xcb, 0x93, 0x80, 0x81,
-        0xb0, 0x4a, 0xc4, 0xd2, 0x09, 0x71, 0x3e, 0x90,
-        0x3c, 0x8d, 0xe0, 0x95, 0x44, 0xfe, 0x56, 0xd1,
-        0x7e, 0x88, 0xe2, 0x48, 0xfd, 0x76, 0x70, 0x76,
-        0xe2, 0xcd, 0x06, 0xd0, 0xf3, 0x9d, 0x13, 0x79,
-        0x67, 0x1e, 0x37, 0xf6, 0x98, 0xbe, 0x59, 0x18,
-        0x4c, 0xfc, 0x75, 0x56
-    };
-    uint32_t client_change_cipher_spec_buf_len =
-        sizeof(client_change_cipher_spec_buf);
-
-    uint8_t server_change_cipher_spec_buf[] = {
-        0x14, 0x03, 0x00, 0x00, 0x01, 0x01, 0x16, 0x03,
-        0x00, 0x00, 0x40, 0xce, 0x7c, 0x92, 0x43, 0x59,
-        0xcc, 0x3d, 0x90, 0x91, 0x9c, 0x58, 0xf0, 0x7a,
-        0xce, 0xae, 0x0d, 0x08, 0xe0, 0x76, 0xb4, 0x86,
-        0xb1, 0x15, 0x5b, 0x32, 0xb8, 0x77, 0x53, 0xe7,
-        0xa6, 0xf9, 0xd0, 0x95, 0x5f, 0xaa, 0x07, 0xc3,
-        0x96, 0x7c, 0xc9, 0x88, 0xc2, 0x7a, 0x20, 0x89,
-        0x4f, 0xeb, 0xeb, 0xb6, 0x19, 0xef, 0xaa, 0x27,
-        0x73, 0x9d, 0xa6, 0xb4, 0x9f, 0xeb, 0x34, 0xe2,
-        0x4d, 0x9f, 0x6b
-    };
-    uint32_t server_change_cipher_spec_buf_len =
-        sizeof(server_change_cipher_spec_buf);
-
-    uint8_t toserver_app_data_buf[] = {
-        0x17, 0x03, 0x00, 0x01, 0xb0, 0x4a, 0xc3, 0x3e,
-        0x9d, 0x77, 0x78, 0x01, 0x2c, 0xb4, 0xbc, 0x4c,
-        0x9a, 0x84, 0xd7, 0xb9, 0x90, 0x0c, 0x21, 0x10,
-        0xf0, 0xfa, 0x00, 0x7c, 0x16, 0xbb, 0x77, 0xfb,
-        0x72, 0x42, 0x4f, 0xad, 0x50, 0x4a, 0xd0, 0xaa,
-        0x6f, 0xaa, 0x44, 0x6c, 0x62, 0x94, 0x1b, 0xc5,
-        0xfe, 0xe9, 0x1c, 0x5e, 0xde, 0x85, 0x0b, 0x0e,
-        0x05, 0xe4, 0x18, 0x6e, 0xd2, 0xd3, 0xb5, 0x20,
-        0xab, 0x81, 0xfd, 0x18, 0x9a, 0x73, 0xb8, 0xd7,
-        0xef, 0xc3, 0xdd, 0x74, 0xd7, 0x9c, 0x1e, 0x6f,
-        0x21, 0x6d, 0xf8, 0x24, 0xca, 0x3c, 0x70, 0x78,
-        0x36, 0x12, 0x7a, 0x8a, 0x9c, 0xac, 0x4e, 0x1c,
-        0xa8, 0xfb, 0x27, 0x30, 0xba, 0x9a, 0xf4, 0x2f,
-        0x0a, 0xab, 0x80, 0x6a, 0xa1, 0x60, 0x74, 0xf0,
-        0xe3, 0x91, 0x84, 0xe7, 0x90, 0x88, 0xcc, 0xf0,
-        0x95, 0x7b, 0x0a, 0x22, 0xf2, 0xf9, 0x27, 0xe0,
-        0xdd, 0x38, 0x0c, 0xfd, 0xe9, 0x03, 0x71, 0xdc,
-        0x70, 0xa4, 0x6e, 0xdf, 0xe3, 0x72, 0x9e, 0xa1,
-        0xf0, 0xc9, 0x00, 0xd6, 0x03, 0x55, 0x6a, 0x67,
-        0x5d, 0x9c, 0xb8, 0x75, 0x01, 0xb0, 0x01, 0x9f,
-        0xe6, 0xd2, 0x44, 0x18, 0xbc, 0xca, 0x7a, 0x10,
-        0x39, 0xa6, 0xcf, 0x15, 0xc7, 0xf5, 0x35, 0xd4,
-        0xb3, 0x6d, 0x91, 0x23, 0x84, 0x99, 0xba, 0xb0,
-        0x7e, 0xd0, 0xc9, 0x4c, 0xbf, 0x3f, 0x33, 0x68,
-        0x37, 0xb7, 0x7d, 0x44, 0xb0, 0x0b, 0x2c, 0x0f,
-        0xd0, 0x75, 0xa2, 0x6b, 0x5b, 0xe1, 0x9f, 0xd4,
-        0x69, 0x9a, 0x14, 0xc8, 0x29, 0xb7, 0xd9, 0x10,
-        0xbb, 0x99, 0x30, 0x9a, 0xfb, 0xcc, 0x13, 0x1f,
-        0x76, 0x4e, 0xe6, 0xdf, 0x14, 0xaa, 0xd5, 0x60,
-        0xbf, 0x91, 0x49, 0x0d, 0x64, 0x42, 0x29, 0xa8,
-        0x64, 0x27, 0xd4, 0x5e, 0x1b, 0x18, 0x03, 0xa8,
-        0x73, 0xd6, 0x05, 0x6e, 0xf7, 0x50, 0xb0, 0x09,
-        0x6b, 0x69, 0x7a, 0x12, 0x28, 0x58, 0xef, 0x5a,
-        0x86, 0x11, 0xde, 0x71, 0x71, 0x9f, 0xca, 0xbd,
-        0x79, 0x2a, 0xc2, 0xe5, 0x9b, 0x5e, 0x32, 0xe7,
-        0xcb, 0x97, 0x6e, 0xa0, 0xea, 0xa4, 0xa4, 0x6a,
-        0x32, 0xf9, 0x37, 0x39, 0xd8, 0x37, 0x6d, 0x63,
-        0xf3, 0x08, 0x1c, 0xdd, 0x06, 0xdd, 0x2c, 0x2b,
-        0x9f, 0x04, 0x88, 0x5f, 0x36, 0x42, 0xc1, 0xb1,
-        0xc7, 0xe8, 0x2d, 0x5d, 0xa4, 0x6c, 0xe5, 0x60,
-        0x94, 0xae, 0xd0, 0x90, 0x1e, 0x88, 0xa0, 0x87,
-        0x52, 0xfb, 0xed, 0x97, 0xa5, 0x25, 0x5a, 0xb7,
-        0x55, 0xc5, 0x13, 0x07, 0x85, 0x27, 0x40, 0xed,
-        0xb8, 0xa0, 0x26, 0x13, 0x44, 0x0c, 0xfc, 0xcc,
-        0x5a, 0x09, 0xe5, 0x44, 0xb5, 0x63, 0xa1, 0x43,
-        0x51, 0x23, 0x4f, 0x17, 0x21, 0x89, 0x2e, 0x58,
-        0xfd, 0xf9, 0x63, 0x74, 0x04, 0x70, 0x1e, 0x7d,
-        0xd0, 0x66, 0xba, 0x40, 0x5e, 0x45, 0xdc, 0x39,
-        0x7c, 0x53, 0x0f, 0xa8, 0x38, 0xb2, 0x13, 0x99,
-        0x27, 0xd9, 0x4a, 0x51, 0xe9, 0x9f, 0x2a, 0x92,
-        0xbb, 0x9c, 0x90, 0xab, 0xfd, 0xf1, 0xb7, 0x40,
-        0x05, 0xa9, 0x7a, 0x20, 0x63, 0x36, 0xc1, 0xef,
-        0xb9, 0xad, 0xa2, 0xe0, 0x1d, 0x20, 0x4f, 0xb2,
-        0x34, 0xbd, 0xea, 0x07, 0xac, 0x21, 0xce, 0xf6,
-        0x8a, 0xa2, 0x9e, 0xcd, 0xfa
-    };
-    uint32_t toserver_app_data_buf_len = sizeof(toserver_app_data_buf);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    //AppLayerDetectProtoThreadInit();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER | STREAM_START, chello_buf,
-                                chello_buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *app_state = f.alstate;
-    FAIL_IF_NULL(app_state);
-
-    FAIL_IF(app_state->client_connp.content_type != SSLV2_MT_CLIENT_HELLO);
-
-    FAIL_IF(app_state->client_connp.version != SSL_VERSION_2);
-
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_CLIENT_HS) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_NO_SESSION_ID) == 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            shello_buf, shello_buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FAIL_IF(app_state->server_connp.content_type != SSLV3_HANDSHAKE_PROTOCOL);
-
-    FAIL_IF(app_state->server_connp.version != SSL_VERSION_3);
-
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_CLIENT_HS) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_NO_SESSION_ID) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            client_change_cipher_spec_buf,
-                            client_change_cipher_spec_buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    /* with multiple records the client content type hold the type from the last
-     * record */
-    FAIL_IF(app_state->client_connp.content_type != SSLV3_HANDSHAKE_PROTOCOL);
-
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_CLIENT_HS) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_NO_SESSION_ID) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_KEYX) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CHANGE_CIPHER_SPEC) == 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            server_change_cipher_spec_buf,
-                            server_change_cipher_spec_buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    /* with multiple records the serve content type hold the type from the last
-     * record */
-    FAIL_IF(app_state->server_connp.content_type != SSLV3_HANDSHAKE_PROTOCOL);
-
-    FAIL_IF(app_state->server_connp.version != SSL_VERSION_3);
-
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_CLIENT_HS) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_NO_SESSION_ID) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_KEYX) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CHANGE_CIPHER_SPEC) == 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            toserver_app_data_buf, toserver_app_data_buf_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FAIL_IF(app_state->client_connp.content_type != SSLV3_APPLICATION_PROTOCOL);
-
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_CLIENT_HS) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SSL_NO_SESSION_ID) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_SERVER_HELLO) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_STATE_CLIENT_KEYX) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((app_state->flags & SSL_AL_FLAG_CHANGE_CIPHER_SPEC) == 0);
-
-    FAIL_IF_NOT(f.flags & FLOW_NOPAYLOAD_INSPECTION);
-
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Tests the parser for handling fragmented records.
- */
-static int SSLParserTest24(void)
-{
-    Flow f;
-    uint8_t buf1[] = {
-        0x16, 0x03, 0x00, 0x00, 0x6f, 0x01, 0x00, 0x00,
-        0x6b, 0x03,
-    };
-    uint32_t buf1_len = sizeof(buf1);
-
-    uint8_t buf2[] = {
-        0x00, 0x4b, 0x2f, 0xdc,
-        0x4e, 0xe6, 0x95, 0xf1, 0xa0, 0xc7, 0xcf, 0x8e,
-        0xf6, 0xeb, 0x22, 0x6d, 0xce, 0x9c, 0x44, 0xfb,
-        0xc8, 0xa0, 0x44, 0x31, 0x15, 0x4c, 0xe9, 0x97,
-        0xa7, 0xa1, 0xfe, 0xea, 0xcc, 0x20, 0x4b, 0x5d,
-        0xfb, 0xa5, 0x63, 0x7a, 0x73, 0x95, 0xf7, 0xff,
-        0x42, 0xac, 0x8f, 0x46, 0xed, 0xe4, 0xb1, 0x35,
-        0x35, 0x78, 0x1a, 0x9d, 0xaf, 0x10, 0xc5, 0x52,
-        0xf3, 0x7b, 0xfb, 0xb5, 0xe9, 0xa8, 0x00, 0x24,
-        0x00, 0x88, 0x00, 0x87, 0x00, 0x39, 0x00, 0x38,
-        0x00, 0x84, 0x00, 0x35, 0x00, 0x45, 0x00, 0x44,
-        0x00, 0x33, 0x00, 0x32, 0x00, 0x96, 0x00, 0x41,
-        0x00, 0x2f, 0x00, 0x16, 0x00, 0x13, 0xfe, 0xff,
-        0x00, 0x0a, 0x00, 0x02, 0x01, 0x00
-    };
-    uint32_t buf2_len = sizeof(buf2);
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, buf1, buf1_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            buf2, buf2_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.content_type != 0x16);
-
-    FAIL_IF(ssl_state->client_connp.version != SSL_VERSION_3);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-/**
- * \test Test for bug #955 and CVE-2013-5919.  The data is from the
- *       pcap that was used to report this issue.
- */
-static int SSLParserTest25(void)
-{
-    Flow f;
-    uint8_t client_hello[] = {
-        0x16, 0x03, 0x01, 0x00, 0xd3, 0x01, 0x00, 0x00,
-        0xcf, 0x03, 0x01, 0x51, 0x60, 0xc2, 0x15, 0x36,
-        0x73, 0xf5, 0xb8, 0x58, 0x55, 0x3b, 0x68, 0x12,
-        0x7d, 0xe3, 0x28, 0xa3, 0xe1, 0x02, 0x79, 0x2d,
-        0x12, 0xe1, 0xf4, 0x24, 0x12, 0xa2, 0x9e, 0xf1,
-        0x08, 0x49, 0x68, 0x20, 0x0e, 0x96, 0x46, 0x3d,
-        0x84, 0x5a, 0xc6, 0x55, 0xeb, 0x3b, 0x53, 0x77,
-        0xf4, 0x8e, 0xf4, 0xd2, 0x8b, 0xec, 0xd6, 0x99,
-        0x63, 0x64, 0x62, 0xf8, 0x3f, 0x3b, 0xd5, 0x35,
-        0x45, 0x1b, 0x16, 0xac, 0x00, 0x46, 0x00, 0x04,
-        0x00, 0x05, 0x00, 0x2f, 0x00, 0x35, 0xc0, 0x02,
-        0xc0, 0x04, 0xc0, 0x05, 0xc0, 0x0c, 0xc0, 0x0e,
-        0xc0, 0x0f, 0xc0, 0x07, 0xc0, 0x09, 0xc0, 0x0a,
-        0xc0, 0x11, 0xc0, 0x13, 0xc0, 0x14, 0x00, 0x33,
-        0x00, 0x39, 0x00, 0x32, 0x00, 0x38, 0x00, 0x0a,
-        0xc0, 0x03, 0xc0, 0x0d, 0xc0, 0x08, 0xc0, 0x12,
-        0x00, 0x16, 0x00, 0x13, 0x00, 0x09, 0x00, 0x15,
-        0x00, 0x12, 0x00, 0x03, 0x00, 0x08, 0x00, 0x14,
-        0x00, 0x11, 0x00, 0xff, 0x01, 0x00, 0x00, 0x40,
-        0x00, 0x0b, 0x00, 0x04, 0x03, 0x00, 0x01, 0x02,
-        0x00, 0x0a, 0x00, 0x34, 0x00, 0x32, 0x00, 0x0e,
-        0x00, 0x0d, 0x00, 0x19, 0x00, 0x0b, 0x00, 0x0c,
-        0x00, 0x18, 0x00, 0x09, 0x00, 0x0a, 0x00, 0x16,
-        0x00, 0x17, 0x00, 0x08, 0x00, 0x06, 0x00, 0x07,
-        0x00, 0x14, 0x00, 0x15, 0x00, 0x04, 0x00, 0x05,
-        0x00, 0x12, 0x00, 0x13, 0x00, 0x01, 0x00, 0x02,
-        0x00, 0x03, 0x00, 0x0f, 0x00, 0x10, 0x00, 0x11
-    };
-    uint32_t client_hello_len = sizeof(client_hello);
-
-    uint8_t server_hello_certificate_done[] = {
-        0x16, 0x03, 0x01, 0x00, 0x51, 0x02, 0x00, 0x00,
-        0x4d, 0x03, 0x01, 0x51, 0x60, 0xc2, 0x17, 0xb7,
-        0x81, 0xaa, 0x27, 0xa1, 0xd5, 0xfa, 0x14, 0xc1,
-        0xe0, 0x05, 0xab, 0x75, 0xf2, 0x51, 0xe7, 0x6e,
-        0xe6, 0xf9, 0xc4, 0x8f, 0x16, 0x08, 0x26, 0x6c,
-        0x1b, 0x86, 0x90, 0x20, 0x0a, 0x38, 0x90, 0x2d,
-        0x17, 0x7d, 0xb7, 0x6b, 0x6b, 0xe5, 0xeb, 0x61,
-        0x90, 0x35, 0xf8, 0xcd, 0xb1, 0x2a, 0x69, 0x6e,
-        0x0e, 0x3e, 0x5f, 0x90, 0xdc, 0x2f, 0x51, 0x45,
-        0x68, 0x63, 0xe3, 0xb3, 0x00, 0x05, 0x00, 0x00,
-        0x05, 0xff, 0x01, 0x00, 0x01, 0x00, 0x16, 0x03,
-        0x01, 0x07, 0x60, 0x0b, 0x00, 0x07, 0x5c, 0x00,
-        0x07, 0x59, 0x00, 0x03, 0xcc, 0x30, 0x82, 0x03,
-        0xc8, 0x30, 0x82, 0x03, 0x31, 0xa0, 0x03, 0x02,
-        0x01, 0x02, 0x02, 0x10, 0x01, 0x7f, 0x77, 0xde,
-        0xb3, 0xbc, 0xbb, 0x23, 0x5d, 0x44, 0xcc, 0xc7,
-        0xdb, 0xa6, 0x2e, 0x72, 0x30, 0x0d, 0x06, 0x09,
-        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-        0x05, 0x05, 0x00, 0x30, 0x81, 0xba, 0x31, 0x1f,
-        0x30, 0x1d, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x13,
-        0x16, 0x56, 0x65, 0x72, 0x69, 0x53, 0x69, 0x67,
-        0x6e, 0x20, 0x54, 0x72, 0x75, 0x73, 0x74, 0x20,
-        0x4e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x31,
-        0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04, 0x0b,
-        0x13, 0x0e, 0x56, 0x65, 0x72, 0x69, 0x53, 0x69,
-        0x67, 0x6e, 0x2c, 0x20, 0x49, 0x6e, 0x63, 0x2e,
-        0x31, 0x33, 0x30, 0x31, 0x06, 0x03, 0x55, 0x04,
-        0x0b, 0x13, 0x2a, 0x56, 0x65, 0x72, 0x69, 0x53,
-        0x69, 0x67, 0x6e, 0x20, 0x49, 0x6e, 0x74, 0x65,
-        0x72, 0x6e, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x61,
-        0x6c, 0x20, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72,
-        0x20, 0x43, 0x41, 0x20, 0x2d, 0x20, 0x43, 0x6c,
-        0x61, 0x73, 0x73, 0x20, 0x33, 0x31, 0x49, 0x30,
-        0x47, 0x06, 0x03, 0x55, 0x04, 0x0b, 0x13, 0x40,
-        0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x72, 0x69,
-        0x73, 0x69, 0x67, 0x6e, 0x2e, 0x63, 0x6f, 0x6d,
-        0x2f, 0x43, 0x50, 0x53, 0x20, 0x49, 0x6e, 0x63,
-        0x6f, 0x72, 0x70, 0x2e, 0x62, 0x79, 0x20, 0x52,
-        0x65, 0x66, 0x2e, 0x20, 0x4c, 0x49, 0x41, 0x42,
-        0x49, 0x4c, 0x49, 0x54, 0x59, 0x20, 0x4c, 0x54,
-        0x44, 0x2e, 0x28, 0x63, 0x29, 0x39, 0x37, 0x20,
-        0x56, 0x65, 0x72, 0x69, 0x53, 0x69, 0x67, 0x6e,
-        0x30, 0x1e, 0x17, 0x0d, 0x31, 0x32, 0x30, 0x36,
-        0x32, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
-        0x5a, 0x17, 0x0d, 0x31, 0x33, 0x31, 0x32, 0x33,
-        0x31, 0x32, 0x33, 0x35, 0x39, 0x35, 0x39, 0x5a,
-        0x30, 0x68, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03,
-        0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31,
-        0x13, 0x30, 0x11, 0x06, 0x03, 0x55, 0x04, 0x08,
-        0x13, 0x0a, 0x43, 0x61, 0x6c, 0x69, 0x66, 0x6f,
-        0x72, 0x6e, 0x69, 0x61, 0x31, 0x12, 0x30, 0x10,
-        0x06, 0x03, 0x55, 0x04, 0x07, 0x13, 0x09, 0x50,
-        0x61, 0x6c, 0x6f, 0x20, 0x41, 0x6c, 0x74, 0x6f,
-        0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04,
-        0x0a, 0x13, 0x0e, 0x46, 0x61, 0x63, 0x65, 0x62,
-        0x6f, 0x6f, 0x6b, 0x2c, 0x20, 0x49, 0x6e, 0x63,
-        0x2e, 0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55,
-        0x04, 0x02, 0x14, 0x0e, 0x2a, 0x2e, 0x66, 0x61,
-        0x63, 0x65, 0x62, 0x6f, 0x6f, 0x6b, 0x2e, 0x63,
-        0x6f, 0x6d, 0x30, 0x81, 0x9f, 0x30, 0x0d, 0x06,
-        0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
-        0x01, 0x01, 0x05, 0x00, 0x03, 0x81, 0x8d, 0x00,
-        0x30, 0x81, 0x89, 0x02, 0x81, 0x81, 0x00, 0xae,
-        0x94, 0xb1, 0x71, 0xe2, 0xde, 0xcc, 0xc1, 0x69,
-        0x3e, 0x05, 0x10, 0x63, 0x24, 0x01, 0x02, 0xe0,
-        0x68, 0x9a, 0xe8, 0x3c, 0x39, 0xb6, 0xb3, 0xe7,
-        0x4b, 0x97, 0xd4, 0x8d, 0x7b, 0x23, 0x68, 0x91,
-        0x00, 0xb0, 0xb4, 0x96, 0xee, 0x62, 0xf0, 0xe6,
-        0xd3, 0x56, 0xbc, 0xf4, 0xaa, 0x0f, 0x50, 0x64,
-        0x34, 0x02, 0xf5, 0xd1, 0x76, 0x6a, 0xa9, 0x72,
-        0x83, 0x5a, 0x75, 0x64, 0x72, 0x3f, 0x39, 0xbb,
-        0xef, 0x52, 0x90, 0xde, 0xd9, 0xbc, 0xdb, 0xf9,
-        0xd3, 0xd5, 0x5d, 0xfa, 0xd2, 0x3a, 0xa0, 0x3d,
-        0xc6, 0x04, 0xc5, 0x4d, 0x29, 0xcf, 0x1d, 0x4b,
-        0x3b, 0xdb, 0xd1, 0xa8, 0x09, 0xcf, 0xae, 0x47,
-        0xb4, 0x4c, 0x7e, 0xae, 0x17, 0xc5, 0x10, 0x9b,
-        0xee, 0x24, 0xa9, 0xcf, 0x4a, 0x8d, 0x91, 0x1b,
-        0xb0, 0xfd, 0x04, 0x15, 0xae, 0x4c, 0x3f, 0x43,
-        0x0a, 0xa1, 0x2a, 0x55, 0x7e, 0x2a, 0xe1, 0x02,
-        0x03, 0x01, 0x00, 0x01, 0xa3, 0x82, 0x01, 0x1e,
-        0x30, 0x82, 0x01, 0x1a, 0x30, 0x09, 0x06, 0x03,
-        0x55, 0x1d, 0x13, 0x04, 0x02, 0x30, 0x00, 0x30,
-        0x44, 0x06, 0x03, 0x55, 0x1d, 0x20, 0x04, 0x3d,
-        0x30, 0x3b, 0x30, 0x39, 0x06, 0x0b, 0x60, 0x86,
-        0x48, 0x01, 0x86, 0xf8, 0x45, 0x01, 0x07, 0x17,
-        0x03, 0x30, 0x2a, 0x30, 0x28, 0x06, 0x08, 0x2b,
-        0x06, 0x01, 0x05, 0x05, 0x07, 0x00, 0x01, 0x16,
-        0x1c, 0x68, 0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f,
-        0x2f, 0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x72,
-        0x69, 0x73, 0x69, 0x67, 0x6e, 0x2e, 0x63, 0x6f,
-        0x6d, 0x2f, 0x72, 0x70, 0x61, 0x30, 0x3c, 0x06,
-        0x03, 0x55, 0x1d, 0x1f, 0x04, 0x35, 0x30, 0x33,
-        0x30, 0x31, 0xa0, 0x2f, 0xa0, 0x2d, 0x86, 0x2b,
-        0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x53,
-        0x56, 0x52, 0x49, 0x6e, 0x74, 0x6c, 0x2d, 0x63,
-        0x72, 0x6c, 0x2e, 0x76, 0x65, 0x72, 0x69, 0x73,
-        0x69, 0x67, 0x6e, 0x2e, 0x63, 0x6f, 0x6d, 0x2f,
-        0x53, 0x56, 0x52, 0x49, 0x6e, 0x74, 0x6c, 0x2e,
-        0x63, 0x72, 0x6c, 0x30, 0x1d, 0x06, 0x03, 0x55,
-        0x1d, 0x25, 0x04, 0x16, 0x30, 0x14, 0x06, 0x08,
-        0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01,
-        0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07,
-        0x03, 0x02, 0x30, 0x0b, 0x06, 0x03, 0x55, 0x1d,
-        0x0f, 0x04, 0x04, 0x03, 0x02, 0x05, 0xa0, 0x30,
-        0x34, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05,
-        0x07, 0x01, 0x01, 0x04, 0x28, 0x30, 0x26, 0x30,
-        0x24, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05,
-        0x07, 0x30, 0x01, 0x86, 0x18, 0x68, 0x74, 0x74,
-        0x70, 0x3a, 0x2f, 0x2f, 0x6f, 0x63, 0x73, 0x70,
-        0x2e, 0x76, 0x65, 0x72, 0x69, 0x73, 0x69, 0x67,
-        0x6e, 0x2e, 0x63, 0x6f, 0x6d, 0x30, 0x27, 0x06,
-        0x03, 0x55, 0x1d, 0x11, 0x04, 0x20, 0x30, 0x1e,
-        0x82, 0x0e, 0x2a, 0x2e, 0x66, 0x61, 0x63, 0x65,
-        0x62, 0x6f, 0x6f, 0x6b, 0x2e, 0x63, 0x6f, 0x6d,
-        0x82, 0x0c, 0x66, 0x61, 0x63, 0x65, 0x62, 0x6f,
-        0x6f, 0x6b, 0x2e, 0x63, 0x6f, 0x6d, 0x30, 0x0d,
-        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
-        0x01, 0x01, 0x05, 0x05, 0x00, 0x03, 0x81, 0x81,
-        0x00, 0x5b, 0x6c, 0x2b, 0x75, 0xf8, 0xed, 0x30,
-        0xaa, 0x51, 0xaa, 0xd3, 0x6a, 0xba, 0x59, 0x5e,
-        0x55, 0x51, 0x41, 0x95, 0x1f, 0x81, 0xa5, 0x3b,
-        0x44, 0x79, 0x10, 0xac, 0x1f, 0x76, 0xff, 0x78,
-        0xfc, 0x27, 0x81, 0x61, 0x6b, 0x58, 0xf3, 0x12,
-        0x2a, 0xfc, 0x1c, 0x87, 0x01, 0x04, 0x25, 0xe9,
-        0xed, 0x43, 0xdf, 0x1a, 0x7b, 0xa6, 0x49, 0x80,
-        0x60, 0x67, 0xe2, 0x68, 0x8a, 0xf0, 0x3d, 0xb5,
-        0x8c, 0x7d, 0xf4, 0xee, 0x03, 0x30, 0x9a, 0x6a,
-        0xfc, 0x24, 0x7c, 0xcb, 0x13, 0x4d, 0xc3, 0x3e,
-        0x54, 0xc6, 0xbc, 0x1d, 0x51, 0x33, 0xa5, 0x32,
-        0xa7, 0x32, 0x73, 0xb1, 0xd7, 0x9c, 0xad, 0xc0,
-        0x8e, 0x7e, 0x1a, 0x83, 0x11, 0x6d, 0x34, 0x52,
-        0x33, 0x40, 0xb0, 0x30, 0x54, 0x27, 0xa2, 0x17,
-        0x42, 0x82, 0x7c, 0x98, 0x91, 0x66, 0x98, 0xee,
-        0x7e, 0xaf, 0x8c, 0x3b, 0xdd, 0x71, 0x70, 0x08,
-        0x17, 0x00, 0x03, 0x87, 0x30, 0x82, 0x03, 0x83,
-        0x30, 0x82, 0x02, 0xec, 0xa0, 0x03, 0x02, 0x01,
-        0x02, 0x02, 0x10, 0x46, 0xfc, 0xeb, 0xba, 0xb4,
-        0xd0, 0x2f, 0x0f, 0x92, 0x60, 0x98, 0x23, 0x3f,
-        0x93, 0x07, 0x8f, 0x30, 0x0d, 0x06, 0x09, 0x2a,
-        0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05,
-        0x05, 0x00, 0x30, 0x5f, 0x31, 0x0b, 0x30, 0x09,
-        0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55,
-        0x53, 0x31, 0x17, 0x30, 0x15, 0x06, 0x03, 0x55,
-        0x04, 0x0a, 0x13, 0x0e, 0x56, 0x65, 0x72, 0x69,
-        0x53, 0x69, 0x67, 0x6e, 0x2c, 0x20, 0x49, 0x6e,
-        0x63, 0x2e, 0x31, 0x37, 0x30, 0x35, 0x06, 0x03,
-        0x55, 0x04, 0x0b, 0x13, 0x2e, 0x43, 0x6c, 0x61,
-        0x73, 0x73, 0x20, 0x33, 0x20, 0x50, 0x75, 0x62,
-        0x6c, 0x69, 0x63, 0x20, 0x50, 0x72, 0x69, 0x6d,
-        0x61, 0x72, 0x79, 0x20, 0x43, 0x65, 0x72, 0x74,
-        0x69, 0x66, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f,
-        0x6e, 0x20, 0x41, 0x75, 0x64, 0x68, 0x6f, 0x72,
-        0x69, 0x74, 0x79, 0x30, 0x1e, 0x17, 0x0d, 0x39,
-        0x37, 0x30, 0x34, 0x31, 0x37, 0x30, 0x30, 0x30,
-        0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x31, 0x36,
-        0x31, 0x30, 0x32, 0x34, 0x32, 0x33, 0x35, 0x39,
-        0x35, 0x39, 0x5a, 0x30, 0x81, 0xba, 0x31, 0x1f,
-        0x30, 0x1d, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x13,
-        0x16, 0x56, 0x65, 0x72, 0x69, 0x53, 0x69, 0x67,
-        0x6e, 0x20, 0x54, 0x72, 0x75, 0x73, 0x74, 0x20,
-        0x4e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x31,
-        0x17, 0x30, 0x15, 0x06, 0x03, 0x55, 0x04, 0x0b,
-        0x13, 0x0e, 0x56, 0x65, 0x72, 0x69, 0x53, 0x69,
-        0x67, 0x6e, 0x2c, 0x20, 0x49, 0x6e, 0x63, 0x2e,
-        0x31, 0x33, 0x30, 0x31, 0x06, 0x03, 0x55, 0x04,
-        0x0b, 0x13, 0x2a, 0x56, 0x65, 0x72, 0x69, 0x53,
-        0x69, 0x67, 0x6e, 0x20, 0x49, 0x6e, 0x74, 0x65,
-        0x72, 0x6e, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x61,
-        0x6c, 0x20, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72,
-        0x20, 0x43, 0x41, 0x20, 0x2d, 0x20, 0x43, 0x6c,
-        0x61, 0x73, 0x73, 0x20, 0x33, 0x31, 0x49, 0x30,
-        0x47, 0x06, 0x03, 0x55, 0x04, 0x0b, 0x13, 0x40,
-        0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x72, 0x69,
-        0x73, 0x69,
-        0x67, 0x6e, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x43,
-        0x50, 0x53, 0x20, 0x49, 0x6e, 0x63, 0x6f, 0x72,
-        0x70, 0x2e, 0x62, 0x79, 0x20, 0x52, 0x65, 0x66,
-        0x2e, 0x20, 0x4c, 0x49, 0x41, 0x42, 0x49, 0x4c,
-        0x49, 0x54, 0x59, 0x20, 0x4c, 0x54, 0x44, 0x2e,
-        0x28, 0x63, 0x29, 0x39, 0x37, 0x20, 0x56, 0x65,
-        0x72, 0x69, 0x53, 0x69, 0x67, 0x6e, 0x30, 0x81,
-        0x9f, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
-        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
-        0x03, 0x81, 0x8d, 0x00, 0x30, 0x81, 0x89, 0x02,
-        0x81, 0x81, 0x00, 0xd8, 0x82, 0x80, 0xe8, 0xd6,
-        0x19, 0x02, 0x7d, 0x1f, 0x85, 0x18, 0x39, 0x25,
-        0xa2, 0x65, 0x2b, 0xe1, 0xbf, 0xd4, 0x05, 0xd3,
-        0xbc, 0xe6, 0x36, 0x3b, 0xaa, 0xf0, 0x4c, 0x6c,
-        0x5b, 0xb6, 0xe7, 0xaa, 0x3c, 0x73, 0x45, 0x55,
-        0xb2, 0xf1, 0xbd, 0xea, 0x97, 0x42, 0xed, 0x9a,
-        0x34, 0x0a, 0x15, 0xd4, 0xa9, 0x5c, 0xf5, 0x40,
-        0x25, 0xdd, 0xd9, 0x07, 0xc1, 0x32, 0xb2, 0x75,
-        0x6c, 0xc4, 0xca, 0xbb, 0xa3, 0xfe, 0x56, 0x27,
-        0x71, 0x43, 0xaa, 0x63, 0xf5, 0x30, 0x3e, 0x93,
-        0x28, 0xe5, 0xfa, 0xf1, 0x09, 0x3b, 0xf3, 0xb7,
-        0x4d, 0x4e, 0x39, 0xf7, 0x5c, 0x49, 0x5a, 0xb8,
-        0xc1, 0x1d, 0xd3, 0xb2, 0x8a, 0xfe, 0x70, 0x30,
-        0x95, 0x42, 0xcb, 0xfe, 0x2b, 0x51, 0x8b, 0x5a,
-        0x3c, 0x3a, 0xf9, 0x22, 0x4f, 0x90, 0xb2, 0x02,
-        0xa7, 0x53, 0x9c, 0x4f, 0x34, 0xe7, 0xab, 0x04,
-        0xb2, 0x7b, 0x6f, 0x02, 0x03, 0x01, 0x00, 0x01,
-        0xa3, 0x81, 0xe3, 0x30, 0x81, 0xe0, 0x30, 0x0f,
-        0x06, 0x03, 0x55, 0x1d, 0x13, 0x04, 0x08, 0x30,
-        0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00, 0x30,
-        0x44, 0x06, 0x03, 0x55, 0x1d, 0x20, 0x04, 0x3d,
-        0x30, 0x3b, 0x30, 0x39, 0x06, 0x0b, 0x60, 0x86,
-        0x48, 0x01, 0x86, 0xf8, 0x45, 0x01, 0x07, 0x01,
-        0x01, 0x30, 0x2a, 0x30, 0x28, 0x06, 0x08, 0x2b,
-        0x06, 0x01, 0x05, 0x05, 0x07, 0x02, 0x01, 0x16,
-        0x1c, 0x68, 0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f,
-        0x2f, 0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x72,
-        0x69, 0x73, 0x69, 0x67, 0x6e, 0x2e, 0x63, 0x6f,
-        0x6d, 0x2f, 0x43, 0x50, 0x53, 0x30, 0x34, 0x06,
-        0x03, 0x55, 0x1d, 0x25, 0x04, 0x2d, 0x30, 0x2b,
-        0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07,
-        0x03, 0x01, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05,
-        0x05, 0x07, 0x03, 0x02, 0x06, 0x09, 0x60, 0x86,
-        0x48, 0x01, 0x86, 0xf8, 0x42, 0x04, 0x01, 0x06,
-        0x0a, 0x60, 0x86, 0x48, 0x01, 0x86, 0xf8, 0x45,
-        0x01, 0x08, 0x01, 0x30, 0x0b, 0x06, 0x03, 0x55,
-        0x1d, 0x0f, 0x04, 0x04, 0x03, 0x02, 0x01, 0x06,
-        0x30, 0x11, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-        0x86, 0xf8, 0x42, 0x01, 0x01, 0x04, 0x04, 0x03,
-        0x02, 0x01, 0x06, 0x30, 0x31, 0x06, 0x03, 0x55,
-        0x1d, 0x1f, 0x04, 0x2a, 0x30, 0x28, 0x30, 0x26,
-        0xa0, 0x24, 0xa0, 0x22, 0x86, 0x20, 0x68, 0x74,
-        0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x63, 0x72, 0x6c,
-        0x2e, 0x76, 0x65, 0x72, 0x69, 0x73, 0x69, 0x67,
-        0x6e, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x70, 0x63,
-        0x61, 0x33, 0x2e, 0x63, 0x72, 0x6c, 0x30, 0x0d,
-        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
-        0x01, 0x01, 0x05, 0x05, 0x00, 0x03, 0x81, 0x81,
-        0x00, 0x40, 0x8e, 0x49, 0x97, 0x96, 0x8a, 0x73,
-        0xdd, 0x8e, 0x4d, 0xef, 0x3e, 0x61, 0xb7, 0xca,
-        0xa0, 0x62, 0xad, 0xf4, 0x0e, 0x0a, 0xbb, 0x75,
-        0x3d, 0xe2, 0x6e, 0xd8, 0x2c, 0xc7, 0xbf, 0xf4,
-        0xb9, 0x8c, 0x36, 0x9b, 0xca, 0xa2, 0xd0, 0x9c,
-        0x72, 0x46, 0x39, 0xf6, 0xa6, 0x82, 0x03, 0x65,
-        0x11, 0xc4, 0xbc, 0xbf, 0x2d, 0xa6, 0xf5, 0xd9,
-        0x3b, 0x0a, 0xb5, 0x98, 0xfa, 0xb3, 0x78, 0xb9,
-        0x1e, 0xf2, 0x2b, 0x4c, 0x62, 0xd5, 0xfd, 0xb2,
-        0x7a, 0x1d, 0xdf, 0x33, 0xfd, 0x73, 0xf9, 0xa5,
-        0xd8, 0x2d, 0x8c, 0x2a, 0xea, 0xd1, 0xfc, 0xb0,
-        0x28, 0xb6, 0xe9, 0x49, 0x48, 0x13, 0x4b, 0x83,
-        0x8a, 0x1b, 0x48, 0x7b, 0x24, 0xf7, 0x38, 0xde,
-        0x6f, 0x41, 0x54, 0xb8, 0xab, 0x57, 0x6b, 0x06,
-        0xdf, 0xc7, 0xa2, 0xd4, 0xa9, 0xf6, 0xf1, 0x36,
-        0x62, 0x80, 0x88, 0xf2, 0x8b, 0x75, 0xd6, 0x80,
-        0x75, 0x16, 0x03, 0x01, 0x00, 0x04, 0x0e, 0x00,
-        0x00, 0x00
-    };
-    uint32_t server_hello_certificate_done_len = sizeof(server_hello_certificate_done);
-
-    uint8_t client_key_exchange_cipher_enc_hs[] = {
-        0x16, 0x03, 0x01, 0x00, 0x86, 0x10, 0x00, 0x00,
-        0x80, 0x00, 0x80, 0x14, 0x2b, 0x2f, 0x9f, 0x02,
-        0x1d, 0x4e, 0x0d, 0xa7, 0x41, 0x0f, 0x99, 0xc5,
-        0xe9, 0x49, 0x22, 0x14, 0xa0, 0x42, 0x7b, 0xb4,
-        0x6d, 0x4f, 0x82, 0x3c, 0x3a, 0x6e, 0xed, 0xd5,
-        0x6e, 0x72, 0x71, 0xae, 0x00, 0x4a, 0x9a, 0xc9,
-        0x0e, 0x2d, 0x08, 0xa2, 0xd3, 0x3a, 0xb0, 0xb2,
-        0x1a, 0x56, 0x01, 0x7c, 0x9a, 0xfa, 0xfb, 0x1a,
-        0xd7, 0x7e, 0x20, 0x68, 0x51, 0xd0, 0xfe, 0xd9,
-        0xdc, 0xa7, 0x0b, 0xeb, 0x1a, 0xb6, 0xd3, 0xc7,
-        0x17, 0x1f, 0xf3, 0x6e, 0x91, 0xdd, 0x06, 0x0d,
-        0x48, 0xde, 0xcd, 0x0c, 0x36, 0x8c, 0x83, 0x29,
-        0x9a, 0x40, 0x03, 0xcd, 0xf3, 0x1b, 0xdb, 0xd8,
-        0x44, 0x6b, 0x75, 0xf3, 0x5a, 0x9f, 0x26, 0x1a,
-        0xc4, 0x16, 0x35, 0x8f, 0xc1, 0x15, 0x19, 0xa9,
-        0xdf, 0x07, 0xa9, 0xe5, 0x56, 0x45, 0x6d, 0xca,
-        0x20, 0x3c, 0xcf, 0x8e, 0xbe, 0x44, 0x68, 0x73,
-        0xc8, 0x0b, 0xc7, 0x14, 0x03, 0x01, 0x00, 0x01,
-        0x01, 0x16, 0x03, 0x01, 0x00, 0x24, 0xf9, 0x7e,
-        0x28, 0x77, 0xa9, 0x9a, 0x08, 0x0c, 0x2e, 0xa9,
-        0x09, 0x15, 0x27, 0xcd, 0x93, 0x5f, 0xc0, 0x32,
-        0x0a, 0x8d, 0x62, 0xd3, 0x54, 0x79, 0x6b, 0x51,
-        0xd7, 0xba, 0x02, 0xd6, 0xdb, 0x66, 0xe8, 0x97,
-        0x5d, 0x7a
-    };
-    uint32_t client_key_exchange_cipher_enc_hs_len = sizeof(client_key_exchange_cipher_enc_hs);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, client_hello,
-                                client_hello_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF(ssl_state->client_connp.bytes_processed != 0);
-    FAIL_IF(ssl_state->client_connp.hs_bytes_processed != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            server_hello_certificate_done,
-                            server_hello_certificate_done_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FAIL_IF(ssl_state->client_connp.bytes_processed != 0);
-    FAIL_IF(ssl_state->client_connp.hs_bytes_processed != 0);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOSERVER,
-                            client_key_exchange_cipher_enc_hs,
-                            client_key_exchange_cipher_enc_hs_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-static int SSLParserTest26(void)
-{
-    Flow f;
-    uint8_t client_hello[] = {
-        0x16, 0x03, 0x01, 0x02, 0x0e, 0x01, 0x00, 0x02,
-        0x0a, 0x03, 0x03, 0x58, 0x36, 0x15, 0x03, 0x8e,
-        0x07, 0xf9, 0xad, 0x2a, 0xb7, 0x56, 0xbf, 0xe2,
-        0xa2, 0xf8, 0x21, 0xe0, 0xbb, 0x69, 0xc2, 0xd6,
-        0x76, 0xe6, 0x77, 0xfe, 0x09, 0xff, 0x8e, 0xac,
-        0x80, 0xb5, 0x27, 0x20, 0xb7, 0xbb, 0x90, 0x35,
-        0x7a, 0xdd, 0xd9, 0x67, 0xdf, 0x79, 0xd6, 0x16,
-        0x90, 0xf6, 0xd7, 0x5c, 0xd3, 0x07, 0x19, 0x20,
-        0x01, 0x39, 0x76, 0x25, 0x12, 0x32, 0x71, 0xa1,
-        0x84, 0x8d, 0x2d, 0xea, 0x00, 0x88, 0xc0, 0x30,
-        0xc0, 0x2c, 0xc0, 0x28, 0xc0, 0x24, 0xc0, 0x14,
-        0xc0, 0x0a, 0x00, 0xa3, 0x00, 0x9f, 0x00, 0x6b,
-        0x00, 0x6a, 0x00, 0x39, 0x00, 0x38, 0x00, 0x88,
-        0x00, 0x87, 0xc0, 0x32, 0xc0, 0x2e, 0xc0, 0x2a,
-        0xc0, 0x26, 0xc0, 0x0f, 0xc0, 0x05, 0x00, 0x9d,
-        0x00, 0x3d, 0x00, 0x35, 0x00, 0x84, 0xc0, 0x12,
-        0xc0, 0x08, 0x00, 0x16, 0x00, 0x13, 0xc0, 0x0d,
-        0xc0, 0x03, 0x00, 0x0a, 0xc0, 0x2f, 0xc0, 0x2b,
-        0xc0, 0x27, 0xc0, 0x23, 0xc0, 0x13, 0xc0, 0x09,
-        0x00, 0xa2, 0x00, 0x9e, 0x00, 0x67, 0x00, 0x40,
-        0x00, 0x33, 0x00, 0x32, 0x00, 0x9a, 0x00, 0x99,
-        0x00, 0x45, 0x00, 0x44, 0xc0, 0x31, 0xc0, 0x2d,
-        0xc0, 0x29, 0xc0, 0x25, 0xc0, 0x0e, 0xc0, 0x04,
-        0x00, 0x9c, 0x00, 0x3c, 0x00, 0x2f, 0x00, 0x96,
-        0x00, 0x41, 0xc0, 0x11, 0xc0, 0x07, 0xc0, 0x0c,
-        0xc0, 0x02, 0x00, 0x05, 0x00, 0x04, 0x00, 0x15,
-        0x00, 0x12, 0x00, 0x09, 0x00, 0xff, 0x01, 0x00,
-        0x01, 0x39, 0x00, 0x00, 0x00, 0x14, 0x00, 0x12,
-        0x00, 0x00, 0x0f, 0x77, 0x77, 0x77, 0x2e, 0x79,
-        0x6f, 0x75, 0x74, 0x75, 0x62, 0x65, 0x2e, 0x63,
-        0x6f, 0x6d, 0x00, 0x0b, 0x00, 0x04, 0x03, 0x00,
-        0x01, 0x02, 0x00, 0x0a, 0x00, 0x34, 0x00, 0x32,
-        0x00, 0x0e, 0x00, 0x0d, 0x00, 0x19, 0x00, 0x0b,
-        0x00, 0x0c, 0x00, 0x18, 0x00, 0x09, 0x00, 0x0a,
-        0x00, 0x16, 0x00, 0x17, 0x00, 0x08, 0x00, 0x06,
-        0x00, 0x07, 0x00, 0x14, 0x00, 0x15, 0x00, 0x04,
-        0x00, 0x05, 0x00, 0x12, 0x00, 0x13, 0x00, 0x01,
-        0x00, 0x02, 0x00, 0x03, 0x00, 0x0f, 0x00, 0x10,
-        0x00, 0x11, 0x00, 0x23, 0x00, 0xb4, 0x05, 0x6c,
-        0xfa, 0x27, 0x6f, 0x12, 0x2f, 0x2a, 0xe5, 0x56,
-        0xcb, 0x42, 0x62, 0x44, 0xf2, 0xd7, 0xd1, 0x05,
-        0x87, 0xd4, 0x52, 0x02, 0x10, 0x85, 0xa4, 0xa6,
-        0x82, 0x6f, 0x6d, 0x7b, 0xaf, 0x11, 0xbe, 0x21,
-        0x7e, 0x7c, 0x36, 0x03, 0x20, 0x29, 0xd8, 0xf9,
-        0xe5, 0x2b, 0xe2, 0x26, 0xb2, 0x27, 0xc7, 0xb9,
-        0xda, 0x59, 0xd7, 0xdc, 0xfd, 0x74, 0x74, 0x76,
-        0xd0, 0x5e, 0xe4, 0xfe, 0x9d, 0xb7, 0x1b, 0x13,
-        0x81, 0xce, 0x63, 0x75, 0x2b, 0x2f, 0x98, 0x3a,
-        0x84, 0x46, 0xd3, 0x0c, 0xb3, 0x01, 0xdb, 0x62,
-        0x51, 0x97, 0x92, 0x1c, 0xa5, 0x94, 0x60, 0xef,
-        0xa6, 0xd8, 0xb2, 0x2f, 0x02, 0x42, 0x5c, 0xac,
-        0xb4, 0xd9, 0x10, 0x2f, 0x7e, 0x89, 0xab, 0xa5,
-        0xd7, 0x56, 0x6d, 0x03, 0xd2, 0x5f, 0x20, 0x2c,
-        0xb6, 0x99, 0x2b, 0x66, 0xbd, 0xd4, 0xde, 0x53,
-        0x76, 0x5c, 0x78, 0xf0, 0xe9, 0x6d, 0xa5, 0xc3,
-        0x1a, 0x9e, 0x61, 0xb2, 0x45, 0xb0, 0xb3, 0x61,
-        0xee, 0xa1, 0x07, 0xab, 0x2f, 0x84, 0xea, 0x43,
-        0x76, 0x4b, 0x3d, 0xb0, 0xbe, 0xa4, 0xb4, 0x21,
-        0xe1, 0xd3, 0xfd, 0x91, 0xe2, 0xe7, 0xf3, 0x38,
-        0x9c, 0x56, 0x5f, 0xa1, 0xde, 0xa8, 0x2f, 0x0a,
-        0x49, 0x6d, 0x44, 0x8e, 0xb7, 0xef, 0x4a, 0x6f,
-        0x79, 0xb2, 0x00, 0x0d, 0x00, 0x20, 0x00, 0x1e,
-        0x06, 0x01, 0x06, 0x02, 0x06, 0x03, 0x05, 0x01,
-        0x05, 0x02, 0x05, 0x03, 0x04, 0x01, 0x04, 0x02,
-        0x04, 0x03, 0x03, 0x01, 0x03, 0x02, 0x03, 0x03,
-        0x02, 0x01, 0x02, 0x02, 0x02, 0x03, 0x00, 0x0f,
-        0x00, 0x01, 0x01
-    };
-    uint32_t client_hello_len = sizeof(client_hello);
-
-    uint8_t server_hello_change_cipher_spec[] = {
-        0x16, 0x03, 0x03, 0x00, 0x57, 0x02, 0x00, 0x00,
-        0x53, 0x03, 0x03, 0x58, 0x36, 0x15, 0x03, 0x9f,
-        0x3b, 0xf3, 0x11, 0x96, 0x2b, 0xc3, 0xae, 0x91,
-        0x8c, 0x5f, 0x8b, 0x3f, 0x90, 0xbd, 0xa9, 0x26,
-        0x26, 0xb2, 0xfd, 0x12, 0xc5, 0xc5, 0x7b, 0xe4,
-        0xd1, 0x3e, 0x81, 0x20, 0xb7, 0xbb, 0x90, 0x35,
-        0x7a, 0xdd, 0xd9, 0x67, 0xdf, 0x79, 0xd6, 0x16,
-        0x90, 0xf6, 0xd7, 0x5c, 0xd3, 0x07, 0x19, 0x20,
-        0x01, 0x39, 0x76, 0x25, 0x12, 0x32, 0x71, 0xa1,
-        0x84, 0x8d, 0x2d, 0xea, 0xc0, 0x2b, 0x00, 0x00,
-        0x0b, 0xff, 0x01, 0x00, 0x01, 0x00, 0x00, 0x0b,
-        0x00, 0x02, 0x01, 0x00, 0x14, 0x03, 0x03, 0x00,
-        0x01, 0x01, 0x16, 0x03, 0x03, 0x00, 0x28, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
-        0x66, 0xfe, 0x07, 0x08, 0x33, 0x4d, 0xc2, 0x83,
-        0x8e, 0x05, 0x8b, 0xf8, 0xd1, 0xb1, 0xa7, 0x16,
-        0x4b, 0x42, 0x5c, 0x3a, 0xa4, 0x31, 0x0f, 0xba,
-        0x84, 0x06, 0xcb, 0x9d, 0xc6, 0xc4, 0x66
-    };
-    uint32_t server_hello_change_cipher_spec_len = sizeof(server_hello_change_cipher_spec);
-
-    TcpSession ssn;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.alproto = ALPROTO_TLS;
-
-    StreamTcpInitConfig(TRUE);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS,
-                                STREAM_TOSERVER, client_hello,
-                                client_hello_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    SSLState *ssl_state = f.alstate;
-    FAIL_IF_NULL(ssl_state);
-
-    FAIL_IF((ssl_state->flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) == 0);
-    FAIL_IF_NULL(ssl_state->client_connp.session_id);
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            server_hello_change_cipher_spec,
-                            server_hello_change_cipher_spec_len);
-    FLOWLOCK_UNLOCK(&f);
-    FAIL_IF(r != 0);
-
-    FAIL_IF((ssl_state->flags & SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC) == 0);
-    FAIL_IF((ssl_state->flags & SSL_AL_FLAG_SESSION_RESUMED) == 0);
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    PASS;
-}
-
-#endif /* UNITTESTS */
-
-void SSLParserRegisterTests(void)
-{
-#ifdef UNITTESTS
-    UtRegisterTest("SSLParserTest01", SSLParserTest01);
-    UtRegisterTest("SSLParserTest02", SSLParserTest02);
-    UtRegisterTest("SSLParserTest03", SSLParserTest03);
-    UtRegisterTest("SSLParserTest04", SSLParserTest04);
-    /* Updated by Anoop Saldanha.  Faulty tests.  Disable it for now */
-    //UtRegisterTest("SSLParserTest05", SSLParserTest05, 1);
-    //UtRegisterTest("SSLParserTest06", SSLParserTest06, 1);
-    UtRegisterTest("SSLParserTest07", SSLParserTest07);
-    //UtRegisterTest("SSLParserTest08", SSLParserTest08, 1);
-    UtRegisterTest("SSLParserTest09", SSLParserTest09);
-    UtRegisterTest("SSLParserTest10", SSLParserTest10);
-    UtRegisterTest("SSLParserTest11", SSLParserTest11);
-    UtRegisterTest("SSLParserTest12", SSLParserTest12);
-    UtRegisterTest("SSLParserTest13", SSLParserTest13);
-
-    UtRegisterTest("SSLParserTest14", SSLParserTest14);
-    UtRegisterTest("SSLParserTest15", SSLParserTest15);
-    UtRegisterTest("SSLParserTest16", SSLParserTest16);
-    UtRegisterTest("SSLParserTest17", SSLParserTest17);
-    UtRegisterTest("SSLParserTest18", SSLParserTest18);
-    UtRegisterTest("SSLParserTest19", SSLParserTest19);
-    UtRegisterTest("SSLParserTest20", SSLParserTest20);
-    UtRegisterTest("SSLParserTest21", SSLParserTest21);
-    UtRegisterTest("SSLParserTest22", SSLParserTest22);
-    UtRegisterTest("SSLParserTest23", SSLParserTest23);
-    UtRegisterTest("SSLParserTest24", SSLParserTest24);
-    UtRegisterTest("SSLParserTest25", SSLParserTest25);
-    UtRegisterTest("SSLParserTest26", SSLParserTest26);
-
-    UtRegisterTest("SSLParserMultimsgTest01", SSLParserMultimsgTest01);
-    UtRegisterTest("SSLParserMultimsgTest02", SSLParserMultimsgTest02);
-#endif /* UNITTESTS */
-
-    return;
+    return SC_ATOMIC_GET(ssl_config.enable_ja4);
 }

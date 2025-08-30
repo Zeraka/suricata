@@ -21,22 +21,21 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __IPPAIR_BIT_H__
-#define __IPPAIR_BIT_H__
+#ifndef SURICATA_IPPAIR_BIT_H
+#define SURICATA_IPPAIR_BIT_H
 
 #include "ippair.h"
-#include "util-var.h"
 
 void IPPairBitInitCtx(void);
 void IPPairBitRegisterTests(void);
 
 int IPPairHasBits(IPPair *host);
-int IPPairBitsTimedoutCheck(IPPair *h, struct timeval *ts);
+int IPPairBitsTimedoutCheck(IPPair *h, SCTime_t ts);
 
-void IPPairBitSet(IPPair *, uint32_t, uint32_t);
+void IPPairBitSet(IPPair *, uint32_t, SCTime_t);
 void IPPairBitUnset(IPPair *, uint32_t);
-void IPPairBitToggle(IPPair *, uint32_t, uint32_t);
-int IPPairBitIsset(IPPair *, uint32_t, uint32_t);
-int IPPairBitIsnotset(IPPair *, uint32_t, uint32_t);
+void IPPairBitToggle(IPPair *, uint32_t, SCTime_t);
+int IPPairBitIsset(IPPair *, uint32_t, SCTime_t);
+int IPPairBitIsnotset(IPPair *, uint32_t, SCTime_t);
 
-#endif /* __IPPAIR_BIT_H__ */
+#endif /* SURICATA_IPPAIR_BIT_H */

@@ -21,8 +21,10 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __UTIL_REFERENCE_CONFIG_H__
-#define __UTIL_REFERENCE_CONFIG_H__
+#ifndef SURICATA_UTIL_REFERENCE_CONFIG_H
+#define SURICATA_UTIL_REFERENCE_CONFIG_H
+
+#include "detect.h"
 
 #define REFERENCE_SYSTEM_NAME_MAX   64
 #define REFERENCE_CONTENT_NAME_MAX  1024
@@ -48,10 +50,10 @@ void SCRConfRegisterTests(void);
 
 /* these below functions are only used by unittests */
 FILE *SCRConfGenerateValidDummyReferenceConfigFD01(void);
-FILE *SCRConfGenerateInValidDummyReferenceConfigFD02(void);
-FILE *SCRConfGenerateInValidDummyReferenceConfigFD03(void);
+FILE *SCRConfGenerateInvalidDummyReferenceConfigFD02(void);
+FILE *SCRConfGenerateInvalidDummyReferenceConfigFD03(void);
 
-void SCReferenceConfInit(void);
-void SCReferenceConfDeinit(void);
+void SCReferenceSCConfInit(DetectEngineCtx *de_ctx);
+void SCReferenceConfDeinit(DetectEngineCtx *de_ctx);
 
-#endif /* __UTIL_REFERENCE_CONFIG_H__ */
+#endif /* SURICATA_UTIL_REFERENCE_CONFIG_H */

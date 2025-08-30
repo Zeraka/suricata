@@ -5,6 +5,46 @@ SSH Keywords
 Suricata has several rule keywords to match on different elements of SSH
 connections.
 
+.. _ssh-hooks:
+
+Hooks
+-----
+
+The available hooks for SSH are:
+
+Request (``to_server``) side:
+
+* ``request_in_progress``
+* ``request_banner_wait_eol``
+* ``request_banner_done``
+* ``request_finished``
+
+Response (``to_client``) side:
+
+* ``response_in_progress``
+* ``response_banner_wait_eol``
+* ``response_banner_done``
+* ``response_finished``
+
+Frames
+------
+
+The SSH parser supports the following frames:
+
+* ssh.record_hdr
+* ssh.record_data
+* ssh.record_pdu
+
+These are header + data = pdu for SSH records, after the banner and before encryption.
+The SSH record header is 6 bytes long : 4 bytes length, 1 byte passing, 1 byte message code.
+
+Example:
+
+.. container:: example-rule
+
+  alert ssh any any -> any any (msg:"hdr frame new keys"; :example-rule-emphasis:`frame:ssh.record.hdr; content: "|15|"; endswith;` bsize: 6; sid:2;)
+
+This rule matches like Wireshark ``ssh.message_code == 0x15``.
 
 ssh.proto
 ---------
@@ -31,10 +71,6 @@ ssh.software
 Match on the software string from the SSH banner. ``ssh.software`` is a sticky
 buffer, and can be used as fast pattern.
 
-``ssh.software`` replaces the previous keyword names: ``ssh_software`` &
-``ssh.softwareversion``. You may continue to use the previous name, but it's
-recommended that rules be converted to use the new name.
-
 Format::
 
   ssh.software;
@@ -48,46 +84,6 @@ Example:
 The example above matches on SSH connections where the software string contains
 "openssh".
 
-
-ssh.protoversion
-----------------
-Matches on the version of the SSH protocol used. A value of ``2_compat``
-includes SSH version 1.99.
-
-Format::
-
-  ssh.protoversion:[0-9](\.[0-9])?|2_compat;
-
-Example:
-
-.. container:: example-rule
-
-  alert ssh any any -> any any (msg:"SSH v2 compatible"; :example-rule-emphasis:`ssh.protoversion:2_compat;` sid:1;)
-
-The example above matches on SSH connections with SSH version 2 or 1.99.
-
-.. container:: example-rule
-
-  alert ssh any any -> any any (msg:"SSH v1.10"; :example-rule-emphasis:`ssh.protoversion:1.10;` sid:1;)
-
-The example above matches on SSH connections with SSH version 1.10 only.
-
-
-ssh.softwareversion
--------------------
-This keyword has been deprecated. Please use ``ssh.software`` instead. Matches
-on the software string from the SSH banner.
-
-Example:
-
-.. container:: example-rule
-
-  alert ssh any any -> any any (msg:"match SSH software string"; :example-rule-emphasis:`ssh.softwareversion:"OpenSSH";` sid:10000040;)
-
-
-Suricata comes with a Hassh integration (https://github.com/salesforce/hassh). Hassh is used to fingerprint ssh clients and servers.
-
-Hassh must be enabled in the Suricata config file (set 'app-layer.protocols.ssh.hassh' to 'yes').
 
 ssh.hassh
 ---------
@@ -113,7 +109,7 @@ Example::
 
   alert ssh any any -> any any (msg:"match hassh-string"; \
       ssh.hassh.string; content:"none,zlib@openssh.com,zlib"; \
-      sid:1000030;
+      sid:1000030;)
 
 ``ssh.hassh.string`` is a 'sticky buffer'.
 

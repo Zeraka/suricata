@@ -21,13 +21,16 @@
  * \author Endace Technology Limited - Jason Ish <jason.ish@endace.com>
  */
 
-#ifndef __CONF_YAML_LOADER_H__
-#define __CONF_YAML_LOADER_H__
+#ifndef SURICATA_CONF_YAML_LOADER_H
+#define SURICATA_CONF_YAML_LOADER_H
 
-int ConfYamlLoadFile(const char *);
-int ConfYamlLoadString(const char *, size_t);
-int ConfYamlLoadFileWithPrefix(const char *filename, const char *prefix);
+#include "conf.h"
 
-void ConfYamlRegisterTests(void);
+int SCConfYamlLoadFile(const char *);
+int SCConfYamlLoadString(const char *, size_t);
+int SCConfYamlLoadFileWithPrefix(const char *filename, const char *prefix);
+int SCConfYamlHandleInclude(SCConfNode *parent, const char *filename);
 
-#endif /* !__CONF_YAML_LOADER_H__ */
+void SCConfYamlRegisterTests(void);
+
+#endif /* !SURICATA_CONF_YAML_LOADER_H */

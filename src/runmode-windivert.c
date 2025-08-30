@@ -33,7 +33,7 @@
 #include "util-affinity.h"
 #include "util-cpu.h"
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-runmodes.h"
 #include "util-time.h"
 
@@ -44,10 +44,9 @@ const char *RunModeIpsWinDivertGetDefaultMode(void)
 
 void RunModeIpsWinDivertRegister(void)
 {
-    RunModeRegisterNewRunMode(
-            RUNMODE_WINDIVERT, "autofp",
-            "Multi-threaded WinDivert IPS mode load-balanced by flow",
-            RunModeIpsWinDivertAutoFp);
+    RunModeRegisterNewRunMode(RUNMODE_WINDIVERT, "autofp",
+            "Multi-threaded WinDivert IPS mode load-balanced by flow", RunModeIpsWinDivertAutoFp,
+            NULL);
 }
 
 int RunModeIpsWinDivertAutoFp(void)
@@ -55,8 +54,6 @@ int RunModeIpsWinDivertAutoFp(void)
     SCEnter();
     int ret = 0;
 #ifdef WINDIVERT
-    RunModeInitialize();
-
     TimeModeSetLive();
 
     LiveDeviceHasNoStats();

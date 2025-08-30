@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,7 +25,9 @@
 #ifndef DEFRAG_CONFIG_H_
 #define DEFRAG_CONFIG_H_
 
-void DefragSetDefaultTimeout(intmax_t timeout);
+#include "decode.h"
+
+void DefragSetDefaultTimeout(int timeout);
 void DefragPolicyLoadFromConfig(void);
 int DefragPolicyGetHostTimeout(Packet *p);
 void DefragTreeDestroy(void);

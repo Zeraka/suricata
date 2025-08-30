@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,7 +24,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 #include "decode-ipv4.h"
 #include "decode-ipv6.h"
@@ -32,6 +31,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine-prefilter-common.h"
+#include "detect-engine-build.h"
 
 #include "detect-fragoffset.h"
 
@@ -111,12 +111,12 @@ static int DetectFragOffsetMatch (DetectEngineThreadCtx *det_ctx,
     uint16_t frag = 0;
     const DetectFragOffsetData *fragoff = (const DetectFragOffsetData *)ctx;
 
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
-    if (PKT_IS_IPV4(p)) {
-        frag = IPV4_GET_IPOFFSET(p);
-    } else if (PKT_IS_IPV6(p)) {
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        frag = IPV4_GET_RAW_FRAGOFFSET(ip4h);
+    } else if (PacketIsIPv6(p)) {
         if (IPV6_EXTHDR_ISSET_FH(p)) {
             frag = IPV6_EXTHDR_GET_FH_OFFSET(p);
         } else {
@@ -127,7 +127,7 @@ static int DetectFragOffsetMatch (DetectEngineThreadCtx *det_ctx,
         return 0;
     }
 
-    return FragOffsetMatch(frag, fragoff->mode, fragoff->frag_off);;
+    return FragOffsetMatch(frag, fragoff->mode, fragoff->frag_off);
 }
 
 /**
@@ -143,22 +143,23 @@ static DetectFragOffsetData *DetectFragOffsetParse (DetectEngineCtx *de_ctx, con
 {
     DetectFragOffsetData *fragoff = NULL;
     char *substr[3] = {NULL, NULL, NULL};
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2_len;
     int i;
     const char *str_ptr;
     char *mode = NULL;
+    pcre2_match_data *match = NULL;
 
-    ret = DetectParsePcreExec(&parse_regex, fragoffsetstr, 0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, &match, fragoffsetstr, 0, 0);
     if (ret < 1 || ret > 4) {
-        SCLogError(SC_ERR_PCRE_MATCH,"Parse error %s", fragoffsetstr);
+        SCLogError("Parse error %s", fragoffsetstr);
         goto error;
     }
 
     for (i = 1; i < ret; i++) {
-        res = pcre_get_substring((char *)fragoffsetstr, ov, MAX_SUBSTRINGS, i, &str_ptr);
+        res = SC_Pcre2SubstringGet(match, i, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING,"pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
         substr[i-1] = (char *)str_ptr;
@@ -189,20 +190,27 @@ static DetectFragOffsetData *DetectFragOffsetParse (DetectEngineCtx *de_ctx, con
     }
 
     if (StringParseUint16(&fragoff->frag_off, 10, 0, substr[1]) < 0) {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "specified frag offset %s is not "
-                                        "valid", substr[1]);
+        SCLogError("specified frag offset %s is not "
+                   "valid",
+                substr[1]);
         goto error;
     }
 
     for (i = 0; i < 3; i++) {
-        if (substr[i] != NULL) SCFree(substr[i]);
+        if (substr[i] != NULL)
+            pcre2_substring_free((PCRE2_UCHAR8 *)substr[i]);
     }
 
+    pcre2_match_data_free(match);
     return fragoff;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     for (i = 0; i < 3; i++) {
-        if (substr[i] != NULL) SCFree(substr[i]);
+        if (substr[i] != NULL)
+            pcre2_substring_free((PCRE2_UCHAR8 *)substr[i]);
     }
     if (fragoff != NULL) DetectFragOffsetFree(de_ctx, fragoff);
     return NULL;
@@ -222,25 +230,21 @@ error:
 static int DetectFragOffsetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *fragoffsetstr)
 {
     DetectFragOffsetData *fragoff = NULL;
-    SigMatch *sm = NULL;
 
     fragoff = DetectFragOffsetParse(de_ctx, fragoffsetstr);
     if (fragoff == NULL) goto error;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL) goto error;
-
-    sm->type = DETECT_FRAGOFFSET;
-    sm->ctx = (SigMatchCtx *)fragoff;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FRAGOFFSET, (SigMatchCtx *)fragoff,
+                DETECT_SM_LIST_MATCH) == NULL) {
+        goto error;
+    }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
 
 error:
-    if (fragoff != NULL) DetectFragOffsetFree(de_ctx, fragoff);
-    if (sm != NULL) SCFree(sm);
+    if (fragoff != NULL)
+        DetectFragOffsetFree(de_ctx, fragoff);
     return -1;
 
 }
@@ -259,14 +263,14 @@ void DetectFragOffsetFree (DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketFragOffsetMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (PKT_IS_PSEUDOPKT(p))
-        return;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint16_t frag;
 
-    if (PKT_IS_IPV4(p)) {
-        frag = IPV4_GET_IPOFFSET(p);
-    } else if (PKT_IS_IPV6(p)) {
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        frag = IPV4_GET_RAW_FRAGOFFSET(ip4h);
+    } else if (PacketIsIPv6(p)) {
         if (IPV6_EXTHDR_ISSET_FH(p)) {
             frag = IPV6_EXTHDR_GET_FH_OFFSET(p);
         } else {
@@ -299,17 +303,16 @@ PrefilterPacketFragOffsetCompare(PrefilterPacketHeaderValue v, void *smctx)
     if (v.u8[0] == fb->mode &&
         v.u16[1] == fb->frag_off)
     {
-        return TRUE;
+        return true;
     }
-    return FALSE;
+    return false;
 }
 
 static int PrefilterSetupFragOffset(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FRAGOFFSET,
-        PrefilterPacketFragOffsetSet,
-        PrefilterPacketFragOffsetCompare,
-        PrefilterPacketFragOffsetMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FRAGOFFSET, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketFragOffsetSet, PrefilterPacketFragOffsetCompare,
+            PrefilterPacketFragOffsetMatch);
 }
 
 static bool PrefilterFragOffsetIsPrefilterable(const Signature *s)
@@ -318,28 +321,30 @@ static bool PrefilterFragOffsetIsPrefilterable(const Signature *s)
     for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
         switch (sm->type) {
             case DETECT_FRAGOFFSET:
-                return TRUE;
+                return true;
         }
     }
-    return FALSE;
+    return false;
 }
 
 #ifdef UNITTESTS
+#include "util-unittest-helper.h"
 #include "detect-engine.h"
-#include "detect-engine-mpm.h"
+#include "detect-engine-alert.h"
 
 /**
  * \test DetectFragOffsetParseTest01 is a test for setting a valid fragoffset value
  */
 static int DetectFragOffsetParseTest01 (void)
 {
-    DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse(NULL, "300");
-    if (fragoff != NULL && fragoff->frag_off == 300) {
-        DetectFragOffsetFree(NULL, fragoff);
-        return 1;
-    }
-    return 0;
+    DetectFragOffsetData *fragoff = DetectFragOffsetParse(NULL, "300");
+
+    FAIL_IF_NULL(fragoff);
+    FAIL_IF_NOT(fragoff->frag_off == 300);
+
+    DetectFragOffsetFree(NULL, fragoff);
+
+    PASS;
 }
 
 /**
@@ -348,13 +353,15 @@ static int DetectFragOffsetParseTest01 (void)
  */
 static int DetectFragOffsetParseTest02 (void)
 {
-    DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse(NULL, ">300");
-    if (fragoff != NULL && fragoff->frag_off == 300 && fragoff->mode == FRAG_MORE) {
-        DetectFragOffsetFree(NULL, fragoff);
-        return 1;
-    }
-    return 0;
+    DetectFragOffsetData *fragoff = DetectFragOffsetParse(NULL, ">300");
+
+    FAIL_IF_NULL(fragoff);
+    FAIL_IF_NOT(fragoff->frag_off == 300);
+    FAIL_IF_NOT(fragoff->mode == FRAG_MORE);
+
+    DetectFragOffsetFree(NULL, fragoff);
+
+    PASS;
 }
 
 /**
@@ -362,13 +369,11 @@ static int DetectFragOffsetParseTest02 (void)
  */
 static int DetectFragOffsetParseTest03 (void)
 {
-    DetectFragOffsetData *fragoff = NULL;
-    fragoff = DetectFragOffsetParse(NULL, "badc");
-    if (fragoff != NULL) {
-        DetectFragOffsetFree(NULL, fragoff);
-        return 0;
-    }
-    return 1;
+    DetectFragOffsetData *fragoff = DetectFragOffsetParse(NULL, "badc");
+
+    FAIL_IF_NOT_NULL(fragoff);
+
+    PASS;
 }
 
 /**
@@ -378,17 +383,15 @@ static int DetectFragOffsetParseTest03 (void)
  */
 static int DetectFragOffsetMatchTest01 (void)
 {
-    int result = 0;
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
+    Packet *p = PacketGetFromAlloc();
+
+    FAIL_IF_NULL(p);
     Signature *s = NULL;
     DecodeThreadVars dtv;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
     IPV4Hdr ip4h;
 
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&ip4h, 0, sizeof(IPV4Hdr));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(ThreadVars));
@@ -403,51 +406,34 @@ static int DetectFragOffsetMatchTest01 (void)
     ip4h.s_ip_src.s_addr = p->src.addr_data32[0];
     ip4h.s_ip_dst.s_addr = p->dst.addr_data32[0];
     ip4h.ip_off = 0x2222;
-    p->ip4h = &ip4h;
+    UTHSetIPV4Hdr(p, &ip4h);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
 
-    s = de_ctx->sig_list = SigInit(de_ctx, "alert ip any any -> any any (fragoffset:546; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any (fragoffset:546; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    s = s->next = SigInit(de_ctx, "alert ip any any -> any any (fragoffset:5000; sid:2;)");
-    if (s == NULL) {
-        goto end;
-    }
+    s = DetectEngineAppendSig(de_ctx, "alert ip any any -> any any (fragoffset:5000; sid:2;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, 1) == 0) {
-        printf("sid 1 did not alert, but should have: ");
-        goto cleanup;
-    } else if (PacketAlertCheck(p, 2)) {
-        printf("sid 2 alerted, but should not have: ");
-        goto cleanup;
-    }
 
-    result = 1;
-
-cleanup:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    FAIL_IF(PacketAlertCheck(p, 1) == 0);
+    FAIL_IF(PacketAlertCheck(p, 2));
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
     FlowShutdown();
-end:
-    SCFree(p);
-    return result;
 
+    SCFree(p);
+    PASS;
 }
 
 void DetectFragOffsetRegisterTests (void)

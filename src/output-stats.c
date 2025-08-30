@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,20 +24,15 @@
  */
 
 #include "suricata-common.h"
-#include "tm-modules.h"
+#include "output.h"
 #include "output-stats.h"
 #include "util-validate.h"
 
-typedef struct OutputLoggerThreadStore_ {
-    void *thread_data;
-    struct OutputLoggerThreadStore_ *next;
-} OutputLoggerThreadStore;
-
 /** per thread data for this module, contains a list of per thread
  *  data for the packet loggers. */
-typedef struct OutputLoggerThreadData_ {
+typedef struct OutputStatsLoggerThreadData_ {
     OutputLoggerThreadStore *store;
-} OutputLoggerThreadData;
+} OutputStatsLoggerThreadData;
 
 /* logger instance, a module + a output ctx,
  * it's perfectly valid that have multiple instances of the same
@@ -49,27 +44,22 @@ typedef struct OutputStatsLogger_ {
     const char *name;
     ThreadInitFunc ThreadInit;
     ThreadDeinitFunc ThreadDeinit;
-    ThreadExitPrintStatsFunc ThreadExitPrintStats;
 } OutputStatsLogger;
 
 static OutputStatsLogger *list = NULL;
 
-int OutputRegisterStatsLogger(const char *name, StatsLogger LogFunc,
-    OutputCtx *output_ctx, ThreadInitFunc ThreadInit,
-    ThreadDeinitFunc ThreadDeinit,
-    ThreadExitPrintStatsFunc ThreadExitPrintStats)
+int OutputRegisterStatsLogger(const char *name, StatsLogger LogFunc, OutputCtx *output_ctx,
+        ThreadInitFunc ThreadInit, ThreadDeinitFunc ThreadDeinit)
 {
-    OutputStatsLogger *op = SCMalloc(sizeof(*op));
+    OutputStatsLogger *op = SCCalloc(1, sizeof(*op));
     if (op == NULL)
         return -1;
-    memset(op, 0x00, sizeof(*op));
 
     op->LogFunc = LogFunc;
     op->output_ctx = output_ctx;
     op->name = name;
     op->ThreadInit = ThreadInit;
     op->ThreadDeinit = ThreadDeinit;
-    op->ThreadExitPrintStats = ThreadExitPrintStats;
 
     if (list == NULL)
         list = op;
@@ -89,7 +79,7 @@ TmEcode OutputStatsLog(ThreadVars *tv, void *thread_data, StatsTable *st)
     DEBUG_VALIDATE_BUG_ON(thread_data == NULL);
     DEBUG_VALIDATE_BUG_ON(list == NULL);
 
-    OutputLoggerThreadData *op_thread_data = (OutputLoggerThreadData *)thread_data;
+    OutputStatsLoggerThreadData *op_thread_data = (OutputStatsLoggerThreadData *)thread_data;
     OutputStatsLogger *logger = list;
     OutputLoggerThreadStore *store = op_thread_data->store;
 
@@ -117,10 +107,9 @@ TmEcode OutputStatsLog(ThreadVars *tv, void *thread_data, StatsTable *st)
  *  loggers */
 static TmEcode OutputStatsLogThreadInit(ThreadVars *tv, const void *initdata, void **data)
 {
-    OutputLoggerThreadData *td = SCMalloc(sizeof(*td));
+    OutputStatsLoggerThreadData *td = SCCalloc(1, sizeof(*td));
     if (td == NULL)
         return TM_ECODE_FAILED;
-    memset(td, 0x00, sizeof(*td));
 
     *data = (void *)td;
 
@@ -131,9 +120,8 @@ static TmEcode OutputStatsLogThreadInit(ThreadVars *tv, const void *initdata, vo
         if (logger->ThreadInit) {
             void *retptr = NULL;
             if (logger->ThreadInit(tv, (void *)logger->output_ctx, &retptr) == TM_ECODE_OK) {
-                OutputLoggerThreadStore *ts = SCMalloc(sizeof(*ts));
-/* todo */      BUG_ON(ts == NULL);
-                memset(ts, 0x00, sizeof(*ts));
+                OutputLoggerThreadStore *ts = SCCalloc(1, sizeof(*ts));
+                /* todo */ BUG_ON(ts == NULL);
 
                 /* store thread handle */
                 ts->thread_data = retptr;
@@ -160,7 +148,7 @@ static TmEcode OutputStatsLogThreadInit(ThreadVars *tv, const void *initdata, vo
 
 static TmEcode OutputStatsLogThreadDeinit(ThreadVars *tv, void *thread_data)
 {
-    OutputLoggerThreadData *op_thread_data = (OutputLoggerThreadData *)thread_data;
+    OutputStatsLoggerThreadData *op_thread_data = (OutputStatsLoggerThreadData *)thread_data;
     OutputLoggerThreadStore *store = op_thread_data->store;
     OutputStatsLogger *logger = list;
 
@@ -178,27 +166,10 @@ static TmEcode OutputStatsLogThreadDeinit(ThreadVars *tv, void *thread_data)
     return TM_ECODE_OK;
 }
 
-static void OutputStatsLogExitPrintStats(ThreadVars *tv, void *thread_data)
-{
-    OutputLoggerThreadData *op_thread_data = (OutputLoggerThreadData *)thread_data;
-    OutputLoggerThreadStore *store = op_thread_data->store;
-    OutputStatsLogger *logger = list;
-
-    while (logger && store) {
-        if (logger->ThreadExitPrintStats) {
-            logger->ThreadExitPrintStats(tv, store->thread_data);
-        }
-
-        logger = logger->next;
-        store = store->next;
-    }
-}
-
 void TmModuleStatsLoggerRegister (void)
 {
     tmm_modules[TMM_STATSLOGGER].name = "__stats_logger__";
     tmm_modules[TMM_STATSLOGGER].ThreadInit = OutputStatsLogThreadInit;
-    tmm_modules[TMM_STATSLOGGER].ThreadExitPrintStats = OutputStatsLogExitPrintStats;
     tmm_modules[TMM_STATSLOGGER].ThreadDeinit = OutputStatsLogThreadDeinit;
     tmm_modules[TMM_STATSLOGGER].cap_flags = 0;
 }

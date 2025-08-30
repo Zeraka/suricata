@@ -55,7 +55,7 @@ Add::
     suricatasc -c "add-hostbit <ip> <bit name> <expire in seconds>"
     suricatasc -c "add-hostbit 1.2.3.4 blacklist 3600"
 
-If an hostbit is added for an existing hostbit, it's expiry timer is updated.
+If a hostbit is added for an existing hostbit, it's expiry timer is updated.
 
 Remove::
 
@@ -95,10 +95,10 @@ They drop the traffic and create an 'xbit' 'badssh' for the source ip.
 It expires in an hour::
 
     drop ssh any any -> $MYSERVER 22 (msg:"DROP libssh incoming";   \
-      flow:to_server,established; ssh.softwareversion:"libssh";     \
+      flow:to_server,established; ssh.software; content:"libssh";     \
       xbits:set, badssh, track ip_src, expire 3600; sid:4000000005;)
     drop ssh any any -> $MYSERVER 22 (msg:"DROP PUTTY incoming";    \
-      flow:to_server,established; ssh.softwareversion:"PUTTY";      \
+      flow:to_server,established; ssh.software; content:"PUTTY";      \
       xbits:set, badssh, track ip_src, expire 3600; sid:4000000007;)
 
 Then the following rule simply drops any incoming traffic to that server

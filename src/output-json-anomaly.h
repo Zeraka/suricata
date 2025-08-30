@@ -24,12 +24,10 @@
  *
  */
 
-#ifndef __OUTPUT_JSON_ANOMALY_H__
-#define __OUTPUT_JSON_ANOMALY_H__
+#ifndef SURICATA_OUTPUT_JSON_ANOMALY_H
+#define SURICATA_OUTPUT_JSON_ANOMALY_H
 
 void JsonAnomalyLogRegister(void);
-void AnomalyJsonHeader(void *ctx, const Packet *p, const PacketAlert *pa, json_t *js,
-                     uint16_t flags);
 
 #endif /* __OUTPUT_JSON_ALERT_H__ */
 

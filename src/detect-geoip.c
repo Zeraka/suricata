@@ -26,7 +26,6 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
@@ -44,7 +43,7 @@
 
 static int DetectGeoipSetupNoSupport (DetectEngineCtx *a, Signature *b, const char *c)
 {
-    SCLogError(SC_ERR_NO_GEOIP_SUPPORT, "no GeoIP support built in, needed for geoip keyword");
+    SCLogError("no GeoIP support built in, needed for geoip keyword");
     return -1;
 }
 
@@ -101,10 +100,10 @@ static bool InitGeolocationEngine(DetectGeoipData *geoipdata)
     const char *filename = NULL;
 
     /* Get location and name of GeoIP2 database from YAML conf */
-    (void)ConfGet("geoip-database", &filename);
+    (void)SCConfGet("geoip-database", &filename);
 
     if (filename == NULL) {
-        SCLogWarning(SC_ERR_INVALID_ARGUMENT, "Unable to locate a GeoIP2"
+        SCLogWarning("Unable to locate a GeoIP2"
                      "database filename in YAML conf.  GeoIP rule matching "
                      "is disabled.");
         geoipdata->mmdb_status = MMDB_FILE_OPEN_ERROR;
@@ -119,9 +118,9 @@ static bool InitGeolocationEngine(DetectGeoipData *geoipdata)
         return true;
     }
 
-    SCLogWarning(SC_ERR_INVALID_ARGUMENT, "Failed to open GeoIP2 database: %s. "
-                 "Error was: %s.  GeoIP rule matching is disabled.", filename,
-                 MMDB_strerror(status));
+    SCLogWarning("Failed to open GeoIP2 database: %s. "
+                 "Error was: %s.  GeoIP rule matching is disabled.",
+            filename, MMDB_strerror(status));
     geoipdata->mmdb_status = status;
     return false;
 }
@@ -251,11 +250,9 @@ static int DetectGeoipMatch(DetectEngineThreadCtx *det_ctx,
     const DetectGeoipData *geoipdata = (const DetectGeoipData *)ctx;
     int matches = 0;
 
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
-    if (PKT_IS_IPV4(p))
-    {
+    if (PacketIsIPv4(p)) {
         if (geoipdata->flags & ( GEOIP_MATCH_SRC_FLAG | GEOIP_MATCH_BOTH_FLAG ))
         {
             if (CheckGeoMatchIPv4(geoipdata, GET_IPV4_SRC_ADDR_U32(p)))
@@ -306,11 +303,9 @@ static DetectGeoipData *DetectGeoipDataParse (DetectEngineCtx *de_ctx, const cha
         goto error;
 
     /* We have a correct geoip options string */
-    geoipdata = SCMalloc(sizeof(DetectGeoipData));
+    geoipdata = SCCalloc(1, sizeof(DetectGeoipData));
     if (unlikely(geoipdata == NULL))
         goto error;
-
-    memset(geoipdata, 0x00, sizeof(DetectGeoipData));
 
     /* Parse the geoip option string */
     while (pos <= slen)
@@ -352,7 +347,7 @@ static DetectGeoipData *DetectGeoipDataParse (DetectEngineCtx *de_ctx, const cha
                 }
 
                 if (geoipdata->nlocations >= GEOOPTION_MAXLOCATIONS) {
-                    SCLogError(SC_ERR_INVALID_ARGUMENT, "too many arguements for geoip keyword");
+                    SCLogError("too many arguments for geoip keyword");
                     goto error;
                 }
 
@@ -384,7 +379,7 @@ static DetectGeoipData *DetectGeoipDataParse (DetectEngineCtx *de_ctx, const cha
     /* init geo engine, but not when running as unittests */
     if (!(RunmodeIsUnittests())) {
         /* Initialize the geolocation engine */
-        if (InitGeolocationEngine(geoipdata) == false)
+        if (!InitGeolocationEngine(geoipdata))
             goto error;
     }
 
@@ -410,21 +405,17 @@ error:
 static int DetectGeoipSetup(DetectEngineCtx *de_ctx, Signature *s, const char *optstr)
 {
     DetectGeoipData *geoipdata = NULL;
-    SigMatch *sm = NULL;
 
     geoipdata = DetectGeoipDataParse(de_ctx, optstr);
     if (geoipdata == NULL)
         goto error;
 
     /* Get this into a SigMatch and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_GEOIP, (SigMatchCtx *)geoipdata, DETECT_SM_LIST_MATCH) == NULL) {
         goto error;
-
-    sm->type = DETECT_GEOIP;
-    sm->ctx = (SigMatchCtx *)geoipdata;
-
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_MATCH);
+    }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
@@ -432,8 +423,6 @@ static int DetectGeoipSetup(DetectEngineCtx *de_ctx, Signature *s, const char *o
 error:
     if (geoipdata != NULL)
         DetectGeoipDataFree(de_ctx, geoipdata);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 
 }
@@ -469,11 +458,11 @@ static int GeoipParseTest(const char *rule, int ncountries, const char **countri
     FAIL_IF(de_ctx->sig_list == NULL);
 
     s = de_ctx->sig_list;
-    FAIL_IF(s->sm_lists_tail[DETECT_SM_LIST_MATCH] == NULL);
+    FAIL_IF(s->init_data->smlists_tail[DETECT_SM_LIST_MATCH] == NULL);
 
-    FAIL_IF(s->sm_lists_tail[DETECT_SM_LIST_MATCH]->type != DETECT_GEOIP);
+    FAIL_IF(s->init_data->smlists_tail[DETECT_SM_LIST_MATCH]->type != DETECT_GEOIP);
 
-    data = (DetectGeoipData *)s->sm_lists_tail[DETECT_SM_LIST_MATCH]->ctx;
+    data = (DetectGeoipData *)s->init_data->smlists_tail[DETECT_SM_LIST_MATCH]->ctx;
     FAIL_IF(data->flags != flags);
 
     FAIL_IF(data->nlocations!=ncountries);

@@ -25,7 +25,15 @@
 #ifndef UTIL_SYSLOG_H
 #define	UTIL_SYSLOG_H
 
+#include "util-enum.h"
+
 SCEnumCharMap *SCSyslogGetFacilityMap(void);
 SCEnumCharMap *SCSyslogGetLogLevelMap(void);
+
+#ifndef OS_WIN32
+#define DEFAULT_ALERT_SYSLOG_FACILITY_STR "local0"
+#define DEFAULT_ALERT_SYSLOG_FACILITY     LOG_LOCAL0
+#define DEFAULT_ALERT_SYSLOG_LEVEL        LOG_ERR
+#endif
 
 #endif	/* UTIL_SYSLOG_H */

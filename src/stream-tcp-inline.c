@@ -24,12 +24,14 @@
  */
 
 #include "suricata-common.h"
+#include "decode.h"
 #include "stream-tcp-private.h"
 #include "stream-tcp-inline.h"
 
 #include "util-memcmp.h"
 #include "util-print.h"
 
+#include "util-validate.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 
@@ -53,13 +55,16 @@ int StreamTcpInlineSegmentCompare(const TcpStream *stream,
         SCReturnInt(0);
     }
 
+    DEBUG_VALIDATE_BUG_ON(SEQ_LEQ(seg->seq + TCP_SEG_LEN(seg), stream->base_seq));
+
     const uint8_t *seg_data;
     uint32_t seg_datalen;
     StreamingBufferSegmentGetData(&stream->sb, &seg->sbseg, &seg_data, &seg_datalen);
     if (seg_data == NULL || seg_datalen == 0)
         SCReturnInt(0);
 
-    const uint32_t pkt_seq = TCP_GET_SEQ(p);
+    const TCPHdr *tcph = PacketGetTCP(p);
+    const uint32_t pkt_seq = TCP_GET_RAW_SEQ(tcph);
 
     if (SEQ_EQ(pkt_seq, seg->seq) && p->payload_len == seg_datalen) {
         int r = SCMemcmp(p->payload, seg_data, seg_datalen);
@@ -72,24 +77,28 @@ int StreamTcpInlineSegmentCompare(const TcpStream *stream,
         SCLogDebug("p %u (%u), seg2 %u (%u)", pkt_seq,
                 p->payload_len, seg->seq, seg_datalen);
 
+        uint32_t seg_seq = seg->seq;
+        if (SEQ_LT(seg_seq, stream->base_seq)) {
+            seg_seq = stream->base_seq;
+        }
         uint32_t pkt_end = pkt_seq + p->payload_len;
-        uint32_t seg_end = seg->seq + seg_datalen;
+        uint32_t seg_end = seg_seq + seg_datalen;
         SCLogDebug("pkt_end %u, seg_end %u", pkt_end, seg_end);
 
         /* get the minimal seg*_end */
-        uint32_t end = (SEQ_GT(pkt_end, seg_end)) ? seg_end : pkt_end;
+        uint32_t end = SEQ_MIN(seg_end, pkt_end);
         /* and the max seq */
-        uint32_t seq = (SEQ_LT(pkt_seq, seg->seq)) ? seg->seq : pkt_seq;
-
+        uint32_t seq = SEQ_MAX(pkt_seq, seg_seq);
+        seq = SEQ_MAX(seq, stream->base_seq);
         SCLogDebug("seq %u, end %u", seq, end);
 
-        uint16_t pkt_off = seq - pkt_seq;
-        uint16_t seg_off = seq - seg->seq;
+        uint32_t pkt_off = seq - pkt_seq;
+        uint32_t seg_off = seq - seg_seq;
         SCLogDebug("pkt_off %u, seg_off %u", pkt_off, seg_off);
 
         uint32_t range = end - seq;
         SCLogDebug("range %u", range);
-        BUG_ON(range > 65536);
+        DEBUG_VALIDATE_BUG_ON(range > 65536);
 
         if (range) {
             int r = SCMemcmp(p->payload + pkt_off, seg_data + seg_off, range);
@@ -114,7 +123,8 @@ void StreamTcpInlineSegmentReplacePacket(const TcpStream *stream,
 {
     SCEnter();
 
-    uint32_t pseq = TCP_GET_SEQ(p);
+    const TCPHdr *tcph = PacketGetTCP(p);
+    const uint32_t pseq = TCP_GET_RAW_SEQ(tcph);
     uint32_t tseq = seg->seq;
 
     /* check if segment is within the packet */
@@ -138,13 +148,13 @@ void StreamTcpInlineSegmentReplacePacket(const TcpStream *stream,
     uint32_t seq = (SEQ_LT(pseq, tseq)) ? tseq : pseq;
     SCLogDebug("seq %u, end %u", seq, end);
 
-    uint16_t poff = seq - pseq;
-    uint16_t toff = seq - tseq;
+    uint32_t poff = seq - pseq;
+    uint32_t toff = seq - tseq;
     SCLogDebug("poff %u, toff %u", poff, toff);
 
     uint32_t range = end - seq;
     SCLogDebug("range %u", range);
-    BUG_ON(range > 65536);
+    DEBUG_VALIDATE_BUG_ON(range > 65536);
 
     if (range) {
         /* update the packets payload. As payload is a ptr to either

@@ -25,23 +25,15 @@
  */
 
 #include "suricata-common.h"
-#include "decode.h"
-#include "detect.h"
-#include "detect-engine.h"
-#include "conf.h"
-
-#include "tm-threads.h"
-
-#include "util-unittest.h"
-#include "util-byte.h"
 #include "util-profiling.h"
 #include "util-profiling-locks.h"
 
 #ifdef PROFILING
-
-#ifndef MIN
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#endif
+#include "detect-engine.h"
+#include "tm-threads.h"
+#include "util-conf.h"
+#include "util-path.h"
+#include "util-time.h"
 
 /**
  * Extra data for rule profiling.
@@ -68,22 +60,24 @@ static const char *profiling_file_mode = "a";
 
 void SCProfilingKeywordsGlobalInit(void)
 {
-    ConfNode *conf;
+    SCConfNode *conf;
 
-    conf = ConfGetNode("profiling.keywords");
+    conf = SCConfGetNode("profiling.keywords");
     if (conf != NULL) {
-        if (ConfNodeChildValueIsTrue(conf, "enabled")) {
+        if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
             profiling_keyword_enabled = 1;
-            const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            const char *filename = SCConfNodeLookupChildValue(conf, "filename");
             if (filename != NULL) {
-                const char *log_dir;
-                log_dir = ConfigGetLogDirectory();
+                if (PathIsAbsolute(filename)) {
+                    strlcpy(profiling_file_name, filename, sizeof(profiling_file_name));
+                } else {
+                    const char *log_dir = SCConfigGetLogDirectory();
+                    snprintf(profiling_file_name, sizeof(profiling_file_name), "%s/%s", log_dir,
+                            filename);
+                }
 
-                snprintf(profiling_file_name, sizeof(profiling_file_name), "%s/%s",
-                        log_dir, filename);
-
-                const char *v = ConfNodeLookupChildValue(conf, "append");
-                if (v == NULL || ConfValIsTrue(v)) {
+                const char *v = SCConfNodeLookupChildValue(conf, "append");
+                if (v == NULL || SCConfValIsTrue(v)) {
                     profiling_file_mode = "a";
                 } else {
                     profiling_file_mode = "w";
@@ -125,12 +119,12 @@ static void DoDump(SCProfileKeywordDetectCtx *rules_ctx, FILE *fp, const char *n
         double avgticks_match = 0;
         double avgticks_no_match = 0;
         if (ticks && d->checks) {
-            avgticks = (ticks / d->checks);
+            avgticks = (double)(ticks / d->checks);
 
             if (d->ticks_match && d->matches)
-                avgticks_match = (d->ticks_match / d->matches);
+                avgticks_match = (double)(d->ticks_match / d->matches);
             if (d->ticks_no_match && (d->checks - d->matches) != 0)
-                avgticks_no_match = (d->ticks_no_match / (d->checks - d->matches));
+                avgticks_no_match = (double)(d->ticks_no_match / (d->checks - d->matches));
         }
 
         fprintf(fp,
@@ -168,8 +162,7 @@ SCProfilingKeywordDump(DetectEngineCtx *de_ctx)
         fp = fopen(profiling_file_name, profiling_file_mode);
 
         if (fp == NULL) {
-            SCLogError(SC_ERR_FOPEN, "failed to open %s: %s", profiling_file_name,
-                    strerror(errno));
+            SCLogError("failed to open %s: %s", profiling_file_name, strerror(errno));
             return;
         }
     } else {
@@ -198,7 +191,7 @@ SCProfilingKeywordDump(DetectEngineCtx *de_ctx)
             if (i < DETECT_SM_LIST_DYNAMIC_START) {
                 name = DetectSigmatchListEnumToString(i);
             } else {
-                name = DetectBufferTypeGetNameById(de_ctx, i);
+                name = DetectEngineBufferTypeGetNameById(de_ctx, i);
             }
 
             DoDump(de_ctx->profile_keyword_ctx_per_list[i], fp, name);
@@ -251,13 +244,11 @@ SCProfilingKeywordUpdateCounter(DetectEngineThreadCtx *det_ctx, int id, uint64_t
 
 static SCProfileKeywordDetectCtx *SCProfilingKeywordInitCtx(void)
 {
-    SCProfileKeywordDetectCtx *ctx = SCMalloc(sizeof(SCProfileKeywordDetectCtx));
+    SCProfileKeywordDetectCtx *ctx = SCCalloc(1, sizeof(SCProfileKeywordDetectCtx));
     if (ctx != NULL) {
-        memset(ctx, 0x00, sizeof(SCProfileKeywordDetectCtx));
 
         if (pthread_mutex_init(&ctx->data_m, NULL) != 0) {
-                    FatalError(SC_ERR_FATAL,
-                               "Failed to initialize hash table mutex.");
+            FatalError("Failed to initialize hash table mutex.");
         }
     }
 
@@ -295,9 +286,8 @@ void SCProfilingKeywordThreadSetup(SCProfileKeywordDetectCtx *ctx, DetectEngineT
     if (ctx == NULL)
         return;
 
-    SCProfileKeywordData *a = SCMalloc(sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
+    SCProfileKeywordData *a = SCCalloc(DETECT_TBLSIZE, sizeof(SCProfileKeywordData));
     if (a != NULL) {
-        memset(a, 0x00, sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
         det_ctx->keyword_perf_data = a;
     }
 
@@ -307,12 +297,10 @@ void SCProfilingKeywordThreadSetup(SCProfileKeywordDetectCtx *ctx, DetectEngineT
 
     int i;
     for (i = 0; i < nlists; i++) {
-        SCProfileKeywordData *b = SCMalloc(sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
+        SCProfileKeywordData *b = SCCalloc(DETECT_TBLSIZE, sizeof(SCProfileKeywordData));
         if (b != NULL) {
-            memset(b, 0x00, sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
             det_ctx->keyword_perf_data_per_list[i] = b;
         }
-
     }
 }
 
@@ -384,9 +372,8 @@ SCProfilingKeywordInitCounters(DetectEngineCtx *de_ctx)
     de_ctx->profile_keyword_ctx = SCProfilingKeywordInitCtx();
     BUG_ON(de_ctx->profile_keyword_ctx == NULL);
 
-    de_ctx->profile_keyword_ctx->data = SCMalloc(sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
+    de_ctx->profile_keyword_ctx->data = SCCalloc(DETECT_TBLSIZE, sizeof(SCProfileKeywordData));
     BUG_ON(de_ctx->profile_keyword_ctx->data == NULL);
-    memset(de_ctx->profile_keyword_ctx->data, 0x00, sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
 
     de_ctx->profile_keyword_ctx_per_list = SCCalloc(nlists, sizeof(SCProfileKeywordDetectCtx *));
     BUG_ON(de_ctx->profile_keyword_ctx_per_list == NULL);
@@ -395,9 +382,9 @@ SCProfilingKeywordInitCounters(DetectEngineCtx *de_ctx)
     for (i = 0; i < nlists; i++) {
         de_ctx->profile_keyword_ctx_per_list[i] = SCProfilingKeywordInitCtx();
         BUG_ON(de_ctx->profile_keyword_ctx_per_list[i] == NULL);
-        de_ctx->profile_keyword_ctx_per_list[i]->data = SCMalloc(sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
+        de_ctx->profile_keyword_ctx_per_list[i]->data =
+                SCCalloc(DETECT_TBLSIZE, sizeof(SCProfileKeywordData));
         BUG_ON(de_ctx->profile_keyword_ctx_per_list[i]->data == NULL);
-        memset(de_ctx->profile_keyword_ctx_per_list[i]->data, 0x00, sizeof(SCProfileKeywordData) * DETECT_TBLSIZE);
     }
 
     SCLogPerf("Registered %"PRIu32" keyword profiling counters.", DETECT_TBLSIZE);

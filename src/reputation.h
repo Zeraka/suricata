@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2019 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,17 +23,19 @@
  *         Original Idea by Matt Jonkman
  */
 
-#ifndef __REPUTATION_H__
-#define __REPUTATION_H__
+#ifndef SURICATA_REPUTATION_H
+#define SURICATA_REPUTATION_H
 
 #include "host.h"
+#include "util-radix4-tree.h"
+#include "util-radix6-tree.h"
 
 #define SREP_MAX_CATS 60
 #define SREP_MAX_VAL 127
 
 typedef struct SRepCIDRTree_ {
-    SCRadixTree *srepIPV4_tree[SREP_MAX_CATS];
-    SCRadixTree *srepIPV6_tree[SREP_MAX_CATS];
+    SCRadix4Tree srep_ipv4_tree[SREP_MAX_CATS];
+    SCRadix6Tree srep_ipv6_tree[SREP_MAX_CATS];
 } SRepCIDRTree;
 
 typedef struct SReputation_ {
@@ -41,18 +43,19 @@ typedef struct SReputation_ {
     uint8_t rep[SREP_MAX_CATS];
 } SReputation;
 
+void SRepFreeHostData(Host *h);
 uint8_t SRepCatGetByShortname(char *shortname);
 int SRepInit(struct DetectEngineCtx_ *de_ctx);
 void SRepDestroy(struct DetectEngineCtx_ *de_ctx);
 void SRepReloadComplete(void);
 int SRepHostTimedOut(Host *);
 
-uint8_t SRepCIDRGetIPRepSrc(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version);
-uint8_t SRepCIDRGetIPRepDst(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version);
+int8_t SRepCIDRGetIPRepSrc(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version);
+int8_t SRepCIDRGetIPRepDst(SRepCIDRTree *cidr_ctx, Packet *p, uint8_t cat, uint32_t version);
 void SRepResetVersion(void);
 int SRepLoadCatFileFromFD(FILE *fp);
 int SRepLoadFileFromFD(SRepCIDRTree *cidr_ctx, FILE *fp);
 
 void SCReputationRegisterTests(void);
 
-#endif /* __REPUTATION_H__ */
+#endif /* SURICATA_REPUTATION_H */

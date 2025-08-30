@@ -30,17 +30,22 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-build.h"
 
 #include "conf.h"
+#include "util-conf.h"
 #include "util-debug.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 #include "util-memcmp.h"
 #include "util-mpm-hs.h"
+#include "util-mpm-hs-cache.h"
+#include "util-mpm-hs-core.h"
 #include "util-memcpy.h"
 #include "util-hash.h"
 #include "util-hash-lookup3.h"
 #include "util-hyperscan.h"
+#include "util-path.h"
 
 #ifdef BUILD_HYPERSCAN
 
@@ -50,16 +55,18 @@ void SCHSInitCtx(MpmCtx *);
 void SCHSInitThreadCtx(MpmCtx *, MpmThreadCtx *);
 void SCHSDestroyCtx(MpmCtx *);
 void SCHSDestroyThreadCtx(MpmCtx *, MpmThreadCtx *);
-int SCHSAddPatternCI(MpmCtx *, uint8_t *, uint16_t, uint16_t, uint16_t,
-                     uint32_t, SigIntId, uint8_t);
+int SCHSAddPatternCI(
+        MpmCtx *, const uint8_t *, uint16_t, uint16_t, uint16_t, uint32_t, SigIntId, uint8_t);
 int SCHSAddPatternCS(MpmCtx *, uint8_t *, uint16_t, uint16_t, uint16_t,
                      uint32_t, SigIntId, uint8_t);
-int SCHSPreparePatterns(MpmCtx *mpm_ctx);
+int SCHSPreparePatterns(MpmConfig *mpm_conf, MpmCtx *mpm_ctx);
 uint32_t SCHSSearch(const MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx,
                     PrefilterRuleStore *pmq, const uint8_t *buf, const uint32_t buflen);
 void SCHSPrintInfo(MpmCtx *mpm_ctx);
 void SCHSPrintSearchStats(MpmThreadCtx *mpm_thread_ctx);
-void SCHSRegisterTests(void);
+#ifdef UNITTESTS
+static void SCHSRegisterTests(void);
+#endif
 
 /* size of the hash table used to speed up pattern insertions initially */
 #define INIT_HASH_SIZE 65536
@@ -107,7 +114,7 @@ static void SCHSSetAllocators(void)
 {
     hs_error_t err = hs_set_allocator(SCHSMalloc, SCHSFree);
     if (err != HS_SUCCESS) {
-        FatalError(SC_ERR_FATAL, "Failed to set Hyperscan allocator.");
+        FatalError("Failed to set Hyperscan allocator.");
     }
 }
 
@@ -121,7 +128,7 @@ static void SCHSSetAllocators(void)
  *
  * \retval hash A 32 bit unsigned hash.
  */
-static inline uint32_t SCHSInitHashRaw(uint8_t *pat, uint16_t patlen)
+static inline uint32_t SCHSInitHashRaw(const uint8_t *pat, uint16_t patlen)
 {
     uint32_t hash = patlen * pat[0];
     if (patlen > 1)
@@ -142,10 +149,8 @@ static inline uint32_t SCHSInitHashRaw(uint8_t *pat, uint16_t patlen)
  *
  * \retval hash A 32 bit unsigned hash.
  */
-static inline SCHSPattern *SCHSInitHashLookup(SCHSCtx *ctx, uint8_t *pat,
-                                              uint16_t patlen, uint16_t offset,
-                                              uint16_t depth, char flags,
-                                              uint32_t pid)
+static inline SCHSPattern *SCHSInitHashLookup(SCHSCtx *ctx, const uint8_t *pat, uint16_t patlen,
+        uint16_t offset, uint16_t depth, char flags, uint32_t pid)
 {
     uint32_t hash = SCHSInitHashRaw(pat, patlen);
 
@@ -177,11 +182,10 @@ static inline SCHSPattern *SCHSInitHashLookup(SCHSCtx *ctx, uint8_t *pat,
  */
 static inline SCHSPattern *SCHSAllocPattern(MpmCtx *mpm_ctx)
 {
-    SCHSPattern *p = SCMalloc(sizeof(SCHSPattern));
+    SCHSPattern *p = SCCalloc(1, sizeof(SCHSPattern));
     if (unlikely(p == NULL)) {
         exit(EXIT_FAILURE);
     }
-    memset(p, 0, sizeof(SCHSPattern));
 
     mpm_ctx->memory_cnt++;
     mpm_ctx->memory_size += sizeof(SCHSPattern);
@@ -230,7 +234,7 @@ static inline int SCHSInitHashAdd(SCHSCtx *ctx, SCHSPattern *p)
     uint32_t hash = SCHSInitHash(p);
 
     if (ctx->init_hash == NULL) {
-        return 0;
+        return -1;
     }
 
     if (ctx->init_hash[hash] == NULL) {
@@ -266,9 +270,8 @@ static inline int SCHSInitHashAdd(SCHSCtx *ctx, SCHSPattern *p)
  * \retval  0 On success.
  * \retval -1 On failure.
  */
-static int SCHSAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                          uint16_t offset, uint16_t depth, uint32_t pid,
-                          SigIntId sid, uint8_t flags)
+static int SCHSAddPattern(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags)
 {
     SCHSCtx *ctx = (SCHSCtx *)mpm_ctx->ctx;
 
@@ -280,7 +283,7 @@ static int SCHSAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
     }
 
     if (patlen == 0) {
-        SCLogWarning(SC_ERR_INVALID_ARGUMENTS, "pattern length 0");
+        SCLogWarning("pattern length 0");
         return 0;
     }
 
@@ -308,7 +311,8 @@ static int SCHSAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
         memcpy(p->original_pat, pat, patlen);
 
         /* put in the pattern hash */
-        SCHSInitHashAdd(ctx, p);
+        if (SCHSInitHashAdd(ctx, p) != 0)
+            goto error;
 
         mpm_ctx->pattern_cnt++;
 
@@ -376,39 +380,34 @@ typedef struct SCHSCompileData_ {
     unsigned int pattern_cnt;
 } SCHSCompileData;
 
-static SCHSCompileData *SCHSAllocCompileData(unsigned int pattern_cnt)
+static SCHSCompileData *CompileDataAlloc(unsigned int pattern_cnt)
 {
-    SCHSCompileData *cd = SCMalloc(pattern_cnt * sizeof(SCHSCompileData));
+    SCHSCompileData *cd = SCCalloc(pattern_cnt, sizeof(SCHSCompileData));
     if (cd == NULL) {
         goto error;
     }
-    memset(cd, 0, pattern_cnt * sizeof(SCHSCompileData));
 
     cd->pattern_cnt = pattern_cnt;
 
-    cd->ids = SCMalloc(pattern_cnt * sizeof(unsigned int));
+    cd->ids = SCCalloc(pattern_cnt, sizeof(unsigned int));
     if (cd->ids == NULL) {
         goto error;
     }
-    memset(cd->ids, 0, pattern_cnt * sizeof(unsigned int));
 
-    cd->flags = SCMalloc(pattern_cnt * sizeof(unsigned int));
+    cd->flags = SCCalloc(pattern_cnt, sizeof(unsigned int));
     if (cd->flags == NULL) {
         goto error;
     }
-    memset(cd->flags, 0, pattern_cnt * sizeof(unsigned int));
 
-    cd->expressions = SCMalloc(pattern_cnt * sizeof(char *));
+    cd->expressions = SCCalloc(pattern_cnt, sizeof(char *));
     if (cd->expressions == NULL) {
         goto error;
     }
-    memset(cd->expressions, 0, pattern_cnt * sizeof(char *));
 
-    cd->ext = SCMalloc(pattern_cnt * sizeof(hs_expr_ext_t *));
+    cd->ext = SCCalloc(pattern_cnt, sizeof(hs_expr_ext_t *));
     if (cd->ext == NULL) {
         goto error;
     }
-    memset(cd->ext, 0, pattern_cnt * sizeof(hs_expr_ext_t *));
 
     return cd;
 
@@ -424,7 +423,7 @@ error:
     return NULL;
 }
 
-static void SCHSFreeCompileData(SCHSCompileData *cd)
+static void CompileDataFree(SCHSCompileData *cd)
 {
     if (cd == NULL) {
         return;
@@ -446,15 +445,6 @@ static void SCHSFreeCompileData(SCHSCompileData *cd)
     }
     SCFree(cd);
 }
-
-typedef struct PatternDatabase_ {
-    SCHSPattern **parray;
-    hs_database_t *hs_db;
-    uint32_t pattern_cnt;
-
-    /* Reference count: number of MPM contexts using this pattern database. */
-    uint32_t ref_cnt;
-} PatternDatabase;
 
 static uint32_t SCHSPatternHash(const SCHSPattern *p, uint32_t hash)
 {
@@ -554,59 +544,39 @@ static void PatternDatabaseTableFree(void *data)
 
 static PatternDatabase *PatternDatabaseAlloc(uint32_t pattern_cnt)
 {
-    PatternDatabase *pd = SCMalloc(sizeof(PatternDatabase));
+    PatternDatabase *pd = SCCalloc(1, sizeof(PatternDatabase));
     if (pd == NULL) {
         return NULL;
     }
-    memset(pd, 0, sizeof(PatternDatabase));
     pd->pattern_cnt = pattern_cnt;
     pd->ref_cnt = 0;
     pd->hs_db = NULL;
+    pd->cached = false;
 
     /* alloc the pattern array */
-    pd->parray =
-        (SCHSPattern **)SCMalloc(pd->pattern_cnt * sizeof(SCHSPattern *));
+    pd->parray = (SCHSPattern **)SCCalloc(pd->pattern_cnt, sizeof(SCHSPattern *));
     if (pd->parray == NULL) {
         SCFree(pd);
         return NULL;
     }
-    memset(pd->parray, 0, pd->pattern_cnt * sizeof(SCHSPattern *));
 
     return pd;
 }
 
-/**
- * \brief Process the patterns added to the mpm, and create the internal tables.
- *
- * \param mpm_ctx Pointer to the mpm context.
- */
-int SCHSPreparePatterns(MpmCtx *mpm_ctx)
+static int HSCheckPatterns(MpmCtx *mpm_ctx, SCHSCtx *ctx)
 {
-    SCHSCtx *ctx = (SCHSCtx *)mpm_ctx->ctx;
-
     if (mpm_ctx->pattern_cnt == 0 || ctx->init_hash == NULL) {
         SCLogDebug("no patterns supplied to this mpm_ctx");
         return 0;
     }
+    return 1;
+}
 
-    hs_error_t err;
-    hs_compile_error_t *compile_err = NULL;
-    SCHSCompileData *cd = NULL;
-    PatternDatabase *pd = NULL;
-
-    cd = SCHSAllocCompileData(mpm_ctx->pattern_cnt);
-    if (cd == NULL) {
-        goto error;
-    }
-
-    pd = PatternDatabaseAlloc(mpm_ctx->pattern_cnt);
-    if (pd == NULL) {
-        goto error;
-    }
-
-    /* populate the pattern array with the patterns in the hash */
+static void HSPatternArrayPopulate(SCHSCtx *ctx, PatternDatabase *pd)
+{
     for (uint32_t i = 0, p = 0; i < INIT_HASH_SIZE; i++) {
-        SCHSPattern *node = ctx->init_hash[i], *nnode = NULL;
+        SCHSPattern *node = ctx->init_hash[i];
+        SCHSPattern *nnode = NULL;
         while (node != NULL) {
             nnode = node->next;
             node->next = NULL;
@@ -614,106 +584,232 @@ int SCHSPreparePatterns(MpmCtx *mpm_ctx)
             node = nnode;
         }
     }
+}
 
+static void HSPatternArrayInit(SCHSCtx *ctx, PatternDatabase *pd)
+{
+    HSPatternArrayPopulate(ctx, pd);
     /* we no longer need the hash, so free its memory */
     SCFree(ctx->init_hash);
     ctx->init_hash = NULL;
+}
 
-    /* Serialise whole database compilation as a relatively easy way to ensure
-     * dedupe is safe. */
-    SCMutexLock(&g_db_table_mutex);
-
-    /* Init global pattern database hash if necessary. */
+static int HSGlobalPatternDatabaseInit(void)
+{
     if (g_db_table == NULL) {
         g_db_table = HashTableInit(INIT_DB_HASH_SIZE, PatternDatabaseHash,
                                    PatternDatabaseCompare,
                                    PatternDatabaseTableFree);
         if (g_db_table == NULL) {
-            SCMutexUnlock(&g_db_table_mutex);
-            goto error;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void HSLogCompileError(hs_compile_error_t *compile_err)
+{
+    SCLogError("failed to compile hyperscan database");
+    if (compile_err) {
+        SCLogError("compile error: %s", compile_err->message);
+        hs_free_compile_error(compile_err);
+    }
+}
+
+static int HSScratchAlloc(const hs_database_t *db)
+{
+    SCMutexLock(&g_scratch_proto_mutex);
+    hs_error_t err = hs_alloc_scratch(db, &g_scratch_proto);
+    SCMutexUnlock(&g_scratch_proto_mutex);
+    if (err != HS_SUCCESS) {
+        SCLogError("failed to allocate scratch");
+        return -1;
+    }
+    return 0;
+}
+
+static int PatternDatabaseGetSize(PatternDatabase *pd, size_t *db_size)
+{
+    hs_error_t err = hs_database_size(pd->hs_db, db_size);
+    if (err != HS_SUCCESS) {
+        SCLogError("failed to query database size: %s", HSErrorToStr(err));
+        return -1;
+    }
+    return 0;
+}
+
+static void SCHSCleanupOnError(PatternDatabase *pd, SCHSCompileData *cd)
+{
+    if (pd) {
+        PatternDatabaseFree(pd);
+    }
+    if (cd) {
+        CompileDataFree(cd);
+    }
+}
+
+static int CompileDataExtensionsInit(hs_expr_ext_t **ext, const SCHSPattern *p)
+{
+    if (p->flags & (MPM_PATTERN_FLAG_OFFSET | MPM_PATTERN_FLAG_DEPTH)) {
+        *ext = SCCalloc(1, sizeof(hs_expr_ext_t));
+        if ((*ext) == NULL) {
+            return -1;
+        }
+        if (p->flags & MPM_PATTERN_FLAG_OFFSET) {
+            (*ext)->flags |= HS_EXT_FLAG_MIN_OFFSET;
+            (*ext)->min_offset = p->offset + p->len;
+        }
+        if (p->flags & MPM_PATTERN_FLAG_DEPTH) {
+            (*ext)->flags |= HS_EXT_FLAG_MAX_OFFSET;
+            (*ext)->max_offset = p->offset + p->depth;
         }
     }
 
+    return 0;
+}
+
+/**
+ * \brief Initialize the pattern database - try to get existing pd
+ * from the global hash table, or load it from disk if caching is enabled.
+ *
+ * \param PatternDatabase* [in/out] Pointer to the pattern database to use.
+ * \param SCHSCompileData* [in] Pointer to the compile data.
+ * \retval 0 On success, negative value on failure.
+ */
+static int PatternDatabaseGetCached(
+        PatternDatabase **pd, SCHSCompileData *cd, const char *cache_dir_path)
+{
     /* Check global hash table to see if we've seen this pattern database
      * before, and reuse the Hyperscan database if so. */
-    PatternDatabase *pd_cached = HashTableLookup(g_db_table, pd, 1);
-
+    PatternDatabase *pd_cached = HashTableLookup(g_db_table, *pd, 1);
     if (pd_cached != NULL) {
         SCLogDebug("Reusing cached database %p with %" PRIu32
                    " patterns (ref_cnt=%" PRIu32 ")",
                    pd_cached->hs_db, pd_cached->pattern_cnt,
                    pd_cached->ref_cnt);
         pd_cached->ref_cnt++;
-        ctx->pattern_db = pd_cached;
-        SCMutexUnlock(&g_db_table_mutex);
-        PatternDatabaseFree(pd);
-        SCHSFreeCompileData(cd);
+        PatternDatabaseFree(*pd);
+        CompileDataFree(cd);
+        *pd = pd_cached;
         return 0;
+    } else if (cache_dir_path) {
+        pd_cached = *pd;
+        uint64_t db_lookup_hash = HSHashDb(pd_cached);
+        if (HSLoadCache(&pd_cached->hs_db, db_lookup_hash, cache_dir_path) == 0) {
+            pd_cached->ref_cnt = 1;
+            pd_cached->cached = true;
+            if (HSScratchAlloc(pd_cached->hs_db) != 0) {
+                goto recover;
+            }
+            if (HashTableAdd(g_db_table, pd_cached, 1) < 0) {
+                goto recover;
+            }
+            CompileDataFree(cd);
+            return 0;
+
+        recover:
+            pd_cached->ref_cnt = 0;
+            pd_cached->cached = false;
+            return -1;
+        }
     }
 
-    BUG_ON(ctx->pattern_db != NULL); /* already built? */
+    return -1; // not cached
+}
 
+static int PatternDatabaseCompile(PatternDatabase *pd, SCHSCompileData *cd)
+{
     for (uint32_t i = 0; i < pd->pattern_cnt; i++) {
         const SCHSPattern *p = pd->parray[i];
-
         cd->ids[i] = i;
         cd->flags[i] = HS_FLAG_SINGLEMATCH;
         if (p->flags & MPM_PATTERN_FLAG_NOCASE) {
             cd->flags[i] |= HS_FLAG_CASELESS;
         }
-
         cd->expressions[i] = HSRenderPattern(p->original_pat, p->len);
-
-        if (p->flags & (MPM_PATTERN_FLAG_OFFSET | MPM_PATTERN_FLAG_DEPTH)) {
-            cd->ext[i] = SCMalloc(sizeof(hs_expr_ext_t));
-            if (cd->ext[i] == NULL) {
-                SCMutexUnlock(&g_db_table_mutex);
-                goto error;
-            }
-            memset(cd->ext[i], 0, sizeof(hs_expr_ext_t));
-
-            if (p->flags & MPM_PATTERN_FLAG_OFFSET) {
-                cd->ext[i]->flags |= HS_EXT_FLAG_MIN_OFFSET;
-                cd->ext[i]->min_offset = p->offset + p->len;
-            }
-            if (p->flags & MPM_PATTERN_FLAG_DEPTH) {
-                cd->ext[i]->flags |= HS_EXT_FLAG_MAX_OFFSET;
-                cd->ext[i]->max_offset = p->offset + p->depth;
-            }
+        if (CompileDataExtensionsInit(&cd->ext[i], p) != 0) {
+            return -1;
         }
     }
 
+    hs_compile_error_t *compile_err = NULL;
+    hs_error_t err = hs_compile_ext_multi((const char *const *)cd->expressions, cd->flags, cd->ids,
+            (const hs_expr_ext_t *const *)cd->ext, cd->pattern_cnt, HS_MODE_BLOCK, NULL, &pd->hs_db,
+            &compile_err);
+    if (err != HS_SUCCESS) {
+        HSLogCompileError(compile_err);
+        return -1;
+    }
+
+    if (HSScratchAlloc(pd->hs_db) != 0) {
+        return -1;
+    }
+
+    if (HashTableAdd(g_db_table, pd, 1) < 0) {
+        return -1;
+    }
+    pd->ref_cnt = 1;
+    return 0;
+}
+
+/**
+ * \brief Process the patterns added to the mpm, and create the internal tables.
+ *
+ * \param mpm_conf Pointer to the generic MPM matcher configuration
+ * \param mpm_ctx Pointer to the mpm context.
+ */
+int SCHSPreparePatterns(MpmConfig *mpm_conf, MpmCtx *mpm_ctx)
+{
+    SCHSCtx *ctx = (SCHSCtx *)mpm_ctx->ctx;
+
+    if (HSCheckPatterns(mpm_ctx, ctx) == 0) {
+        return 0;
+    }
+
+    SCHSCompileData *cd = CompileDataAlloc(mpm_ctx->pattern_cnt);
+    PatternDatabase *pd = PatternDatabaseAlloc(mpm_ctx->pattern_cnt);
+    if (cd == NULL || pd == NULL) {
+        goto error;
+    }
+
+    HSPatternArrayInit(ctx, pd);
+    pd->no_cache = !(mpm_ctx->flags & MPMCTX_FLAGS_CACHE_TO_DISK);
+    /* Serialise whole database compilation as a relatively easy way to ensure
+     * dedupe is safe. */
+    SCMutexLock(&g_db_table_mutex);
+    if (HSGlobalPatternDatabaseInit() == -1) {
+        SCMutexUnlock(&g_db_table_mutex);
+        goto error;
+    }
+
+    const char *cache_path = pd->no_cache || !mpm_conf ? NULL : mpm_conf->cache_dir_path;
+    if (PatternDatabaseGetCached(&pd, cd, cache_path) == 0 && pd != NULL) {
+        cd = NULL;
+        ctx->pattern_db = pd;
+        if (PatternDatabaseGetSize(pd, &ctx->hs_db_size) != 0) {
+            SCMutexUnlock(&g_db_table_mutex);
+            goto error;
+        }
+
+        if (pd->ref_cnt == 1) {
+            // freshly allocated
+            mpm_ctx->memory_cnt++;
+            mpm_ctx->memory_size += ctx->hs_db_size;
+        }
+        SCMutexUnlock(&g_db_table_mutex);
+        return 0;
+    }
+
+    BUG_ON(ctx->pattern_db != NULL); /* already built? */
     BUG_ON(mpm_ctx->pattern_cnt == 0);
 
-    err = hs_compile_ext_multi((const char *const *)cd->expressions, cd->flags,
-                               cd->ids, (const hs_expr_ext_t *const *)cd->ext,
-                               cd->pattern_cnt, HS_MODE_BLOCK, NULL, &pd->hs_db,
-                               &compile_err);
-
-    if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "failed to compile hyperscan database");
-        if (compile_err) {
-            SCLogError(SC_ERR_FATAL, "compile error: %s", compile_err->message);
-        }
-        hs_free_compile_error(compile_err);
+    if (PatternDatabaseCompile(pd, cd) != 0) {
         SCMutexUnlock(&g_db_table_mutex);
         goto error;
     }
 
     ctx->pattern_db = pd;
-
-    SCMutexLock(&g_scratch_proto_mutex);
-    err = hs_alloc_scratch(pd->hs_db, &g_scratch_proto);
-    SCMutexUnlock(&g_scratch_proto_mutex);
-    if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "failed to allocate scratch");
-        SCMutexUnlock(&g_db_table_mutex);
-        goto error;
-    }
-
-    err = hs_database_size(pd->hs_db, &ctx->hs_db_size);
-    if (err != HS_SUCCESS) {
-        SCLogError(SC_ERR_FATAL, "failed to query database size");
+    if (PatternDatabaseGetSize(pd, &ctx->hs_db_size) != 0) {
         SCMutexUnlock(&g_db_table_mutex);
         goto error;
     }
@@ -721,27 +817,42 @@ int SCHSPreparePatterns(MpmCtx *mpm_ctx)
     mpm_ctx->memory_cnt++;
     mpm_ctx->memory_size += ctx->hs_db_size;
 
-    SCLogDebug("Built %" PRIu32 " patterns into a database of size %" PRIuMAX
-               " bytes", mpm_ctx->pattern_cnt, (uintmax_t)ctx->hs_db_size);
-
-    /* Cache this database globally for later. */
-    pd->ref_cnt = 1;
-    int r = HashTableAdd(g_db_table, pd, 1);
     SCMutexUnlock(&g_db_table_mutex);
-    if (r < 0)
-        goto error;
-
-    SCHSFreeCompileData(cd);
+    CompileDataFree(cd);
     return 0;
 
 error:
-    if (pd) {
-        PatternDatabaseFree(pd);
-    }
-    if (cd) {
-        SCHSFreeCompileData(cd);
-    }
+    SCHSCleanupOnError(pd, cd);
     return -1;
+}
+
+/**
+ * \brief Cache the initialized and compiled ruleset
+ */
+static int SCHSCacheRuleset(MpmConfig *mpm_conf)
+{
+    if (!mpm_conf || !mpm_conf->cache_dir_path) {
+        return -1;
+    }
+
+    SCLogDebug("Caching the loaded ruleset to %s", mpm_conf->cache_dir_path);
+    if (SCCreateDirectoryTree(mpm_conf->cache_dir_path, true) != 0) {
+        SCLogWarning("Failed to create Hyperscan cache folder, make sure "
+                     "the  parent folder is writeable "
+                     "or adjust sgh-mpm-caching-path setting (%s)",
+                mpm_conf->cache_dir_path);
+        return -1;
+    }
+    PatternDatabaseCache pd_stats = { 0 };
+    struct HsIteratorData iter_data = { .pd_stats = &pd_stats,
+        .cache_path = mpm_conf->cache_dir_path };
+    SCMutexLock(&g_db_table_mutex);
+    HashTableIterate(g_db_table, HSSaveCacheIterator, &iter_data);
+    SCMutexUnlock(&g_db_table_mutex);
+    SCLogNotice("Rule group caching - loaded: %u newly cached: %u total cacheable: %u",
+            pd_stats.hs_dbs_cache_loaded_cnt, pd_stats.hs_dbs_cache_saved_cnt,
+            pd_stats.hs_cacheable_dbs_cnt);
+    return 0;
 }
 
 /**
@@ -754,13 +865,12 @@ void SCHSInitThreadCtx(MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx)
 {
     memset(mpm_thread_ctx, 0, sizeof(MpmThreadCtx));
 
-    SCHSThreadCtx *ctx = SCMalloc(sizeof(SCHSThreadCtx));
+    SCHSThreadCtx *ctx = SCCalloc(1, sizeof(SCHSThreadCtx));
     if (ctx == NULL) {
         exit(EXIT_FAILURE);
     }
     mpm_thread_ctx->ctx = ctx;
 
-    memset(ctx, 0, sizeof(SCHSThreadCtx));
     mpm_thread_ctx->memory_cnt++;
     mpm_thread_ctx->memory_size += sizeof(SCHSThreadCtx);
 
@@ -783,12 +893,12 @@ void SCHSInitThreadCtx(MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx)
     SCMutexUnlock(&g_scratch_proto_mutex);
 
     if (err != HS_SUCCESS) {
-        FatalError(SC_ERR_FATAL, "Unable to clone scratch prototype");
+        FatalError("Unable to clone scratch prototype");
     }
 
     err = hs_scratch_size(ctx->scratch, &ctx->scratch_size);
     if (err != HS_SUCCESS) {
-        FatalError(SC_ERR_FATAL, "Unable to query scratch size");
+        FatalError("Unable to query scratch size");
     }
 
     mpm_thread_ctx->memory_cnt++;
@@ -805,22 +915,20 @@ void SCHSInitCtx(MpmCtx *mpm_ctx)
     if (mpm_ctx->ctx != NULL)
         return;
 
-    mpm_ctx->ctx = SCMalloc(sizeof(SCHSCtx));
+    mpm_ctx->ctx = SCCalloc(1, sizeof(SCHSCtx));
     if (mpm_ctx->ctx == NULL) {
         exit(EXIT_FAILURE);
     }
-    memset(mpm_ctx->ctx, 0, sizeof(SCHSCtx));
 
     mpm_ctx->memory_cnt++;
     mpm_ctx->memory_size += sizeof(SCHSCtx);
 
     /* initialize the hash we use to speed up pattern insertions */
     SCHSCtx *ctx = (SCHSCtx *)mpm_ctx->ctx;
-    ctx->init_hash = SCMalloc(sizeof(SCHSPattern *) * INIT_HASH_SIZE);
+    ctx->init_hash = SCCalloc(INIT_HASH_SIZE, sizeof(SCHSPattern *));
     if (ctx->init_hash == NULL) {
         exit(EXIT_FAILURE);
     }
-    memset(ctx->init_hash, 0, sizeof(SCHSPattern *) * INIT_HASH_SIZE);
 }
 
 /**
@@ -882,6 +990,7 @@ void SCHSDestroyCtx(MpmCtx *mpm_ctx)
     SCMutexUnlock(&g_db_table_mutex);
 
     SCFree(mpm_ctx->ctx);
+    mpm_ctx->ctx = NULL;
     mpm_ctx->memory_cnt--;
     mpm_ctx->memory_size -= sizeof(SCHSCtx);
 }
@@ -940,8 +1049,8 @@ uint32_t SCHSSearch(const MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx,
 
     /* scratch should have been cloned from g_scratch_proto at thread init. */
     hs_scratch_t *scratch = hs_thread_ctx->scratch;
-    BUG_ON(pd->hs_db == NULL);
-    BUG_ON(scratch == NULL);
+    DEBUG_VALIDATE_BUG_ON(pd->hs_db == NULL);
+    DEBUG_VALIDATE_BUG_ON(scratch == NULL);
 
     hs_error_t err = hs_scan(pd->hs_db, (const char *)buf, buflen, 0, scratch,
                              SCHSMatchEvent, &cctx);
@@ -949,7 +1058,7 @@ uint32_t SCHSSearch(const MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx,
         /* An error value (other than HS_SCAN_TERMINATED) from hs_scan()
          * indicates that it was passed an invalid database or scratch region,
          * which is not something we can recover from at scan time. */
-        SCLogError(SC_ERR_FATAL, "Hyperscan returned error %d", err);
+        SCLogError("Hyperscan returned error %d", err);
         exit(EXIT_FAILURE);
     } else {
         ret = cctx.match_count;
@@ -975,9 +1084,8 @@ uint32_t SCHSSearch(const MpmCtx *mpm_ctx, MpmThreadCtx *mpm_thread_ctx,
  * \retval  0 On success.
  * \retval -1 On failure.
  */
-int SCHSAddPatternCI(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                     uint16_t offset, uint16_t depth, uint32_t pid,
-                     SigIntId sid, uint8_t flags)
+int SCHSAddPatternCI(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags)
 {
     flags |= MPM_PATTERN_FLAG_NOCASE;
     return SCHSAddPattern(mpm_ctx, pat, patlen, offset, depth, pid, sid, flags);
@@ -1009,7 +1117,6 @@ int SCHSAddPatternCS(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
 
 void SCHSPrintSearchStats(MpmThreadCtx *mpm_thread_ctx)
 {
-    return;
 }
 
 void SCHSPrintInfo(MpmCtx *mpm_ctx)
@@ -1042,6 +1149,25 @@ void SCHSPrintInfo(MpmCtx *mpm_ctx)
     printf("\n");
 }
 
+static MpmConfig *SCHSConfigInit(void)
+{
+    MpmConfig *c = SCCalloc(1, sizeof(MpmConfig));
+    return c;
+}
+
+static void SCHSConfigDeinit(MpmConfig **c)
+{
+    if (c != NULL) {
+        SCFree(*c);
+        (*c) = NULL;
+    }
+}
+
+static void SCHSConfigCacheDirSet(MpmConfig *c, const char *dir_path)
+{
+    c->cache_dir_path = dir_path;
+}
+
 /************************** Mpm Registration ***************************/
 
 /**
@@ -1054,14 +1180,20 @@ void MpmHSRegister(void)
     mpm_table[MPM_HS].InitThreadCtx = SCHSInitThreadCtx;
     mpm_table[MPM_HS].DestroyCtx = SCHSDestroyCtx;
     mpm_table[MPM_HS].DestroyThreadCtx = SCHSDestroyThreadCtx;
+    mpm_table[MPM_HS].ConfigInit = SCHSConfigInit;
+    mpm_table[MPM_HS].ConfigDeinit = SCHSConfigDeinit;
+    mpm_table[MPM_HS].ConfigCacheDirSet = SCHSConfigCacheDirSet;
     mpm_table[MPM_HS].AddPattern = SCHSAddPatternCS;
     mpm_table[MPM_HS].AddPatternNocase = SCHSAddPatternCI;
     mpm_table[MPM_HS].Prepare = SCHSPreparePatterns;
+    mpm_table[MPM_HS].CacheRuleset = SCHSCacheRuleset;
     mpm_table[MPM_HS].Search = SCHSSearch;
     mpm_table[MPM_HS].PrintCtx = SCHSPrintInfo;
     mpm_table[MPM_HS].PrintThreadCtx = SCHSPrintSearchStats;
+#ifdef UNITTESTS
     mpm_table[MPM_HS].RegisterUnittests = SCHSRegisterTests;
-
+#endif
+    mpm_table[MPM_HS].feature_flags = MPM_FEATURE_FLAG_DEPTH | MPM_FEATURE_FLAG_OFFSET;
     /* Set Hyperscan memory allocators */
     SCHSSetAllocators();
 }
@@ -1075,7 +1207,7 @@ void MpmHSGlobalCleanup(void)
 {
     SCMutexLock(&g_scratch_proto_mutex);
     if (g_scratch_proto) {
-        SCLogPerf("Cleaning up Hyperscan global scratch");
+        SCLogDebug("Cleaning up Hyperscan global scratch");
         hs_free_scratch(g_scratch_proto);
         g_scratch_proto = NULL;
     }
@@ -1083,7 +1215,7 @@ void MpmHSGlobalCleanup(void)
 
     SCMutexLock(&g_db_table_mutex);
     if (g_db_table != NULL) {
-        SCLogPerf("Clearing Hyperscan database cache");
+        SCLogDebug("Clearing Hyperscan database cache");
         HashTableFree(g_db_table);
         g_db_table = NULL;
     }
@@ -1093,6 +1225,7 @@ void MpmHSGlobalCleanup(void)
 /*************************************Unittests********************************/
 
 #ifdef UNITTESTS
+#include "detect-engine-alert.h"
 
 static int SCHSTest01(void)
 {
@@ -1109,7 +1242,7 @@ static int SCHSTest01(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abcd", 4, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghjiklmnopqrstuvwxyz";
@@ -1143,7 +1276,7 @@ static int SCHSTest02(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abce", 4, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghjiklmnopqrstuvwxyz";
@@ -1180,7 +1313,7 @@ static int SCHSTest03(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"fghj", 4, 0, 0, 2, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghjiklmnopqrstuvwxyz";
@@ -1214,7 +1347,7 @@ static int SCHSTest04(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"fghjxyz", 7, 0, 0, 2, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghjiklmnopqrstuvwxyz";
@@ -1248,7 +1381,7 @@ static int SCHSTest05(void)
     MpmAddPatternCI(&mpm_ctx, (uint8_t *)"fghJikl", 7, 0, 0, 2, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghjiklmnopqrstuvwxyz";
@@ -1280,7 +1413,7 @@ static int SCHSTest06(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abcd", 4, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcd";
@@ -1324,7 +1457,7 @@ static int SCHSTest07(void)
                     0, 0, 5, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -1357,7 +1490,7 @@ static int SCHSTest08(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abcd", 4, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     uint32_t cnt =
@@ -1389,7 +1522,7 @@ static int SCHSTest09(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"ab", 2, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     uint32_t cnt =
@@ -1421,7 +1554,7 @@ static int SCHSTest10(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abcdefgh", 8, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "01234567890123456789012345678901234567890123456789"
@@ -1464,7 +1597,7 @@ static int SCHSTest11(void)
         goto end;
     PmqSetup(&pmq);
 
-    if (SCHSPreparePatterns(&mpm_ctx) == -1)
+    if (SCHSPreparePatterns(NULL, &mpm_ctx) == -1)
         goto end;
 
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
@@ -1508,7 +1641,7 @@ static int SCHSTest12(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"vwxyz", 5, 0, 0, 1, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyz";
@@ -1538,11 +1671,11 @@ static int SCHSTest13(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcdefghijklmnopqrstuvwxyzABCD";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcdefghijklmnopqrstuvwxyzABCD";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyzABCD";
@@ -1572,11 +1705,11 @@ static int SCHSTest14(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcdefghijklmnopqrstuvwxyzABCDE";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcdefghijklmnopqrstuvwxyzABCDE";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyzABCDE";
@@ -1606,11 +1739,11 @@ static int SCHSTest15(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcdefghijklmnopqrstuvwxyzABCDEF";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcdefghijklmnopqrstuvwxyzABCDEF";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyzABCDEF";
@@ -1640,11 +1773,11 @@ static int SCHSTest16(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcdefghijklmnopqrstuvwxyzABC";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcdefghijklmnopqrstuvwxyzABC";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyzABC";
@@ -1674,11 +1807,11 @@ static int SCHSTest17(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcdefghijklmnopqrstuvwxyzAB";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcdefghijklmnopqrstuvwxyzAB";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyzAB";
@@ -1708,16 +1841,16 @@ static int SCHSTest18(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 match */
-    const char *pat = "abcde"
-                "fghij"
-                "klmno"
-                "pqrst"
-                "uvwxy"
-                "z";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "abcde"
+                       "fghij"
+                       "klmno"
+                       "pqrst"
+                       "uvwxy"
+                       "z";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcde"
@@ -1752,11 +1885,11 @@ static int SCHSTest19(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 */
-    const char *pat = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -1786,17 +1919,17 @@ static int SCHSTest20(void)
     MpmInitCtx(&mpm_ctx, MPM_HS);
 
     /* 1 */
-    const char *pat = "AAAAA"
-                "AAAAA"
-                "AAAAA"
-                "AAAAA"
-                "AAAAA"
-                "AAAAA"
-                "AA";
-    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, strlen(pat), 0, 0, 0, 0, 0);
+    const char pat[] = "AAAAA"
+                       "AAAAA"
+                       "AAAAA"
+                       "AAAAA"
+                       "AAAAA"
+                       "AAAAA"
+                       "AA";
+    MpmAddPatternCS(&mpm_ctx, (uint8_t *)pat, sizeof(pat) - 1, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "AAAAA"
@@ -1835,7 +1968,7 @@ static int SCHSTest21(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"AA", 2, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     uint32_t cnt =
@@ -1869,7 +2002,7 @@ static int SCHSTest22(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"abcde", 5, 0, 0, 1, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "abcdefghijklmnopqrstuvwxyz";
@@ -1902,7 +2035,7 @@ static int SCHSTest23(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"AA", 2, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     uint32_t cnt =
@@ -1934,7 +2067,7 @@ static int SCHSTest24(void)
     MpmAddPatternCI(&mpm_ctx, (uint8_t *)"AA", 2, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     uint32_t cnt =
@@ -1967,7 +2100,7 @@ static int SCHSTest25(void)
     MpmAddPatternCI(&mpm_ctx, (uint8_t *)"fghiJkl", 7, 0, 0, 2, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -2000,7 +2133,7 @@ static int SCHSTest26(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"Works", 5, 0, 0, 1, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "works";
@@ -2033,7 +2166,7 @@ static int SCHSTest27(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"ONE", 3, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "tone";
@@ -2066,7 +2199,7 @@ static int SCHSTest28(void)
     MpmAddPatternCS(&mpm_ctx, (uint8_t *)"one", 3, 0, 0, 0, 0, 0);
     PmqSetup(&pmq);
 
-    SCHSPreparePatterns(&mpm_ctx);
+    SCHSPreparePatterns(NULL, &mpm_ctx);
     SCHSInitThreadCtx(&mpm_ctx, &mpm_thread_ctx);
 
     const char *buf = "tONE";
@@ -2086,8 +2219,8 @@ static int SCHSTest28(void)
 
 static int SCHSTest29(void)
 {
-    uint8_t *buf = (uint8_t *)"onetwothreefourfivesixseveneightnine";
-    uint16_t buflen = strlen((char *)buf);
+    uint8_t buf[] = "onetwothreefourfivesixseveneightnine";
+    uint16_t buflen = sizeof(buf) - 1;
     Packet *p = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -2142,11 +2275,8 @@ end:
     return result;
 }
 
-#endif /* UNITTESTS */
-
-void SCHSRegisterTests(void)
+static void SCHSRegisterTests(void)
 {
-#ifdef UNITTESTS
     UtRegisterTest("SCHSTest01", SCHSTest01);
     UtRegisterTest("SCHSTest02", SCHSTest02);
     UtRegisterTest("SCHSTest03", SCHSTest03);
@@ -2176,9 +2306,6 @@ void SCHSRegisterTests(void)
     UtRegisterTest("SCHSTest27", SCHSTest27);
     UtRegisterTest("SCHSTest28", SCHSTest28);
     UtRegisterTest("SCHSTest29", SCHSTest29);
-#endif
-
-    return;
 }
-
+#endif /* UNITTESTS */
 #endif /* BUILD_HYPERSCAN */

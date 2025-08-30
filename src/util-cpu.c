@@ -62,8 +62,9 @@ uint16_t UtilCpuGetNumProcessorsConfigured(void)
 	long nprocs = -1;
     nprocs = sysconf(_SC_NPROCESSORS_CONF);
     if (nprocs < 1) {
-        SCLogError(SC_ERR_SYSCALL, "Couldn't retrieve the number of cpus "
-                   "configured (%s)", strerror(errno));
+        SCLogError("Couldn't retrieve the number of cpus "
+                   "configured (%s)",
+                strerror(errno));
         return 0;
     }
 
@@ -80,19 +81,20 @@ uint16_t UtilCpuGetNumProcessorsConfigured(void)
     const char* envvar = getenv("NUMBER_OF_PROCESSORS");
     if (envvar != NULL) {
         if (StringParseInt64(&nprocs, 10, 0, envvar) < 0) {
-            SCLogWarning(SC_ERR_INVALID_VALUE, "Invalid value for number of "
-                         "processors: %s", envvar);
+            SCLogWarning("Invalid value for number of "
+                         "processors: %s",
+                    envvar);
             return 0;
         }
     }
     if (nprocs < 1) {
-        SCLogError(SC_ERR_SYSCALL, "Couldn't retrieve the number of cpus "
+        SCLogError("Couldn't retrieve the number of cpus "
                    "configured from the NUMBER_OF_PROCESSORS environment variable");
         return 0;
     }
     return (uint16_t)nprocs;
 #else
-    SCLogError(SC_ERR_SYSCONF, "Couldn't retrieve the number of cpus "
+    SCLogError("Couldn't retrieve the number of cpus "
                "configured, sysconf macro unavailable");
     return 0;
 #endif
@@ -109,8 +111,9 @@ uint16_t UtilCpuGetNumProcessorsOnline(void)
     long nprocs = -1;
     nprocs = sysconf(_SC_NPROCESSORS_ONLN);
     if (nprocs < 1) {
-        SCLogError(SC_ERR_SYSCALL, "Couldn't retrieve the number of cpus "
-                   "online (%s)", strerror(errno));
+        SCLogError("Couldn't retrieve the number of cpus "
+                   "online (%s)",
+                strerror(errno));
         return 0;
     }
 
@@ -121,44 +124,12 @@ uint16_t UtilCpuGetNumProcessorsOnline(void)
         return UINT16_MAX;
     }
 
-    return nprocs;
+    return (uint16_t)nprocs;
 #elif OS_WIN32
 	return UtilCpuGetNumProcessorsConfigured();
 #else
-    SCLogError(SC_ERR_SYSCONF, "Couldn't retrieve the number of cpus online, "
+    SCLogError("Couldn't retrieve the number of cpus online, "
                "synconf macro unavailable");
-    return 0;
-#endif
-}
-
-/**
- * \brief Get the maximum number of cpus allowed in the system
- *        This syscall is present on Solaris, but it's not on linux
- *        or macosx. Maybe you should look at UtilCpuGetNumProcessorsConfigured()
- * \retval 0 if the syscall is not available or we have an error;
- *           otherwise it will return the number of cpus allowed
- */
-uint16_t UtilCpuGetNumProcessorsMax(void)
-{
-#ifdef SYSCONF_NPROCESSORS_MAX_COMPAT
-    long nprocs = -1;
-    nprocs = sysconf(_SC_NPROCESSORS_MAX);
-    if (nprocs < 1) {
-        SCLogError(SC_ERR_SYSCALL, "Couldn't retrieve the maximum number of cpus "
-                   "allowed by the system (%s)", strerror(errno));
-        return 0;
-    }
-
-    if (nprocs > UINT16_MAX) {
-        SCLogDebug("It seems that the system support more that %"PRIu16" CPUs. You "
-                   "can modify util-cpu.{c,h} to use uint32_t to support it", UINT16_MAX);
-        return UINT16_MAX;
-    }
-
-    return (uint16_t)nprocs;
-#else
-    SCLogError(SC_ERR_SYSCONF, "Couldn't retrieve the maximum number of cpus allowed by "
-               "the system, synconf macro unavailable");
     return 0;
 #endif
 }
@@ -177,14 +148,14 @@ void UtilCpuPrintSummary(void)
     if (cpus_online > 0)
         SCLogInfo("CPUs/cores online: %"PRIu16, cpus_online);
     if (cpus_online == 0 && cpus_conf == 0)
-        SCLogInfo("Couldn't retireve any information of CPU's, please, send your operating "
+        SCLogInfo("Couldn't retrieve any information of CPU's, please, send your operating "
                   "system info and check util-cpu.{c,h}");
 }
 
 /**
  * Get the current number of ticks from the CPU.
  *
- * \todo We'll have to deal with removig ticks from the extra cpuids inbetween
+ * \todo We'll have to deal with removing ticks from the extra cpuids in between
  *       2 calls.
  */
 uint64_t UtilCpuGetTicks(void)

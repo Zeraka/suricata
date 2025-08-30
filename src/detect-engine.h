@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,56 +21,65 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_ENGINE_H__
-#define __DETECT_ENGINE_H__
+#ifndef SURICATA_DETECT_ENGINE_H
+#define SURICATA_DETECT_ENGINE_H
 
 #include "detect.h"
-#include "tm-threads.h"
-#include "flow-private.h"
+#include "suricata.h"
 
-void InspectionBufferInit(InspectionBuffer *buffer, uint32_t initial_size);
-void InspectionBufferSetup(InspectionBuffer *buffer, const uint8_t *data, const uint32_t data_len);
-void InspectionBufferFree(InspectionBuffer *buffer);
-void InspectionBufferCheckAndExpand(InspectionBuffer *buffer, uint32_t min_size);
-void InspectionBufferCopy(InspectionBuffer *buffer, uint8_t *buf, uint32_t buf_len);
-void InspectionBufferApplyTransforms(InspectionBuffer *buffer,
-        const DetectEngineTransforms *transforms);
-bool DetectBufferTypeValidateTransform(DetectEngineCtx *de_ctx, int sm_list,
-        const uint8_t *content, uint16_t content_len, const char **namestr);
-void InspectionBufferClean(DetectEngineThreadCtx *det_ctx);
-InspectionBuffer *InspectionBufferGet(DetectEngineThreadCtx *det_ctx, const int list_id);
-InspectionBuffer *InspectionBufferMultipleForListGet(InspectionBufferMultipleForList *fb, uint32_t local_id);
-InspectionBufferMultipleForList *InspectionBufferGetMulti(DetectEngineThreadCtx *det_ctx, const int list_id);
+const char *DetectTableToString(enum DetectTable table);
+
+/* start up registry funcs */
 
 int DetectBufferTypeRegister(const char *name);
 int DetectBufferTypeGetByName(const char *name);
 void DetectBufferTypeSupportsMpm(const char *name);
 void DetectBufferTypeSupportsPacket(const char *name);
+void DetectBufferTypeSupportsFrames(const char *name);
 void DetectBufferTypeSupportsTransformations(const char *name);
+void DetectBufferTypeSupportsMultiInstance(const char *name);
 int DetectBufferTypeMaxId(void);
 void DetectBufferTypeCloseRegistration(void);
 void DetectBufferTypeSetDescriptionByName(const char *name, const char *desc);
 const char *DetectBufferTypeGetDescriptionByName(const char *name);
 void DetectBufferTypeRegisterSetupCallback(const char *name,
         void (*Callback)(const DetectEngineCtx *, Signature *));
-void DetectBufferTypeRegisterValidateCallback(const char *name,
-        bool (*ValidateCallback)(const Signature *, const char **sigerror));
+void DetectBufferTypeRegisterValidateCallback(
+        const char *name, bool (*ValidateCallback)(const Signature *, const char **sigerror,
+                                  const DetectBufferType *));
 
-int DetectBufferTypeGetByIdTransforms(DetectEngineCtx *de_ctx, const int id,
-        TransformData *transforms, int transform_cnt);
-const char *DetectBufferTypeGetNameById(const DetectEngineCtx *de_ctx, const int id);
-bool DetectBufferTypeSupportsMpmGetById(const DetectEngineCtx *de_ctx, const int id);
-bool DetectBufferTypeSupportsPacketGetById(const DetectEngineCtx *de_ctx, const int id);
-const char *DetectBufferTypeGetDescriptionById(const DetectEngineCtx *de_ctx, const int id);
-void DetectBufferRunSetupCallback(const DetectEngineCtx *de_ctx, const int id, Signature *s);
-bool DetectBufferRunValidateCallback(const DetectEngineCtx *de_ctx, const int id, const Signature *s, const char **sigerror);
+/* detect engine related buffer funcs */
+
+int DetectEngineBufferTypeRegisterWithFrameEngines(DetectEngineCtx *de_ctx, const char *name,
+        const int direction, const AppProto alproto, const uint8_t frame_type);
+int DetectEngineBufferTypeRegister(DetectEngineCtx *de_ctx, const char *name);
+const char *DetectEngineBufferTypeGetNameById(const DetectEngineCtx *de_ctx, const int id);
+const DetectBufferType *DetectEngineBufferTypeGetById(const DetectEngineCtx *de_ctx, const int id);
+bool DetectEngineBufferTypeSupportsMpmGetById(const DetectEngineCtx *de_ctx, const int id);
+bool DetectEngineBufferTypeSupportsPacketGetById(const DetectEngineCtx *de_ctx, const int id);
+bool DetectEngineBufferTypeSupportsMultiInstanceGetById(
+        const DetectEngineCtx *de_ctx, const int id);
+bool DetectEngineBufferTypeSupportsFramesGetById(const DetectEngineCtx *de_ctx, const int id);
+const char *DetectEngineBufferTypeGetDescriptionById(const DetectEngineCtx *de_ctx, const int id);
+int DetectEngineBufferTypeGetByIdTransforms(
+        DetectEngineCtx *de_ctx, const int id, TransformData *transforms, int transform_cnt);
+void DetectEngineBufferRunSetupCallback(const DetectEngineCtx *de_ctx, const int id, Signature *s);
+bool DetectEngineBufferRunValidateCallback(
+        const DetectEngineCtx *de_ctx, const int id, const Signature *s, const char **sigerror);
+bool DetectEngineBufferTypeValidateTransform(DetectEngineCtx *de_ctx, int sm_list,
+        const uint8_t *content, uint16_t content_len, const char **namestr);
+void DetectEngineBufferTypeSupportsFrames(DetectEngineCtx *de_ctx, const char *name);
+void DetectEngineBufferTypeSupportsPacket(DetectEngineCtx *de_ctx, const char *name);
+void DetectEngineBufferTypeSupportsMpm(DetectEngineCtx *de_ctx, const char *name);
+void DetectEngineBufferTypeSupportsTransformations(DetectEngineCtx *de_ctx, const char *name);
 
 /* prototypes */
-DetectEngineCtx *DetectEngineCtxInitWithPrefix(const char *prefix);
+DetectEngineCtx *DetectEngineCtxInitWithPrefix(const char *prefix, uint32_t tenant_id);
 DetectEngineCtx *DetectEngineCtxInit(void);
 DetectEngineCtx *DetectEngineCtxInitStubForDD(void);
 DetectEngineCtx *DetectEngineCtxInitStubForMT(void);
 void DetectEngineCtxFree(DetectEngineCtx *);
+int DetectEngineThreadCtxGetJsonContext(DetectEngineThreadCtx *det_ctx);
 
 int DetectRegisterThreadCtxGlobalFuncs(const char *name,
         void *(*InitFunc)(void *), void *data, void (*FreeFunc)(void *));
@@ -78,7 +87,8 @@ void *DetectThreadCtxGetGlobalKeywordThreadCtx(DetectEngineThreadCtx *det_ctx, i
 
 TmEcode DetectEngineThreadCtxInit(ThreadVars *, void *, void **);
 TmEcode DetectEngineThreadCtxDeinit(ThreadVars *, void *);
-//inline uint32_t DetectEngineGetMaxSigId(DetectEngineCtx *);
+bool DetectEngineMpmCachingEnabled(void);
+const char *DetectEngineMpmCachingGetPath(void);
 /* faster as a macro than a inline function on my box -- VJ */
 #define DetectEngineGetMaxSigId(de_ctx) ((de_ctx)->signum)
 void DetectEngineResetMaxSigId(DetectEngineCtx *);
@@ -89,16 +99,17 @@ uint32_t DetectEngineGetVersion(void);
 void DetectEngineBumpVersion(void);
 int DetectEngineAddToMaster(DetectEngineCtx *de_ctx);
 DetectEngineCtx *DetectEngineGetCurrent(void);
-DetectEngineCtx *DetectEngineGetByTenantId(int tenant_id);
+DetectEngineCtx *DetectEngineGetByTenantId(uint32_t tenant_id);
 void DetectEnginePruneFreeList(void);
 int DetectEngineMoveToFreeList(DetectEngineCtx *de_ctx);
+void DetectEngineClearMaster(void);
 DetectEngineCtx *DetectEngineReference(DetectEngineCtx *);
 void DetectEngineDeReference(DetectEngineCtx **de_ctx);
 int DetectEngineReload(const SCInstance *suri);
 int DetectEngineEnabled(void);
 int DetectEngineMTApply(void);
-int DetectEngineMultiTenantEnabled(void);
-int DetectEngineMultiTenantSetup(void);
+bool DetectEngineMultiTenantEnabled(void);
+int DetectEngineMultiTenantSetup(const bool unix_socket);
 
 int DetectEngineReloadStart(void);
 int DetectEngineReloadIsStart(void);
@@ -107,24 +118,35 @@ int DetectEngineReloadIsIdle(void);
 
 int DetectEngineLoadTenantBlocking(uint32_t tenant_id, const char *yaml);
 int DetectEngineReloadTenantBlocking(uint32_t tenant_id, const char *yaml, int reload_cnt);
+int DetectEngineReloadTenantsBlocking(const int reload_cnt);
 
-int DetectEngineTentantRegisterLivedev(uint32_t tenant_id, int device_id);
-int DetectEngineTentantRegisterVlanId(uint32_t tenant_id, uint16_t vlan_id);
-int DetectEngineTentantUnregisterVlanId(uint32_t tenant_id, uint16_t vlan_id);
-int DetectEngineTentantRegisterPcapFile(uint32_t tenant_id);
-int DetectEngineTentantUnregisterPcapFile(uint32_t tenant_id);
+int DetectEngineTenantRegisterLivedev(uint32_t tenant_id, int device_id);
+int DetectEngineTenantRegisterVlanId(uint32_t tenant_id, uint16_t vlan_id);
+int DetectEngineTenantUnregisterVlanId(uint32_t tenant_id, uint16_t vlan_id);
+int DetectEngineTenantRegisterPcapFile(uint32_t tenant_id);
+int DetectEngineTenantUnregisterPcapFile(uint32_t tenant_id);
 
-int DetectEngineInspectGenericList(ThreadVars *, const DetectEngineCtx *,
-                                   DetectEngineThreadCtx *,
-                                   const Signature *, const SigMatchData *,
-                                   Flow *, const uint8_t, void *, void *,
-                                   uint64_t);
+uint8_t DetectEngineInspectGenericList(DetectEngineCtx *, DetectEngineThreadCtx *,
+        const struct DetectEngineAppInspectionEngine_ *, const Signature *, Flow *, uint8_t, void *,
+        void *, uint64_t);
 
-int DetectEngineInspectBufferGeneric(
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const DetectEngineAppInspectionEngine *engine,
-        const Signature *s,
-        Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
+uint8_t DetectEngineInspectBufferGeneric(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const DetectEngineAppInspectionEngine *engine, const Signature *s, Flow *f, uint8_t flags,
+        void *alstate, void *txv, uint64_t tx_id);
+
+uint8_t DetectEngineInspectBufferSingle(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
+        const DetectEngineAppInspectionEngine *engine, const Signature *s, Flow *f, uint8_t flags,
+        void *alstate, void *txv, uint64_t tx_id);
+
+InspectionBuffer *DetectGetSingleData(struct DetectEngineThreadCtx_ *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *f, const uint8_t flow_flags, void *txv,
+        const int list_id, InspectionSingleBufferGetDataPtr GetBuf);
+InspectionBuffer *DetectGetMultiData(struct DetectEngineThreadCtx_ *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *f, const uint8_t flow_flags, void *txv,
+        const int list_id, uint32_t index, InspectionMultiBufferGetDataPtr GetBuf);
+uint8_t DetectEngineInspectMultiBufferGeneric(DetectEngineCtx *de_ctx,
+        DetectEngineThreadCtx *det_ctx, const DetectEngineAppInspectionEngine *engine,
+        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
 
 int DetectEngineInspectPktBufferGeneric(
         DetectEngineThreadCtx *det_ctx,
@@ -141,17 +163,21 @@ int DetectEngineInspectPktBufferGeneric(
  * \param progress Minimal progress value for inspect engine to run
  * \param Callback The engine callback.
  */
-void DetectAppLayerInspectEngineRegister(const char *name,
-        AppProto alproto, uint32_t dir,
-        int progress, InspectEngineFuncPtr Callback);
-void DetectAppLayerInspectEngineRegister2(const char *name,
-        AppProto alproto, uint32_t dir, int progress,
-        InspectEngineFuncPtr2 Callback2,
-        InspectionBufferGetDataPtr GetData);
+void DetectAppLayerInspectEngineRegister(const char *name, AppProto alproto, uint32_t dir,
+        int progress, InspectEngineFuncPtr Callback2, InspectionBufferGetDataPtr GetData);
+
+void DetectAppLayerInspectEngineRegisterSingle(const char *name, AppProto alproto, uint32_t dir,
+        int progress, InspectEngineFuncPtr Callback2, InspectionSingleBufferGetDataPtr GetData);
+
+void DetectAppLayerMultiRegister(const char *name, AppProto alproto, uint32_t dir, int progress,
+        InspectionMultiBufferGetDataPtr GetData, int priority);
 
 void DetectPktInspectEngineRegister(const char *name,
         InspectionBufferGetPktDataPtr GetPktData,
         InspectionBufferPktInspectFunc Callback);
+
+void DetectEngineFrameInspectEngineRegister(DetectEngineCtx *de_ctx, const char *name, int dir,
+        InspectionBufferFrameInspectFunc Callback, AppProto alproto, uint8_t type);
 
 int DetectEngineAppInspectionEngine2Signature(DetectEngineCtx *de_ctx, Signature *s);
 void DetectEngineAppInspectionEngineSignatureFree(DetectEngineCtx *, Signature *s);
@@ -166,7 +192,22 @@ void DetectEngineSetParseMetadata(void);
 void DetectEngineUnsetParseMetadata(void);
 int DetectEngineMustParseMetadata(void);
 
-int WARN_UNUSED DetectBufferSetActiveList(Signature *s, const int list);
-int DetectBufferGetActiveList(DetectEngineCtx *de_ctx, Signature *s);
+bool DetectBufferIsPresent(const Signature *s, const uint32_t buf_id);
 
-#endif /* __DETECT_ENGINE_H__ */
+DetectEngineThreadCtx *DetectEngineThreadCtxInitForReload(
+        ThreadVars *tv, DetectEngineCtx *new_de_ctx, int mt);
+
+void DetectRunStoreStateTx(const SigGroupHead *sgh, Flow *f, void *tx, uint64_t tx_id,
+        const Signature *s, uint32_t inspect_flags, uint8_t flow_flags,
+        const uint16_t file_no_match);
+
+void DetectEngineStateResetTxs(Flow *f);
+
+bool DetectMd5ValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *map);
+
+void DeStateRegisterTests(void);
+
+/* packet injection */
+void InjectPacketsForFlush(ThreadVars **detect_tvs, int no_of_detect_tvs);
+#endif /* SURICATA_DETECT_ENGINE_H */

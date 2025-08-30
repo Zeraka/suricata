@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,21 +23,45 @@
  * Common includes, etc.
  */
 
-#ifndef __SURICATA_COMMON_H__
-#define __SURICATA_COMMON_H__
+#ifndef SURICATA_SURICATA_COMMON_H
+#define SURICATA_SURICATA_COMMON_H
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 #ifdef DEBUG
 #define DBG_PERF
 #endif
 
-#define TRUE   1
-#define FALSE  0
-
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
 #define __USE_GNU
 
-#if HAVE_CONFIG_H
-#include <autoconf.h>
+#if defined(__clang_analyzer__)
+/* clang analyzer acts as DEBUG_VALIDATION in some places, so
+ * force this so #ifdef DEBUG_VALIDATION code gets included */
+#define DEBUG_VALIDATION 1
+#endif
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SC_ADDRESS_SANITIZER 1
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+#define SC_ADDRESS_SANITIZER 1
+#endif
+
+#include "autoconf.h"
+
+#ifndef REVISION
+#define REVISION "undefined"
+#endif
+#ifndef __SCFILENAME__
+#define __SCFILENAME__ "undefined"
 #endif
 
 #ifndef CLS
@@ -126,19 +150,19 @@
 #endif
 
 #ifdef HAVE_TYPE_U_LONG_NOT_DEFINED
-typedef unsigned long int u_long
+typedef unsigned long int u_long;
 #endif
 #ifdef HAVE_TYPE_U_INT_NOT_DEFINED
-typedef unsigned int u_int
+typedef unsigned int u_int;
 #endif
 #ifdef HAVE_TYPE_U_SHORT_NOT_DEFINED
-typedef unsigned short u_short
+typedef unsigned short u_short;
 #endif
 #ifdef HAVE_TYPE_U_CHAR_NOT_DEFINED
-typedef unsigned char u_char
+typedef unsigned char u_char;
 #endif
 
-#include <pcre.h>
+#include <pcre2.h>
 
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
@@ -177,6 +201,10 @@ typedef unsigned char u_char
 #include <sys/stat.h>
 #endif
 
+#if HAVE_SYS_IOCTL_H
+#include <sys/ioctl.h>
+#endif
+
 #if HAVE_SYS_MMAN_H
 #include <sys/mman.h>
 #endif
@@ -195,6 +223,10 @@ typedef unsigned char u_char
 
 #if HAVE_NETDB_H
 #include <netdb.h>
+#endif
+
+#if HAVE_MALLOC_H
+#include <malloc.h>
 #endif
 
 #if __CYGWIN__
@@ -257,14 +289,17 @@ typedef unsigned char u_char
 #ifndef JSON_ESCAPE_SLASH
 #define JSON_ESCAPE_SLASH 0
 #endif
-/* Appears not all current distros have jansson that defines this. */
-#ifndef json_boolean
-#define json_boolean(val)      SCJsonBool((val))
-//#define json_boolean(val)      ((val) ? json_true() : json_false())
-#endif
 
 #ifdef HAVE_MAGIC
 #include <magic.h>
+#endif
+
+#ifdef HAVE_MATH_H
+#include <math.h>
+#endif
+
+#ifdef HAVE_MM_MALLOC_H
+#include <mm_malloc.h>
 #endif
 
 /* we need this to stringify the defines which are supplied at compiletime see:
@@ -369,10 +404,6 @@ typedef unsigned char u_char
     #error "byte order: can't figure out big or little"
 #endif
 
-#ifndef HAVE_PCRE_FREE_STUDY
-#define pcre_free_study pcre_free
-#endif
-
 #ifndef MIN
 #define MIN(x, y) (((x)<(y))?(x):(y))
 #endif
@@ -383,12 +414,14 @@ typedef unsigned char u_char
 
 #define BIT_U8(n)  ((uint8_t)(1 << (n)))
 #define BIT_U16(n) ((uint16_t)(1 << (n)))
-#define BIT_U32(n) (1UL  << (n))
+#define BIT_U32(n) ((uint32_t)(1UL << (n)))
 #define BIT_U64(n) (1ULL << (n))
 
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
-#if defined(__GNUC__)
+#if defined(__MINGW32__)
+#define ATTR_FMT_PRINTF(x, y) __attribute__((format(__MINGW_PRINTF_FORMAT, (x), (y))))
+#elif defined(__GNUC__)
 #define ATTR_FMT_PRINTF(x, y) __attribute__((format(printf, (x), (y))))
 #else
 #define ATTR_FMT_PRINTF(x, y)
@@ -416,6 +449,10 @@ typedef unsigned char u_char
         (b) = t;                        \
     } while (0)
 
+#include <ctype.h>
+#define u8_tolower(c) ((uint8_t)tolower((uint8_t)(c)))
+#define u8_toupper(c) ((uint8_t)toupper((uint8_t)(c)))
+
 typedef enum PacketProfileDetectId_ {
     PROF_DETECT_SETUP,
     PROF_DETECT_GETSGH,
@@ -425,6 +462,7 @@ typedef enum PacketProfileDetectId_ {
     PROF_DETECT_PF_PKT,
     PROF_DETECT_PF_PAYLOAD,
     PROF_DETECT_PF_TX,
+    PROF_DETECT_PF_RECORD,
     PROF_DETECT_PF_SORT1,
     PROF_DETECT_PF_SORT2,
     PROF_DETECT_NONMPMLIST,
@@ -435,46 +473,27 @@ typedef enum PacketProfileDetectId_ {
     PROF_DETECT_SIZE,
 } PacketProfileDetectId;
 
-/** \note update PacketProfileLoggertIdToString if you change anything here */
-typedef enum {
+/** \note update PacketProfileLoggerIdToString if you change anything here */
+typedef enum LoggerId {
     LOGGER_UNDEFINED,
 
     /* TX loggers first for low logger IDs */
-    LOGGER_DNS_TS,
-    LOGGER_DNS_TC,
     LOGGER_HTTP,
     LOGGER_TLS_STORE,
+    LOGGER_TLS_STORE_CLIENT,
     LOGGER_TLS,
-    LOGGER_JSON_DNS_TS,
-    LOGGER_JSON_DNS_TC,
-    LOGGER_JSON_HTTP,
-    LOGGER_JSON_SMTP,
-    LOGGER_JSON_TLS,
-    LOGGER_JSON_NFS,
-    LOGGER_JSON_TFTP,
-    LOGGER_JSON_FTP,
-    LOGGER_JSON_DNP3_TS,
-    LOGGER_JSON_DNP3_TC,
-    LOGGER_JSON_SSH,
-    LOGGER_JSON_SMB,
-    LOGGER_JSON_IKEV2,
-    LOGGER_JSON_KRB5,
-    LOGGER_JSON_DHCP,
-    LOGGER_JSON_SNMP,
-    LOGGER_JSON_SIP,
-    LOGGER_JSON_TEMPLATE_RUST,
-    LOGGER_JSON_RFB,
-    LOGGER_JSON_MQTT,
-    LOGGER_JSON_TEMPLATE,
-    LOGGER_JSON_RDP,
-    LOGGER_JSON_DCERPC,
-    LOGGER_JSON_HTTP2,
+    LOGGER_JSON_TX,
+    LOGGER_FILE,
+    LOGGER_FILEDATA,
+
+    /** \warning Note that transaction loggers here with a value > 31
+        will not work. */
+
+    /* non-tx loggers below */
 
     LOGGER_ALERT_DEBUG,
     LOGGER_ALERT_FAST,
-    LOGGER_UNIFIED2,
     LOGGER_ALERT_SYSLOG,
-    LOGGER_DROP,
     LOGGER_JSON_ALERT,
     LOGGER_JSON_ANOMALY,
     LOGGER_JSON_DROP,
@@ -485,36 +504,35 @@ typedef enum {
     LOGGER_JSON_NETFLOW,
     LOGGER_STATS,
     LOGGER_JSON_STATS,
-    LOGGER_PRELUDE,
     LOGGER_PCAP,
     LOGGER_JSON_METADATA,
+    LOGGER_JSON_FRAME,
+    LOGGER_JSON_STREAM,
+    LOGGER_JSON_ARP,
+
+    /* An ID that can be used by loggers registered by plugins and/or
+     * library users. */
+    LOGGER_USER,
+
+    /* Must come last. */
     LOGGER_SIZE,
 } LoggerId;
 
-#include "util-optimize.h"
-#ifndef SURICATA_PLUGIN
-#include <htp/htp.h>
-#endif
-#include "threads.h"
-#include "tm-threads-common.h"
-#include "util-debug.h"
-#include "util-error.h"
-#include "util-mem.h"
-#ifndef SURICATA_PLUGIN
-#include "detect-engine-alert.h"
-#endif
-#include "util-path.h"
-#include "util-conf.h"
-
-#ifdef HAVE_LUA
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
-#else
 /* If we don't have Lua, create a typedef for lua_State so the
  * exported Lua functions don't fail the build. */
-typedef void lua_State;
-#endif
+typedef struct lua_State lua_State;
+
+#include "tm-threads-common.h"
+#include "util-optimize.h"
+#include "util-time.h"
+#include "util-mem.h"
+#include "util-memcmp.h"
+#include "util-atomic.h"
+#include "util-unittest.h"
+
+// pseudo system headers
+#include "queue.h"
+#include "tree.h"
 
 #ifndef HAVE_STRLCAT
 size_t strlcat(char *, const char *src, size_t siz);
@@ -528,8 +546,14 @@ char *strptime(const char * __restrict, const char * __restrict, struct tm * __r
 
 #ifndef HAVE_FWRITE_UNLOCKED
 #define SCFwriteUnlocked    fwrite
+#define SCFflushUnlocked    fflush
+#define SCClearErrUnlocked  clearerr
+#define SCFerrorUnlocked    ferror
 #else
 #define SCFwriteUnlocked    fwrite_unlocked
+#define SCFflushUnlocked    fflush_unlocked
+#define SCClearErrUnlocked  clearerr_unlocked
+#define SCFerrorUnlocked    ferror_unlocked
 #endif
 extern int coverage_unittests;
 extern int g_ut_modules;
@@ -537,9 +561,8 @@ extern int g_ut_covered;
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
-#ifndef NAME_MAX
-#define NAME_MAX 255
+#ifdef __cplusplus
+}
 #endif
 
-#endif /* __SURICATA_COMMON_H__ */
-
+#endif /* SURICATA_SURICATA_COMMON_H */

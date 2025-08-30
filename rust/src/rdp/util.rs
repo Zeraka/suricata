@@ -20,8 +20,7 @@
 use crate::rdp::error::RdpError;
 use byteorder::ReadBytesExt;
 use memchr::memchr;
-use nom;
-use nom::{IResult, Needed};
+use nom7::{Err, IResult, Needed};
 use std::io::Cursor;
 use widestring::U16CString;
 
@@ -29,16 +28,11 @@ use widestring::U16CString;
 pub fn le_slice_to_string(input: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let mut vec = Vec::new();
     let mut cursor = Cursor::new(input);
-    loop {
-        match cursor.read_u16::<byteorder::LittleEndian>() {
-            Ok(x) => {
-                if x == 0 {
-                    break;
-                };
-                vec.push(x)
-            }
-            Err(_) => break,
+    while let Ok(x) = cursor.read_u16::<byteorder::LittleEndian>() {
+        if x == 0 {
+            break;
         }
+        vec.push(x);
     }
     match U16CString::new(vec) {
         Ok(x) => match x.to_string() {
@@ -53,7 +47,7 @@ pub fn le_slice_to_string(input: &[u8]) -> Result<String, Box<dyn std::error::Er
 pub fn utf7_slice_to_string(input: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let s = match memchr(b'\0', input) {
         Some(end) => &input[..end],
-        None => &input[..],
+        None => input,
     };
     match std::str::from_utf8(s) {
         Ok(s) => Ok(String::from(s)),
@@ -66,7 +60,7 @@ pub fn utf7_slice_to_string(input: &[u8]) -> Result<String, Box<dyn std::error::
 pub fn parse_per_length_determinant(input: &[u8]) -> IResult<&[u8], u32, RdpError> {
     if input.is_empty() {
         // need a single byte to begin length determination
-        Err(nom::Err::Incomplete(Needed::Size(1)))
+        Err(Err::Incomplete(Needed::new(1)))
     } else {
         let bit7 = input[0] >> 7;
         match bit7 {
@@ -76,12 +70,12 @@ pub fn parse_per_length_determinant(input: &[u8]) -> IResult<&[u8], u32, RdpErro
                 Ok((&input[1..], length))
             }
             _ => {
-                let bit6 = input[0] >> 6 & 0x1;
+                let bit6 = (input[0] >> 6) & 0x1;
                 match bit6 {
                     0b0 => {
                         // byte starts with 0b10.  Length stored in the remaining 6 bits and the next byte
                         if input.len() < 2 {
-                            Err(nom::Err::Incomplete(Needed::Size(2)))
+                            Err(Err::Incomplete(Needed::new(2)))
                         } else {
                             let length = ((input[0] as u32 & 0x3f) << 8) | input[1] as u32;
                             Ok((&input[2..], length))
@@ -90,7 +84,7 @@ pub fn parse_per_length_determinant(input: &[u8]) -> IResult<&[u8], u32, RdpErro
                     _ => {
                         // byte starts with 0b11.  Without an example to confirm 16K+ lengths are properly
                         // handled, leaving this branch unimplemented
-                        Err(nom::Err::Error(RdpError::UnimplementedLengthDeterminant))
+                        Err(Err::Error(RdpError::UnimplementedLengthDeterminant))
                     }
                 }
             }
@@ -102,7 +96,7 @@ pub fn parse_per_length_determinant(input: &[u8]) -> IResult<&[u8], u32, RdpErro
 mod tests {
     use super::*;
     use crate::rdp::error::RdpError;
-    use nom;
+    use nom7::Needed;
 
     #[test]
     fn test_le_string_abc() {
@@ -156,7 +150,7 @@ mod tests {
     fn test_length_single_length_incomplete() {
         let bytes = &[];
         assert_eq!(
-            Err(nom::Err::Incomplete(nom::Needed::Size(1))),
+            Err(Err::Incomplete(Needed::new(1))),
             parse_per_length_determinant(bytes)
         )
     }
@@ -165,7 +159,7 @@ mod tests {
     fn test_length_16k_unimplemented() {
         let bytes = &[0xc0];
         assert_eq!(
-            Err(nom::Err::Error(RdpError::UnimplementedLengthDeterminant)),
+            Err(Err::Error(RdpError::UnimplementedLengthDeterminant)),
             parse_per_length_determinant(bytes)
         )
     }
@@ -174,7 +168,7 @@ mod tests {
     fn test_length_double_length_incomplete() {
         let bytes = &[0x81];
         assert_eq!(
-            Err(nom::Err::Incomplete(nom::Needed::Size(2))),
+            Err(Err::Incomplete(Needed::new(2))),
             parse_per_length_determinant(bytes)
         )
     }

@@ -21,15 +21,14 @@
  * \author Breno Silva Pinto <breno.silva@gmail.com>
  */
 
-#ifndef __UTIL_THRESHOLD_CONFIG_H__
-#define __UTIL_THRESHOLD_CONFIG_H__
+#ifndef SURICATA_UTIL_THRESHOLD_CONFIG_H
+#define SURICATA_UTIL_THRESHOLD_CONFIG_H
 
-void SCThresholdConfParseFile(DetectEngineCtx *, FILE *);
+int SCThresholdConfParseFile(DetectEngineCtx *, FILE *);
 int SCThresholdConfInitContext(DetectEngineCtx *);
 
 void SCThresholdConfRegisterTests(void);
 
 void SCThresholdConfGlobalInit(void);
-void SCThresholdConfGlobalFree(void);
 
-#endif /* __UTIL_THRESHOLD_CONFIG_H__ */
+#endif /* SURICATA_UTIL_THRESHOLD_CONFIG_H */

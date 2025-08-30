@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2011 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,45 +21,16 @@
  * \author Victor Julien <victor@inliniac.net>
  *
  * This file provides HTTP protocol file handling support for the engine
- * using HTP library.
+ * using the HTP library.
  */
 
-#include "suricata.h"
 #include "suricata-common.h"
-#include "debug.h"
-#include "decode.h"
-#include "threads.h"
-
-#include "util-print.h"
-#include "util-pool.h"
-#include "util-radix-tree.h"
-
-#include "stream-tcp-private.h"
-#include "stream-tcp-reassemble.h"
-#include "stream-tcp.h"
-#include "stream.h"
-
-#include "app-layer.h"
-#include "app-layer-protos.h"
-#include "app-layer-parser.h"
-#include "app-layer-htp.h"
 #include "app-layer-htp-file.h"
+#include "app-layer-htp-range.h"
+#include "app-layer-events.h"
+#include "util-validate.h"
 
-#include "util-spm.h"
-#include "util-debug.h"
-#include "util-time.h"
-
-#include "util-unittest.h"
-#include "util-unittest-helper.h"
-#include "flow-util.h"
-
-#include "detect-engine.h"
-#include "detect-engine-state.h"
-#include "detect-parse.h"
-
-#include "conf.h"
-
-#include "util-memcmp.h"
+extern StreamingBufferConfig htp_sbcfg;
 
 /**
  *  \brief Open the file with "filename" and pass the first chunk
@@ -76,77 +47,41 @@
  *  \retval -1 error
  *  \retval -2 not handling files on this flow
  */
-int HTPFileOpen(HtpState *s, const uint8_t *filename, uint16_t filename_len,
-        const uint8_t *data, uint32_t data_len,
-        uint64_t txid, uint8_t direction)
+int HTPFileOpen(HtpState *s, HtpTxUserData *tx, const uint8_t *filename, uint16_t filename_len,
+        const uint8_t *data, uint32_t data_len, uint8_t direction)
 {
     int retval = 0;
     uint16_t flags = 0;
     FileContainer *files = NULL;
-    const StreamingBufferConfig *sbcfg = NULL;
 
     SCLogDebug("data %p data_len %"PRIu32, data, data_len);
 
-    if (s == NULL) {
-        SCReturnInt(-1);
-    }
-
     if (direction & STREAM_TOCLIENT) {
-        if (s->files_tc == NULL) {
-            s->files_tc = FileContainerAlloc();
-            if (s->files_tc == NULL) {
-                retval = -1;
-                goto end;
-            }
-        }
+        files = &tx->files_tc;
+        flags = FileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOCLIENT);
 
-        files = s->files_tc;
-
-        flags = FileFlowToFlags(s->f, STREAM_TOCLIENT);
-
-        if ((s->flags & HTP_FLAG_STORE_FILES_TS) ||
-                ((s->flags & HTP_FLAG_STORE_FILES_TX_TS) && txid == s->store_tx_id)) {
-            flags |= FILE_STORE;
-            flags &= ~FILE_NOSTORE;
-        } else if (!(flags & FILE_STORE) && (s->f->file_flags & FLOWFILE_NO_STORE_TC)) {
-            flags |= FILE_NOSTORE;
-        }
-
-        sbcfg = &s->cfg->response.sbcfg;
-
+        // we shall not open a new file if there is a current one
+        DEBUG_VALIDATE_BUG_ON(tx->file_range != NULL);
     } else {
-        if (s->files_ts == NULL) {
-            s->files_ts = FileContainerAlloc();
-            if (s->files_ts == NULL) {
-                retval = -1;
-                goto end;
-            }
-        }
-
-        files = s->files_ts;
-
-        flags = FileFlowToFlags(s->f, STREAM_TOSERVER);
-        if ((s->flags & HTP_FLAG_STORE_FILES_TC) ||
-                ((s->flags & HTP_FLAG_STORE_FILES_TX_TC) && txid == s->store_tx_id)) {
-            flags |= FILE_STORE;
-            flags &= ~FILE_NOSTORE;
-        } else if (!(flags & FILE_STORE) && (s->f->file_flags & FLOWFILE_NO_STORE_TS)) {
-            flags |= FILE_NOSTORE;
-        }
-
-        sbcfg = &s->cfg->request.sbcfg;
+        files = &tx->files_ts;
+        flags = FileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOSERVER);
     }
 
-    if (FileOpenFileWithId(files, sbcfg, s->file_track_id++,
-                filename, filename_len,
-                data, data_len, flags) != 0)
-    {
+    if (FileOpenFileWithId(files, &htp_sbcfg, s->file_track_id++, filename, filename_len, data,
+                data_len, flags) != 0) {
         retval = -1;
+    } else {
+        const HTPCfgDir *cfg;
+        if (direction & STREAM_TOCLIENT) {
+            cfg = &s->cfg->response;
+        } else {
+            cfg = &s->cfg->request;
+        }
+        FileSetInspectSizes(files->tail, cfg->inspect_window, cfg->inspect_min_size);
     }
 
-    FileSetTx(files->tail, txid);
+    tx->tx_data.files_opened++;
 
-end:
     SCReturnInt(retval);
 }
 
@@ -156,62 +91,50 @@ end:
  * @param[in] rawvalue
  * @param[out] range
  *
- * @return HTP_OK on success, HTP_ERROR on failure.
+ * @return HTP_STATUS_OK on success, HTP_STATUS_ERROR on failure.
  */
-int HTPParseContentRange(bstr * rawvalue, HtpContentRange *range)
+int HTPParseContentRange(const bstr *rawvalue, HTTPContentRange *range)
 {
-    unsigned char *data = bstr_ptr(rawvalue);
-    size_t len = bstr_len(rawvalue);
-    size_t pos = 0;
-    size_t last_pos;
+    uint32_t len = (uint32_t)bstr_len(rawvalue);
+    return SCHttpParseContentRange(range, bstr_ptr(rawvalue), len);
+}
 
-    // skip spaces and units
-    while (pos < len && data[pos] == ' ')
-        pos++;
-    while (pos < len && data[pos] != ' ')
-        pos++;
-    while (pos < len && data[pos] == ' ')
-        pos++;
-
-    // initialize to unseen
-    range->start = -1;
-    range->end = -1;
-    range->size = -1;
-
-    if (pos == len) {
-        // missing data
-        return -1;
+/**
+ * Performs parsing + checking of the content-range value
+ *
+ * @param[in] rawvalue
+ * @param[out] range
+ *
+ * @return HTP_STATUS_OK on success, HTP_STATUS_ERROR, -2, -3 on failure.
+ */
+static int HTPParseAndCheckContentRange(
+        const bstr *rawvalue, HTTPContentRange *range, HtpState *s, HtpTxUserData *htud)
+{
+    int r = HTPParseContentRange(rawvalue, range);
+    if (r != 0) {
+        AppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
+        s->events++;
+        SCLogDebug("parsing range failed, going back to normal file");
+        return r;
     }
-
-    if (data[pos] == '*') {
-        // case with size only
-        if (len <= pos + 1 || data[pos+1] != '/') {
-            range->size = -1;
-            return -1;
-        }
-        pos += 2;
-        range->size = bstr_util_mem_to_pint(data + pos, len - pos, 10, &last_pos);
-    } else {
-        // case with start and end
-        range->start = bstr_util_mem_to_pint(data + pos, len - pos, 10, &last_pos);
-        pos += last_pos;
-        if (len <= pos + 1 || data[pos] != '-') {
-            return -1;
-        }
-        pos++;
-        range->end = bstr_util_mem_to_pint(data + pos, len - pos, 10, &last_pos);
-        pos += last_pos;
-        if (len <= pos + 1 || data[pos] != '/') {
-            return -1;
-        }
-        pos++;
-        if (data[pos] != '*') {
-            // case with size
-            range->size = bstr_util_mem_to_pint(data + pos, len - pos, 10, &last_pos);
-        }
+    /* crparsed.end <= 0 means a range with only size
+     * this is the answer to an unsatisfied range with the whole file
+     * crparsed.size <= 0 means an unknown size, so we do not know
+     * when to close it...
+     */
+    if (range->end <= 0 || range->size <= 0) {
+        SCLogDebug("range without all information");
+        return -2;
+    } else if (range->end == range->size - 1 && range->start == 0) {
+        SCLogDebug("range without all information");
+        return -3;
+    } else if (range->start > range->end || range->end > range->size - 1) {
+        AppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
+        s->events++;
+        SCLogDebug("invalid range");
+        return -4;
     }
-
-    return 0;
+    return r;
 }
 
 /**
@@ -222,43 +145,73 @@ int HTPParseContentRange(bstr * rawvalue, HtpContentRange *range)
  *
  *  \retval 0 ok
  *  \retval -1 error
- *  \retval -2 error parsing
- *  \retval -3 error negative end in range
  */
-int HTPFileSetRange(HtpState *s, bstr *rawvalue)
+int HTPFileOpenWithRange(HtpState *s, HtpTxUserData *txud, const uint8_t *filename,
+        uint16_t filename_len, const uint8_t *data, uint32_t data_len, const htp_tx_t *tx,
+        const bstr *rawvalue, HtpTxUserData *htud)
 {
     SCEnter();
+    uint16_t flags;
 
-    if (s == NULL) {
+    DEBUG_VALIDATE_BUG_ON(s == NULL);
+
+    // This function is only called STREAM_TOCLIENT from HtpResponseBodyHandle
+    HTTPContentRange crparsed;
+    if (HTPParseAndCheckContentRange(rawvalue, &crparsed, s, htud) != 0) {
+        // range is invalid, fall back to classic open
+        return HTPFileOpen(s, txud, filename, filename_len, data, data_len, STREAM_TOCLIENT);
+    }
+    flags = FileFlowToFlags(s->f, STREAM_TOCLIENT);
+    FileContainer *files = &txud->files_tc;
+
+    // we open a file for this specific range
+    if (FileOpenFileWithId(files, &htp_sbcfg, s->file_track_id++, filename, filename_len, data,
+                data_len, flags) != 0) {
         SCReturnInt(-1);
+    } else {
+        const HTPCfgDir *cfg = &s->cfg->response;
+        FileSetInspectSizes(files->tail, cfg->inspect_window, cfg->inspect_min_size);
     }
+    txud->tx_data.files_opened++;
 
-    FileContainer * files = s->files_tc;
-    if (files == NULL) {
-        SCLogDebug("no files in state");
-        SCReturnInt(-1);
-    }
-
-    HtpContentRange crparsed;
-    if (HTPParseContentRange(rawvalue, &crparsed) != 0) {
-        SCLogDebug("parsing range failed");
-        SCReturnInt(-2);
-    }
-    if (crparsed.end <= 0) {
-        SCLogDebug("negative end in range");
-        SCReturnInt(-3);
-    }
-    int retval = FileSetRange(files, crparsed.start, crparsed.end);
-    if (retval == -1) {
+    if (FileSetRange(files, crparsed.start, crparsed.end) < 0) {
         SCLogDebug("set range failed");
     }
-    SCReturnInt(retval);
+
+    // Then, we will try to handle reassembly of different ranges of the same file
+    uint8_t *keyurl;
+    uint32_t keylen;
+    if (htp_tx_request_hostname(tx) != NULL) {
+        uint32_t hlen = (uint32_t)bstr_len(htp_tx_request_hostname(tx));
+        if (hlen > UINT16_MAX) {
+            hlen = UINT16_MAX;
+        }
+        keylen = hlen + filename_len;
+        keyurl = SCMalloc(keylen);
+        if (keyurl == NULL) {
+            SCReturnInt(-1);
+        }
+        memcpy(keyurl, bstr_ptr(htp_tx_request_hostname(tx)), hlen);
+        memcpy(keyurl + hlen, filename, filename_len);
+    } else {
+        // do not reassemble file without host info
+        SCReturnInt(0);
+    }
+    DEBUG_VALIDATE_BUG_ON(htud->file_range);
+    htud->file_range = HttpRangeContainerOpenFile(keyurl, keylen, s->f, &crparsed, &htp_sbcfg,
+            filename, filename_len, flags, data, data_len);
+    SCFree(keyurl);
+    if (htud->file_range == NULL) {
+        SCReturnInt(-1);
+    }
+    SCReturnInt(0);
 }
 
 /**
  *  \brief Store a chunk of data in the flow
  *
- *  \param s http state
+ *  \param s HtpState
+ *  \param tx HtpTxUserData
  *  \param data data chunk (if any)
  *  \param data_len length of the data portion
  *  \param direction flow direction
@@ -267,8 +220,7 @@ int HTPFileSetRange(HtpState *s, bstr *rawvalue)
  *  \retval -1 error
  *  \retval -2 file doesn't need storing
  */
-int HTPFileStoreChunk(HtpState *s, const uint8_t *data, uint32_t data_len,
-        uint8_t direction)
+int HTPFileStoreChunk(HtpTxUserData *tx, const uint8_t *data, uint32_t data_len, uint8_t direction)
 {
     SCEnter();
 
@@ -276,15 +228,12 @@ int HTPFileStoreChunk(HtpState *s, const uint8_t *data, uint32_t data_len,
     int result = 0;
     FileContainer *files = NULL;
 
-    if (s == NULL) {
-        SCReturnInt(-1);
-    }
-
     if (direction & STREAM_TOCLIENT) {
-        files = s->files_tc;
+        files = &tx->files_tc;
     } else {
-        files = s->files_ts;
+        files = &tx->files_ts;
     }
+    SCLogDebug("files %p data %p data_len %" PRIu32, files, data, data_len);
 
     if (files == NULL) {
         SCLogDebug("no files in state");
@@ -292,22 +241,59 @@ int HTPFileStoreChunk(HtpState *s, const uint8_t *data, uint32_t data_len,
         goto end;
     }
 
-    result = FileAppendData(files, data, data_len);
+    if (tx->file_range != NULL) {
+        if (HttpRangeAppendData(&htp_sbcfg, tx->file_range, data, data_len) < 0) {
+            SCLogDebug("Failed to append data");
+        }
+    }
+
+    result = FileAppendData(files, &htp_sbcfg, data, data_len);
     if (result == -1) {
         SCLogDebug("appending data failed");
         retval = -1;
     } else if (result == -2) {
         retval = -2;
     }
+    SCLogDebug("result %u", result);
 
 end:
     SCReturnInt(retval);
 }
 
+/** \brief close range, add reassembled file if possible
+ *  \retval true if reassembled file was added
+ *  \retval false if no reassembled file was added
+ */
+bool HTPFileCloseHandleRange(const StreamingBufferConfig *sbcfg, FileContainer *files,
+        const uint16_t flags, HttpRangeContainerBlock *c, const uint8_t *data, uint32_t data_len)
+{
+    bool added = false;
+    if (HttpRangeAppendData(sbcfg, c, data, data_len) < 0) {
+        SCLogDebug("Failed to append data");
+    }
+    if (c->container) {
+        // we only call HttpRangeClose if we may some new data
+        // ie we do not call it if we skipped all this range request
+        THashDataLock(c->container->hdata);
+        if (c->container->error) {
+            SCLogDebug("range in ERROR state");
+        }
+        File *ranged = HttpRangeClose(sbcfg, c, flags);
+        if (ranged && files) {
+            /* HtpState owns the constructed file now */
+            FileContainerAdd(files, ranged);
+            added = true;
+        }
+        DEBUG_VALIDATE_BUG_ON(ranged && !files);
+        THashDataUnlock(c->container->hdata);
+    }
+    return added;
+}
+
 /**
  *  \brief Close the file in the flow
  *
- *  \param s http state
+ *  \param tx HtpTxUserData
  *  \param data data chunk if any
  *  \param data_len length of the data portion
  *  \param flags flags to indicate events
@@ -320,35 +306,46 @@ end:
  *  \retval -1 error
  *  \retval -2 not storing files on this flow/tx
  */
-int HTPFileClose(HtpState *s, const uint8_t *data, uint32_t data_len,
-        uint8_t flags, uint8_t direction)
+int HTPFileClose(
+        HtpTxUserData *tx, const uint8_t *data, uint32_t data_len, uint8_t flags, uint8_t direction)
 {
     SCEnter();
+
+    SCLogDebug("flags %04x FILE_TRUNCATED %s", flags, (flags & FILE_TRUNCATED) ? "true" : "false");
 
     int retval = 0;
     int result = 0;
     FileContainer *files = NULL;
 
-    if (s == NULL) {
-        SCReturnInt(-1);
+    if (direction & STREAM_TOCLIENT) {
+        files = &tx->files_tc;
+    } else {
+        files = &tx->files_ts;
     }
 
-    if (direction & STREAM_TOCLIENT) {
-        files = s->files_tc;
-    } else {
-        files = s->files_ts;
-    }
+    SCLogDebug("files %p data %p data_len %" PRIu32, files, data, data_len);
 
     if (files == NULL) {
         retval = -1;
         goto end;
     }
 
-    result = FileCloseFile(files, data, data_len, flags);
+    result = FileCloseFile(files, &htp_sbcfg, data, data_len, flags);
     if (result == -1) {
         retval = -1;
     } else if (result == -2) {
         retval = -2;
+    }
+    SCLogDebug("result %u", result);
+
+    if (tx->file_range != NULL) {
+        bool added =
+                HTPFileCloseHandleRange(&htp_sbcfg, files, flags, tx->file_range, data, data_len);
+        if (added) {
+            tx->tx_data.files_opened++;
+        }
+        HttpRangeFreeBlock(tx->file_range);
+        tx->file_range = NULL;
     }
 
 end:
@@ -356,6 +353,10 @@ end:
 }
 
 #ifdef UNITTESTS
+#include "stream-tcp.h"
+#include "app-layer-parser.h"
+#include "util-unittest-helper.h"
+
 static int HTPFileParserTest01(void)
 {
     uint8_t httpbuf1[] = "POST /upload.cgi HTTP/1.1\r\n"
@@ -382,32 +383,31 @@ static int HTPFileParserTest01(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -447,44 +447,44 @@ static int HTPFileParserTest02(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -529,58 +529,58 @@ static int HTPFileParserTest03(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 5 size %u <<<<\n", httplen5);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf5, httplen5);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf5, httplen5);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 6 size %u <<<<\n", httplen6);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf6, httplen6);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf6, httplen6);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->head);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
-    FAIL_IF(FileDataSize(http_state->files_ts->head) != 11);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
+    FAIL_IF(FileDataSize(tx_ud->files_ts.head) != 11);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -625,57 +625,57 @@ static int HTPFileParserTest04(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 5 size %u <<<<\n", httplen5);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf5, httplen5);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf5, httplen5);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 6 size %u <<<<\n", httplen6);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf6, httplen6);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf6, httplen6);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->head);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -711,45 +711,45 @@ static int HTPFileParserTest05(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 size %u <<<<\n", httplen1);
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->head);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
-    FAIL_IF(http_state->files_ts->head == http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->head->next != http_state->files_ts->tail);
+    FAIL_IF(tx_ud->files_ts.head == tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.head->next != tx_ud->files_ts.tail);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->head->sb,
-                (uint8_t *)"filecontent", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.head->sb, (uint8_t *)"filecontent", 11) !=
+            1);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->tail->sb,
-                (uint8_t *)"FILECONTENT", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.tail->sb, (uint8_t *)"FILECONTENT", 11) !=
+            1);
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -786,46 +786,46 @@ static int HTPFileParserTest06(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 size %u <<<<\n", httplen1);
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->head);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
-    FAIL_IF(http_state->files_ts->head == http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->head->next != http_state->files_ts->tail);
+    FAIL_IF(tx_ud->files_ts.head == tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.head->next != tx_ud->files_ts.tail);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->head->sb,
-                (uint8_t *)"filecontent", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.head->sb, (uint8_t *)"filecontent", 11) !=
+            1);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->tail->sb,
-                (uint8_t *)"FILECONTENT", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.tail->sb, (uint8_t *)"FILECONTENT", 11) !=
+            1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -851,38 +851,39 @@ static int HTPFileParserTest07(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 size %u <<<<\n", httplen1);
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->tail->sb,
-                (uint8_t *)"FILECONTENT", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.tail->sb, (uint8_t *)"FILECONTENT", 11) !=
+            1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -912,34 +913,34 @@ static int HTPFileParserTest08(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP,f->alstate, 0);
+    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, f->alstate, 0);
     FAIL_IF_NULL(tx);
 
-    AppLayerDecoderEvents *decoder_events = AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP, tx);
+    AppLayerDecoderEvents *decoder_events =
+            AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP1, tx);
     FAIL_IF_NULL(decoder_events);
 
     FAIL_IF(decoder_events->cnt != 2);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -980,44 +981,44 @@ static int HTPFileParserTest09(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP,f->alstate, 0);
+    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, f->alstate, 0);
     FAIL_IF_NULL(tx);
 
-    AppLayerDecoderEvents *decoder_events = AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP, tx);
+    AppLayerDecoderEvents *decoder_events =
+            AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP1, tx);
     FAIL_IF_NULL(decoder_events);
 
     FAIL_IF(decoder_events->cnt != 1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -1056,41 +1057,41 @@ static int HTPFileParserTest10(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP,f->alstate, 0);
+    void *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, f->alstate, 0);
     FAIL_IF_NULL(tx);
-    AppLayerDecoderEvents *decoder_events = AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP, tx);
+    AppLayerDecoderEvents *decoder_events =
+            AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP1, tx);
     FAIL_IF_NOT_NULL(decoder_events);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -1157,55 +1158,55 @@ static int HTPFileParserTest11(void)
     FAIL_IF_NULL(f);
     f->protoctx = &ssn;
     f->proto = IPPROTO_TCP;
-    f->alproto = ALPROTO_HTTP;
+    f->alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     SCLogDebug("\n>>>> processing chunk 1 <<<<\n");
-    int r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                                STREAM_TOSERVER | STREAM_START, httpbuf1,
-                                httplen1);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_START, httpbuf1, httplen1);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 2 size %u <<<<\n", httplen2);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP, STREAM_TOSERVER,
-                            httpbuf2, httplen2);
+    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER, httpbuf2, httplen2);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 3 size %u <<<<\n", httplen3);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP, STREAM_TOSERVER,
-                            httpbuf3, httplen3);
+    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER, httpbuf3, httplen3);
     FAIL_IF_NOT(r == 0);
 
     SCLogDebug("\n>>>> processing chunk 4 size %u <<<<\n", httplen4);
-    r = AppLayerParserParse(NULL, alp_tctx, f, ALPROTO_HTTP,
-                            STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, f, ALPROTO_HTTP1, STREAM_TOSERVER | STREAM_EOF, httpbuf4, httplen4);
     FAIL_IF_NOT(r == 0);
 
     http_state = f->alstate;
     FAIL_IF_NULL(http_state);
 
-    void *txtmp = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP,f->alstate, 0);
+    void *txtmp = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, f->alstate, 0);
     FAIL_IF_NULL(txtmp);
 
-    AppLayerDecoderEvents *decoder_events = AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP, txtmp);
+    AppLayerDecoderEvents *decoder_events =
+            AppLayerParserGetEventsByTx(IPPROTO_TCP, ALPROTO_HTTP1, txtmp);
     FAIL_IF_NOT_NULL(decoder_events);
 
-    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP, http_state, 0);
+    htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF(memcmp(bstr_util_strdup_to_c(htp_tx_request_method(tx)), "POST", 4) != 0);
 
-    FAIL_IF_NULL(http_state->files_ts);
-    FAIL_IF_NULL(http_state->files_ts->tail);
-    FAIL_IF(http_state->files_ts->tail->state != FILE_STATE_CLOSED);
+    HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
+    FAIL_IF_NULL(tx_ud);
+    FAIL_IF_NULL(tx_ud->files_ts.head);
+    FAIL_IF_NULL(tx_ud->files_ts.tail);
+    FAIL_IF(tx_ud->files_ts.tail->state != FILE_STATE_CLOSED);
 
-    FAIL_IF(StreamingBufferCompareRawData(http_state->files_ts->tail->sb,
-                (uint8_t *)"FILECONTENT", 11) != 1);
+    FAIL_IF(StreamingBufferCompareRawData(tx_ud->files_ts.tail->sb, (uint8_t *)"FILECONTENT", 11) !=
+            1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     UTHFreeFlow(f);
     PASS;
 }
@@ -1228,5 +1229,6 @@ void HTPFileParserRegisterTests(void)
     UtRegisterTest("HTPFileParserTest09", HTPFileParserTest09);
     UtRegisterTest("HTPFileParserTest10", HTPFileParserTest10);
     UtRegisterTest("HTPFileParserTest11", HTPFileParserTest11);
+    AppLayerHtpFileRegisterTests();
 #endif /* UNITTESTS */
 }

@@ -32,12 +32,12 @@
 
 #include "suricata-common.h"
 #include "threads.h"
-#include "debug.h"
 #include "decode.h"
 #include "detect.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -76,23 +76,29 @@ static InspectionBuffer *GetResponseData(DetectEngineThreadCtx *det_ctx,
         const DetectEngineTransforms *transforms,
         Flow *_f, const uint8_t _flow_flags,
         void *txv, const int list_id);
-
+static InspectionBuffer *GetRequestData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id);
+static InspectionBuffer *GetResponseData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id);
 /**
  * \brief Registration function for keyword: http_cookie
  */
 void DetectHttpCookieRegister(void)
 {
     /* http_cookie content modifier */
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].name = "http_cookie";
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].desc = "content modifier to match only on the HTTP cookie-buffer";
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].url = "/rules/http-keywords.html#http-cookie";
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].Setup = DetectHttpCookieSetup;
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].name = "http_cookie";
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].desc =
+            "content modifier to match only on the HTTP cookie-buffer";
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].url = "/rules/http-keywords.html#http-cookie";
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].Setup = DetectHttpCookieSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].RegisterTests = DetectHttpCookieRegisterTests;
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].RegisterTests = DetectHttpCookieRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_COOKIE].alternative = DETECT_HTTP_COOKIE;
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_COOKIE_CM].alternative = DETECT_HTTP_COOKIE;
 
     /* http.cookie sticky buffer */
     sigmatch_table[DETECT_HTTP_COOKIE].name = "http.cookie";
@@ -102,19 +108,25 @@ void DetectHttpCookieRegister(void)
     sigmatch_table[DETECT_HTTP_COOKIE].flags |= SIGMATCH_NOOPT;
     sigmatch_table[DETECT_HTTP_COOKIE].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("http_cookie", ALPROTO_HTTP,
-            SIG_FLAG_TOSERVER, HTP_REQUEST_HEADERS,
-            DetectEngineInspectBufferGeneric, GetRequestData);
-    DetectAppLayerInspectEngineRegister2("http_cookie", ALPROTO_HTTP,
-            SIG_FLAG_TOCLIENT, HTP_REQUEST_HEADERS,
-            DetectEngineInspectBufferGeneric, GetResponseData);
+    DetectAppLayerInspectEngineRegister("http_cookie", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+            HTP_REQUEST_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetRequestData);
+    DetectAppLayerInspectEngineRegister("http_cookie", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+            HTP_REQUEST_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetResponseData);
 
-    DetectAppLayerMpmRegister2("http_cookie", SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetRequestData, ALPROTO_HTTP,
-            HTP_REQUEST_HEADERS);
-    DetectAppLayerMpmRegister2("http_cookie", SIG_FLAG_TOCLIENT, 2,
-            PrefilterGenericMpmRegister, GetResponseData, ALPROTO_HTTP,
-            HTP_REQUEST_HEADERS);
+    DetectAppLayerMpmRegister("http_cookie", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetRequestData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_HEADERS);
+    DetectAppLayerMpmRegister("http_cookie", SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetResponseData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_HEADERS);
+
+    DetectAppLayerInspectEngineRegister("http_cookie", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+            HTTP2StateDataClient, DetectEngineInspectBufferGeneric, GetRequestData2);
+    DetectAppLayerInspectEngineRegister("http_cookie", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetResponseData2);
+
+    DetectAppLayerMpmRegister("http_cookie", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+            GetRequestData2, ALPROTO_HTTP2, HTTP2StateDataClient);
+    DetectAppLayerMpmRegister("http_cookie", SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+            GetResponseData2, ALPROTO_HTTP2, HTTP2StateDataServer);
 
     DetectBufferTypeSetDescriptionByName("http_cookie",
             "http cookie header");
@@ -135,14 +147,12 @@ void DetectHttpCookieRegister(void)
 
 static int DetectHttpCookieSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    return DetectEngineContentModifierBufferSetup(de_ctx, s, str,
-                                                  DETECT_AL_HTTP_COOKIE,
-                                                  g_http_cookie_buffer_id,
-                                                  ALPROTO_HTTP);
+    return DetectEngineContentModifierBufferSetup(
+            de_ctx, s, str, DETECT_HTTP_COOKIE_CM, g_http_cookie_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
- * \brief this function setup the http.user_agent keyword used in the rule
+ * \brief this function setup the http.cookie keyword used in the rule
  *
  * \param de_ctx   Pointer to the Detection Engine Context
  * \param s        Pointer to the Signature to which the current keyword belongs
@@ -152,10 +162,10 @@ static int DetectHttpCookieSetup(DetectEngineCtx *de_ctx, Signature *s, const ch
  */
 static int DetectHttpCookieSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(s, g_http_cookie_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_cookie_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
 
     return 0;
@@ -169,21 +179,20 @@ static InspectionBuffer *GetRequestData(DetectEngineThreadCtx *det_ctx,
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
 
-        if (tx->request_headers == NULL)
+        if (htp_tx_request_headers(tx) == NULL)
             return NULL;
 
-        htp_header_t *h = (htp_header_t *)htp_table_get_c(tx->request_headers,
-                "Cookie");
-        if (h == NULL || h->value == NULL) {
+        const htp_header_t *h = htp_tx_request_header(tx, "Cookie");
+        if (h == NULL || htp_header_value(h) == NULL) {
             SCLogDebug("HTTP cookie header not present in this request");
             return NULL;
         }
 
-        const uint32_t data_len = bstr_len(h->value);
-        const uint8_t *data = bstr_ptr(h->value);
+        const uint32_t data_len = (uint32_t)htp_header_value_len(h);
+        const uint8_t *data = htp_header_value_ptr(h);
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;
@@ -197,21 +206,60 @@ static InspectionBuffer *GetResponseData(DetectEngineThreadCtx *det_ctx,
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
 
-        if (tx->response_headers == NULL)
+        if (htp_tx_response_headers(tx) == NULL)
             return NULL;
 
-        htp_header_t *h = (htp_header_t *)htp_table_get_c(tx->response_headers,
-                "Set-Cookie");
-        if (h == NULL || h->value == NULL) {
+        const htp_header_t *h = htp_tx_response_header(tx, "Set-Cookie");
+        if (h == NULL || htp_header_value(h) == NULL) {
             SCLogDebug("HTTP cookie header not present in this request");
             return NULL;
         }
 
-        const uint32_t data_len = bstr_len(h->value);
-        const uint8_t *data = bstr_ptr(h->value);
+        const uint32_t data_len = (uint32_t)htp_header_value_len(h);
+        const uint8_t *data = htp_header_value_ptr(h);
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
+    }
+
+    return buffer;
+}
+
+static InspectionBuffer *GetRequestData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id)
+{
+    InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
+    if (buffer->inspect == NULL) {
+        uint32_t b_len = 0;
+        const uint8_t *b = NULL;
+
+        if (SCHttp2TxGetCookie(txv, STREAM_TOSERVER, &b, &b_len) != 1)
+            return NULL;
+        if (b == NULL || b_len == 0)
+            return NULL;
+
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
+    }
+
+    return buffer;
+}
+
+static InspectionBuffer *GetResponseData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id)
+{
+    InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
+    if (buffer->inspect == NULL) {
+        uint32_t b_len = 0;
+        const uint8_t *b = NULL;
+
+        if (SCHttp2TxGetCookie(txv, STREAM_TOCLIENT, &b, &b_len) != 1)
+            return NULL;
+        if (b == NULL || b_len == 0)
+            return NULL;
+
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;

@@ -21,13 +21,13 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DEFRAG_TIMEOUT_H__
-#define __DEFRAG_TIMEOUT_H__
+#ifndef SURICATA_DEFRAG_TIMEOUT_H
+#define SURICATA_DEFRAG_TIMEOUT_H
 
-uint32_t DefragTimeoutHash(struct timeval *ts);
+#include "defrag.h"
 
-uint32_t DefragGetSpareCount(void);
-uint32_t DefragGetActiveCount(void);
+int DefragTrackerTimedOut(DefragTracker *dt, SCTime_t ts);
+uint32_t DefragTimeoutHash(SCTime_t ts);
 
 #endif
 

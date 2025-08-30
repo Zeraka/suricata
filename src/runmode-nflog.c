@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,32 +27,15 @@
 #include "runmode-nflog.h"
 
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-runmodes.h"
 #include "util-misc.h"
 
 #include "source-nflog.h"
 
-const char *RunModeIdsNflogGetDefaultMode(void)
-{
-    return "autofp";
-}
-
-void RunModeIdsNflogRegister(void)
-{
-    RunModeRegisterNewRunMode(RUNMODE_NFLOG, "autofp",
-                              "Multi threaded nflog mode",
-                              RunModeIdsNflogAutoFp);
-    RunModeRegisterNewRunMode(RUNMODE_NFLOG, "single",
-                              "Single threaded nflog mode",
-                              RunModeIdsNflogSingle);
-    RunModeRegisterNewRunMode(RUNMODE_NFLOG, "workers",
-                              "Workers nflog mode",
-                              RunModeIdsNflogWorkers);
-    return;
-}
-
 #ifdef HAVE_NFLOG
+#include "util-time.h"
+
 static void NflogDerefConfig(void *data)
 {
     NflogGroupConfig *nflogconf = (NflogGroupConfig *)data;
@@ -61,9 +44,9 @@ static void NflogDerefConfig(void *data)
 
 static void *ParseNflogConfig(const char *group)
 {
-    ConfNode *group_root;
-    ConfNode *group_default = NULL;
-    ConfNode *nflog_node;
+    SCConfNode *group_root;
+    SCConfNode *group_default = NULL;
+    SCConfNode *nflog_node;
     NflogGroupConfig *nflogconf = SCMalloc(sizeof(*nflogconf));
     intmax_t bufsize;
     intmax_t bufsize_max;
@@ -80,16 +63,16 @@ static void *ParseNflogConfig(const char *group)
     }
 
     nflogconf->DerefFunc = NflogDerefConfig;
-    nflog_node = ConfGetNode("nflog");
+    nflog_node = SCConfGetNode("nflog");
 
     if (nflog_node == NULL) {
         SCLogInfo("Unable to find nflog config using default value");
         return nflogconf;
     }
 
-    group_root = ConfNodeLookupKeyValue(nflog_node, "group", group);
+    group_root = SCConfNodeLookupKeyValue(nflog_node, "group", group);
 
-    group_default = ConfNodeLookupKeyValue(nflog_node, "group", "default");
+    group_default = SCConfNodeLookupKeyValue(nflog_node, "group", "default");
 
     if (group_root == NULL && group_default == NULL) {
         SCLogInfo("Unable to find nflog config for "
@@ -102,55 +85,53 @@ static void *ParseNflogConfig(const char *group)
     strlcpy(nflogconf->numgroup, group, sizeof(nflogconf->numgroup));
 
     if (ParseSizeStringU16(group, &nflogconf->group) < 0) {
-        FatalError(SC_ERR_FATAL, "NFLOG's group number invalid.");
+        FatalError("NFLOG's group number invalid.");
     }
 
-    boolval = ConfGetChildValueIntWithDefault(group_root, group_default,
-                                              "buffer-size", &bufsize);
+    boolval = SCConfGetChildValueIntWithDefault(group_root, group_default, "buffer-size", &bufsize);
 
     if (boolval)
         nflogconf->nlbufsiz = bufsize;
     else {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid buffer-size value");
+        SCLogError("Invalid buffer-size value");
         SCFree(nflogconf);
         return NULL;
     }
 
-    boolval = ConfGetChildValueIntWithDefault(group_root, group_default,
-                                              "max-size", &bufsize_max);
+    boolval =
+            SCConfGetChildValueIntWithDefault(group_root, group_default, "max-size", &bufsize_max);
 
     if (boolval)
         nflogconf->nlbufsiz_max = bufsize_max;
     else {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid max-size value");
+        SCLogError("Invalid max-size value");
         SCFree(nflogconf);
         return NULL;
     }
 
     if (nflogconf->nlbufsiz > nflogconf->nlbufsiz_max) {
-        SCLogWarning(SC_ERR_INVALID_ARGUMENT, "buffer-size value larger "
-                "than max-size value, adjusting buffer-size");
+        SCLogWarning("buffer-size value larger "
+                     "than max-size value, adjusting buffer-size");
         nflogconf->nlbufsiz = nflogconf->nlbufsiz_max;
     }
 
-    boolval = ConfGetChildValueIntWithDefault(group_root, group_default,
-                                              "qthreshold", &qthreshold);
+    boolval =
+            SCConfGetChildValueIntWithDefault(group_root, group_default, "qthreshold", &qthreshold);
 
     if (boolval)
         nflogconf->qthreshold = qthreshold;
     else {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid qthreshold value");
+        SCLogError("Invalid qthreshold value");
         SCFree(nflogconf);
         return NULL;
     }
 
-    boolval = ConfGetChildValueIntWithDefault(group_root, group_default,
-                                              "qtimeout", &qtimeout);
+    boolval = SCConfGetChildValueIntWithDefault(group_root, group_default, "qtimeout", &qtimeout);
 
     if (boolval)
         nflogconf->qtimeout = qtimeout;
     else {
-        SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid qtimeout value");
+        SCLogError("Invalid qtimeout value");
         SCFree(nflogconf);
         return NULL;
     }
@@ -165,25 +146,17 @@ static int NflogConfigGeThreadsCount(void *conf)
 }
 #endif
 
-int RunModeIdsNflogAutoFp(void)
+static int RunModeIdsNflogAutoFp(void)
 {
     SCEnter();
 
 #ifdef HAVE_NFLOG
-    int ret = 0;
-    char *live_dev = NULL;
-
-    RunModeInitialize();
     TimeModeSetLive();
 
-    ret = RunModeSetLiveCaptureAutoFp(ParseNflogConfig,
-                                      NflogConfigGeThreadsCount,
-                                      "ReceiveNFLOG",
-                                      "DecodeNFLOG",
-                                      thread_name_autofp,
-                                      live_dev);
+    int ret = RunModeSetLiveCaptureAutoFp(ParseNflogConfig, NflogConfigGeThreadsCount,
+            "ReceiveNFLOG", "DecodeNFLOG", thread_name_autofp, NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "Unable to start runmode");
+        FatalError("Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogAutoFp initialised");
@@ -192,25 +165,17 @@ int RunModeIdsNflogAutoFp(void)
     SCReturnInt(0);
 }
 
-int RunModeIdsNflogSingle(void)
+static int RunModeIdsNflogSingle(void)
 {
     SCEnter();
 
 #ifdef HAVE_NFLOG
-    int ret = 0;
-    char *live_dev = NULL;
-
-    RunModeInitialize();
     TimeModeSetLive();
 
-    ret = RunModeSetLiveCaptureSingle(ParseNflogConfig,
-                                      NflogConfigGeThreadsCount,
-                                      "ReceiveNFLOG",
-                                      "DecodeNFLOG",
-                                      thread_name_single,
-                                      live_dev);
+    int ret = RunModeSetLiveCaptureSingle(ParseNflogConfig, NflogConfigGeThreadsCount,
+            "ReceiveNFLOG", "DecodeNFLOG", thread_name_single, NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "Unable to start runmode");
+        FatalError("Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogSingle initialised");
@@ -219,29 +184,36 @@ int RunModeIdsNflogSingle(void)
     SCReturnInt(0);
 }
 
-int RunModeIdsNflogWorkers(void)
+static int RunModeIdsNflogWorkers(void)
 {
     SCEnter();
 
 #ifdef HAVE_NFLOG
-    int ret = 0;
-    char *live_dev = NULL;
-
-    RunModeInitialize();
     TimeModeSetLive();
 
-    ret = RunModeSetLiveCaptureWorkers(ParseNflogConfig,
-                                       NflogConfigGeThreadsCount,
-                                       "ReceiveNFLOG",
-                                       "DecodeNFLOG",
-                                       thread_name_workers,
-                                       live_dev);
+    int ret = RunModeSetLiveCaptureWorkers(ParseNflogConfig, NflogConfigGeThreadsCount,
+            "ReceiveNFLOG", "DecodeNFLOG", thread_name_workers, NULL);
     if (ret != 0) {
-        FatalError(SC_ERR_FATAL, "Unable to start runmode");
+        FatalError("Unable to start runmode");
     }
 
     SCLogInfo("RunModeIdsNflogWorkers initialised");
 #endif /* HAVE_NFLOG */
 
     SCReturnInt(0);
+}
+
+const char *RunModeIdsNflogGetDefaultMode(void)
+{
+    return "autofp";
+}
+
+void RunModeIdsNflogRegister(void)
+{
+    RunModeRegisterNewRunMode(
+            RUNMODE_NFLOG, "autofp", "Multi threaded nflog mode", RunModeIdsNflogAutoFp, NULL);
+    RunModeRegisterNewRunMode(
+            RUNMODE_NFLOG, "single", "Single threaded nflog mode", RunModeIdsNflogSingle, NULL);
+    RunModeRegisterNewRunMode(
+            RUNMODE_NFLOG, "workers", "Workers nflog mode", RunModeIdsNflogWorkers, NULL);
 }

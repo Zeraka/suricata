@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2020-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -19,31 +19,45 @@
 
 use super::mqtt_message::*;
 use super::parser::*;
-use crate::applayer::{self, LoggerFlags};
+use crate::applayer;
 use crate::applayer::*;
-use crate::core::{self, AppProto, Flow, ALPROTO_FAILED, ALPROTO_UNKNOWN, IPPROTO_TCP};
-use crate::log::*;
-use num_traits::FromPrimitive;
-use nom;
+use crate::conf::{conf_get, get_memval};
+use crate::core::*;
+use crate::direction::Direction;
+use crate::flow::Flow;
+use crate::frames::*;
+use nom7::Err;
 use std;
-use std::ffi::{CStr,CString};
-use std::mem::transmute;
+use std::collections::VecDeque;
+use std::ffi::CString;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerProtoDetectConfProtoDetectionEnabled,
+};
 
 // Used as a special pseudo packet identifier to denote the first CONNECT
 // packet in a connection. Note that there is no risk of collision with a
 // parsed packet identifier because in the protocol these are only 16 bit
 // unsigned.
-const MQTT_CONNECT_PKT_ID: u32 = std::u32::MAX;
+const MQTT_CONNECT_PKT_ID: u32 = u32::MAX;
 // Maximum message length in bytes. If the length of a message exceeds
 // this value, it will be truncated. Default: 1MB.
 static mut MAX_MSG_LEN: u32 = 1048576;
 
-static mut ALPROTO_MQTT: AppProto = ALPROTO_UNKNOWN;
+static mut MQTT_MAX_TX: usize = 1024;
 
-#[derive(FromPrimitive, Debug)]
-#[repr(u32)]
+pub(super) static mut ALPROTO_MQTT: AppProto = ALPROTO_UNKNOWN;
+
+#[derive(AppLayerFrameType)]
+pub enum MQTTFrameType {
+    Pdu,
+    Header,
+    Data,
+}
+
+#[derive(FromPrimitive, Debug, AppLayerEvent)]
 pub enum MQTTEvent {
-    MissingConnect = 0,
+    MissingConnect,
     MissingPublish,
     MissingSubscribe,
     MissingUnsubscribe,
@@ -51,7 +65,9 @@ pub enum MQTTEvent {
     UnintroducedMessage,
     InvalidQosLevel,
     MissingMsgId,
-    UnassignedMsgtype,
+    UnassignedMsgType,
+    TooManyTransactions,
+    MalformedTraffic,
 }
 
 #[derive(Debug)]
@@ -63,66 +79,75 @@ pub struct MQTTTransaction {
     toclient: bool,
     toserver: bool,
 
-    logged: LoggerFlags,
-    de_state: Option<*mut core::DetectEngineState>,
-    events: *mut core::AppLayerDecoderEvents,
     tx_data: applayer::AppLayerTxData,
 }
 
 impl MQTTTransaction {
-    pub fn new(msg: MQTTMessage) -> MQTTTransaction {
-        let mut m = MQTTTransaction {
-            tx_id: 0,
-            pkt_id: None,
-            complete: false,
-            logged: LoggerFlags::new(),
-            msg: Vec::new(),
-            toclient: false,
-            toserver: false,
-            de_state: None,
-            events: std::ptr::null_mut(),
-            tx_data: applayer::AppLayerTxData::new(),
-        };
+    pub fn new(msg: MQTTMessage, direction: Direction) -> MQTTTransaction {
+        let mut m = MQTTTransaction::new_empty(direction);
         m.msg.push(msg);
         return m;
     }
 
-    pub fn free(&mut self) {
-        if self.events != std::ptr::null_mut() {
-            core::sc_app_layer_decoder_events_free_events(&mut self.events);
-        }
-        if let Some(state) = self.de_state {
-            core::sc_detect_engine_state_free(state);
-        }
+    pub fn new_empty(direction: Direction) -> MQTTTransaction {
+        return MQTTTransaction {
+            tx_id: 0,
+            pkt_id: None,
+            complete: false,
+            msg: Vec::new(),
+            toclient: direction.is_to_client(),
+            toserver: direction.is_to_server(),
+            tx_data: applayer::AppLayerTxData::for_direction(direction),
+        };
     }
 }
 
-impl Drop for MQTTTransaction {
-    fn drop(&mut self) {
-        self.free();
+impl Transaction for MQTTTransaction {
+    fn id(&self) -> u64 {
+        self.tx_id
     }
 }
 
 pub struct MQTTState {
+    state_data: AppLayerStateData,
     tx_id: u64,
     pub protocol_version: u8,
-    transactions: Vec<MQTTTransaction>,
+    transactions: VecDeque<MQTTTransaction>,
     connected: bool,
     skip_request: usize,
     skip_response: usize,
-    max_msg_len: usize,
+    max_msg_len: u32,
+    tx_index_completed: usize,
+}
+
+impl State<MQTTTransaction> for MQTTState {
+    fn get_transaction_count(&self) -> usize {
+        self.transactions.len()
+    }
+
+    fn get_transaction_by_index(&self, index: usize) -> Option<&MQTTTransaction> {
+        self.transactions.get(index)
+    }
+}
+
+impl Default for MQTTState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MQTTState {
     pub fn new() -> Self {
         Self {
+            state_data: AppLayerStateData::new(),
             tx_id: 0,
             protocol_version: 0,
-            transactions: Vec::new(),
+            transactions: VecDeque::new(),
             connected: false,
             skip_request: 0,
             skip_response: 0,
-            max_msg_len: unsafe { MAX_MSG_LEN as usize },
+            max_msg_len: unsafe { MAX_MSG_LEN },
+            tx_index_completed: 0,
         }
     }
 
@@ -139,24 +164,22 @@ impl MQTTState {
             }
         }
         if found {
+            self.tx_index_completed = 0;
             self.transactions.remove(index);
         }
     }
 
     pub fn get_tx(&mut self, tx_id: u64) -> Option<&MQTTTransaction> {
-        for tx in &mut self.transactions {
-            if tx.tx_id == tx_id + 1 {
-                return Some(tx);
-            }
-        }
-        return None;
+        self.transactions.iter().find(|tx| tx.tx_id == tx_id + 1)
     }
 
     pub fn get_tx_by_pkt_id(&mut self, pkt_id: u32) -> Option<&mut MQTTTransaction> {
-        for tx in &mut self.transactions {
+        for tx in &mut self.transactions.range_mut(self.tx_index_completed..) {
             if !tx.complete {
                 if let Some(mpktid) = tx.pkt_id {
                     if mpktid == pkt_id {
+                        tx.tx_data.updated_tc = true;
+                        tx.tx_data.updated_ts = true;
                         return Some(tx);
                     }
                 }
@@ -166,13 +189,27 @@ impl MQTTState {
     }
 
     fn new_tx(&mut self, msg: MQTTMessage, toclient: bool) -> MQTTTransaction {
-        let mut tx = MQTTTransaction::new(msg);
+        let direction = if toclient {
+            Direction::ToClient
+        } else {
+            Direction::ToServer
+        };
+        let mut tx = MQTTTransaction::new(msg, direction);
         self.tx_id += 1;
         tx.tx_id = self.tx_id;
-        if toclient {
-            tx.toclient = true;
-        } else {
-            tx.toserver = true;
+        if self.transactions.len() > unsafe { MQTT_MAX_TX } {
+            let mut index = self.tx_index_completed;
+            for tx_old in &mut self.transactions.range_mut(self.tx_index_completed..) {
+                index += 1;
+                if !tx_old.complete {
+                    tx_old.tx_data.updated_tc = true;
+                    tx_old.tx_data.updated_ts = true;
+                    tx_old.complete = true;
+                    MQTTState::set_event(tx_old, MQTTEvent::TooManyTransactions);
+                    break;
+                }
+            }
+            self.tx_index_completed = index;
         }
         return tx;
     }
@@ -184,235 +221,212 @@ impl MQTTState {
     // without having to introduce lifetimes etc.
     // This is the reason for the code duplication below. Maybe there is a
     // more concise way to do it, but this works for now.
-    fn handle_msg(&mut self, msg: MQTTMessage, toclient: bool) {
+    fn handle_msg(&mut self, flow: *mut Flow, msg: MQTTMessage, toclient: bool) {
+        let tx_len = self.transactions.len();
         match msg.op {
             MQTTOperation::CONNECT(ref conn) => {
                 self.protocol_version = conn.protocol_version;
+                let mut tx = self.new_tx(msg, toclient);
+                tx.pkt_id = Some(MQTT_CONNECT_PKT_ID);
                 if self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::DoubleConnect);
-                    self.transactions.push(tx);
-                } else {
-                    let mut tx = self.new_tx(msg, toclient);
-                    tx.pkt_id = Some(MQTT_CONNECT_PKT_ID);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::DoubleConnect);
                 }
-            },
+                self.transactions.push_back(tx);
+            }
             MQTTOperation::PUBLISH(ref publish) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let pkt_id = publish.message_id;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push(tx);
-                    },
+                    }
                     1..=2 => {
-                        if let Some(pkt_id) = publish.message_id {
-                            let mut tx = self.new_tx(msg, toclient);
+                        if let Some(pkt_id) = pkt_id {
                             tx.pkt_id = Some(pkt_id as u32);
-                            self.transactions.push(tx);
                         } else {
-                            let mut tx = self.new_tx(msg, toclient);
-                            &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingMsgId);
-                            self.transactions.push(tx);
+                            MQTTState::set_event(&mut tx, MQTTEvent::MissingMsgId);
                         }
-                    },
+                    }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
-                        &mut MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push(tx);
+                        MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
                     }
                 }
-            },
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
+            }
             MQTTOperation::SUBSCRIBE(ref subscribe) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
                 let pkt_id = subscribe.message_id as u32;
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push(tx);
-                    },
+                    }
                     1..=2 => {
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.pkt_id = Some(pkt_id);
-                        self.transactions.push(tx);
-                    },
+                    }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
-                        &mut MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push(tx);
+                        MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
                     }
                 }
-            },
-            MQTTOperation::UNSUBSCRIBE(ref unsubscribe) => {
                 if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
                 }
+                self.transactions.push_back(tx);
+            }
+            MQTTOperation::UNSUBSCRIBE(ref unsubscribe) => {
                 let pkt_id = unsubscribe.message_id as u32;
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push(tx);
-                    },
+                    }
                     1..=2 => {
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.pkt_id = Some(pkt_id);
-                        self.transactions.push(tx);
-                    },
+                    }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
-                        &mut MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push(tx);
+                        MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
                     }
                 }
-            },
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
+            }
             MQTTOperation::CONNACK(ref _connack) => {
                 if let Some(tx) = self.get_tx_by_pkt_id(MQTT_CONNECT_PKT_ID) {
-                    (*tx).msg.push(msg);
-                    (*tx).complete = true;
-                    (*tx).pkt_id = None;
+                    tx.msg.push(msg);
+                    tx.complete = true;
+                    tx.pkt_id = None;
                     self.connected = true;
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingConnect);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::MissingConnect);
+                    tx.complete = true;
+                    self.transactions.push_back(tx);
                 }
-            },
-            MQTTOperation::PUBREC(ref v)
-            | MQTTOperation::PUBREL(ref v) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
+            }
+            MQTTOperation::PUBREC(ref v) | MQTTOperation::PUBREL(ref v) => {
                 if let Some(tx) = self.get_tx_by_pkt_id(v.message_id as u32) {
-                    (*tx).msg.push(msg);
+                    tx.msg.push(msg);
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
+                    self.transactions.push_back(tx);
                 }
-            },
-            MQTTOperation::PUBACK(ref v)
-            | MQTTOperation::PUBCOMP(ref v) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
+            }
+            MQTTOperation::PUBACK(ref v) | MQTTOperation::PUBCOMP(ref v) => {
                 if let Some(tx) = self.get_tx_by_pkt_id(v.message_id as u32) {
-                    (*tx).msg.push(msg);
-                    (*tx).complete = true;
-                    (*tx).pkt_id = None;
+                    tx.msg.push(msg);
+                    tx.complete = true;
+                    tx.pkt_id = None;
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
+                    self.transactions.push_back(tx);
                 }
-            },
+            }
             MQTTOperation::SUBACK(ref suback) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(suback.message_id as u32) {
-                    (*tx).msg.push(msg);
-                    (*tx).complete = true;
-                    (*tx).pkt_id = None;
+                    tx.msg.push(msg);
+                    tx.complete = true;
+                    tx.pkt_id = None;
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingSubscribe);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::MissingSubscribe);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
+                    self.transactions.push_back(tx);
                 }
-            },
+            }
             MQTTOperation::UNSUBACK(ref unsuback) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(unsuback.message_id as u32) {
-                    (*tx).msg.push(msg);
-                    (*tx).complete = true;
-                    (*tx).pkt_id = None;
+                    tx.msg.push(msg);
+                    tx.complete = true;
+                    tx.pkt_id = None;
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::MissingUnsubscribe);
-                    self.transactions.push(tx);
+                    MQTTState::set_event(&mut tx, MQTTEvent::MissingUnsubscribe);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
+                    self.transactions.push_back(tx);
                 }
-            },
+            }
             MQTTOperation::UNASSIGNED => {
                 let mut tx = self.new_tx(msg, toclient);
                 tx.complete = true;
-                &mut MQTTState::set_event(&mut tx, MQTTEvent::UnassignedMsgtype);
-                self.transactions.push(tx);
-            },
+                MQTTState::set_event(&mut tx, MQTTEvent::UnassignedMsgType);
+                self.transactions.push_back(tx);
+            }
             MQTTOperation::TRUNCATED(_) => {
                 let mut tx = self.new_tx(msg, toclient);
                 tx.complete = true;
-                self.transactions.push(tx);
-            },
-            MQTTOperation::AUTH(_)
-            | MQTTOperation::DISCONNECT(_) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
-                let mut tx = self.new_tx(msg, toclient);
-                tx.complete = true;
-                self.transactions.push(tx);
-            },
-            MQTTOperation::PINGREQ
-            | MQTTOperation::PINGRESP => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    &mut MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push(tx);
-                    return;
-                }
-                let mut tx = self.new_tx(msg, toclient);
-                tx.complete = true;
-                self.transactions.push(tx);
+                self.transactions.push_back(tx);
             }
+            MQTTOperation::AUTH(_) | MQTTOperation::DISCONNECT(_) => {
+                let mut tx = self.new_tx(msg, toclient);
+                tx.complete = true;
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
+            }
+            MQTTOperation::PINGREQ | MQTTOperation::PINGRESP => {
+                let mut tx = self.new_tx(msg, toclient);
+                tx.complete = true;
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
+            }
+        }
+        // If a new transaction was pushed, only then reassemble the data
+        if self.transactions.len() > tx_len {
+            let dir = if toclient {
+                Direction::ToClient
+            } else {
+                Direction::ToServer
+            };
+            sc_app_layer_parser_trigger_raw_stream_inspection(flow, dir as i32);
         }
     }
 
-    fn parse_request(&mut self, input: &[u8]) -> AppLayerResult {
+    fn parse_request(&mut self, flow: *mut Flow, stream_slice: StreamSlice) -> AppLayerResult {
+        let input = stream_slice.as_slice();
         let mut current = input;
-        if input.len() == 0 {
+
+        if input.is_empty() {
             return AppLayerResult::ok();
         }
 
         let mut consumed = 0;
-        SCLogDebug!("skip_request {} input len {}", self.skip_request, input.len());
+        SCLogDebug!(
+            "skip_request {} input len {}",
+            self.skip_request,
+            input.len()
+        );
         if self.skip_request > 0 {
             if input.len() <= self.skip_request {
                 SCLogDebug!("reducing skip_request by {}", input.len());
@@ -420,41 +434,64 @@ impl MQTTState {
                 return AppLayerResult::ok();
             } else {
                 current = &input[self.skip_request..];
-                SCLogDebug!("skip end reached, skipping {} :{:?}", self.skip_request, current);
+                SCLogDebug!(
+                    "skip end reached, skipping {} :{:?}",
+                    self.skip_request,
+                    current
+                );
                 consumed = self.skip_request;
                 self.skip_request = 0;
             }
         }
 
-
-        while current.len() > 0 {
-            let mut skipped = false;
+        while !current.is_empty() {
             SCLogDebug!("request: handling {}", current.len());
             match parse_message(current, self.protocol_version, self.max_msg_len) {
                 Ok((rem, msg)) => {
+                    let _pdu = Frame::new(
+                        flow,
+                        &stream_slice,
+                        current,
+                        (current.len() - rem.len()) as i64,
+                        MQTTFrameType::Pdu as u8,
+                        None,
+                    );
                     SCLogDebug!("request msg {:?}", msg);
                     if let MQTTOperation::TRUNCATED(ref trunc) = msg.op {
-                        SCLogDebug!("found truncated with skipped {} current len {}", trunc.skipped_length, current.len());
+                        SCLogDebug!(
+                            "found truncated with skipped {} current len {}",
+                            trunc.skipped_length,
+                            current.len()
+                        );
                         if trunc.skipped_length >= current.len() {
-                            skipped = true;
                             self.skip_request = trunc.skipped_length - current.len();
+                            self.handle_msg(flow, msg, true);
+                            return AppLayerResult::ok();
                         } else {
+                            consumed += trunc.skipped_length;
                             current = &current[trunc.skipped_length..];
+                            self.handle_msg(flow, msg, true);
                             self.skip_request = 0;
+                            continue;
                         }
                     }
-                    self.handle_msg(msg, false);
-                    if skipped {
-                        return AppLayerResult::ok();
-                    }
+
+                    self.mqtt_hdr_and_data_frames(flow, &stream_slice, &msg);
+                    self.handle_msg(flow, msg, false);
                     consumed += current.len() - rem.len();
                     current = rem;
                 }
-                Err(nom::Err::Incomplete(_)) => {
-                        SCLogDebug!("incomplete request: consumed {} needed {} (input len {})", consumed, (current.len() + 1), input.len());
-                        return AppLayerResult::incomplete(consumed as u32, (current.len() + 1) as u32);
+                Err(Err::Incomplete(_)) => {
+                    SCLogDebug!(
+                        "incomplete request: consumed {} needed {} (input len {})",
+                        consumed,
+                        (current.len() + 1),
+                        input.len()
+                    );
+                    return AppLayerResult::incomplete(consumed as u32, (current.len() + 1) as u32);
                 }
                 Err(_) => {
+                    self.set_event_notx(MQTTEvent::MalformedTraffic, false);
                     return AppLayerResult::err();
                 }
             }
@@ -463,55 +500,86 @@ impl MQTTState {
         return AppLayerResult::ok();
     }
 
-    fn parse_response(&mut self, input: &[u8]) -> AppLayerResult {
+    fn parse_response(&mut self, flow: *mut Flow, stream_slice: StreamSlice) -> AppLayerResult {
+        let input = stream_slice.as_slice();
         let mut current = input;
-        if input.len() == 0 {
+
+        if input.is_empty() {
             return AppLayerResult::ok();
         }
 
         let mut consumed = 0;
-        SCLogDebug!("skip_response {} input len {}", self.skip_response, current.len());
+        SCLogDebug!(
+            "skip_response {} input len {}",
+            self.skip_response,
+            current.len()
+        );
         if self.skip_response > 0 {
             if input.len() <= self.skip_response {
                 self.skip_response -= current.len();
                 return AppLayerResult::ok();
             } else {
                 current = &input[self.skip_response..];
-                SCLogDebug!("skip end reached, skipping {} :{:?}", self.skip_request, current);
+                SCLogDebug!(
+                    "skip end reached, skipping {} :{:?}",
+                    self.skip_request,
+                    current
+                );
                 consumed = self.skip_response;
                 self.skip_response = 0;
             }
         }
 
-        while current.len() > 0 {
-            let mut skipped = false;
+        while !current.is_empty() {
             SCLogDebug!("response: handling {}", current.len());
-            match parse_message(current, self.protocol_version, self.max_msg_len as usize) {
+            match parse_message(current, self.protocol_version, self.max_msg_len) {
                 Ok((rem, msg)) => {
+                    let _pdu = Frame::new(
+                        flow,
+                        &stream_slice,
+                        current,
+                        (current.len() - rem.len()) as i64,
+                        MQTTFrameType::Pdu as u8,
+                        None,
+                    );
+
                     SCLogDebug!("response msg {:?}", msg);
                     if let MQTTOperation::TRUNCATED(ref trunc) = msg.op {
-                        SCLogDebug!("found truncated with skipped {} current len {}", trunc.skipped_length, current.len());
+                        SCLogDebug!(
+                            "found truncated with skipped {} current len {}",
+                            trunc.skipped_length,
+                            current.len()
+                        );
                         if trunc.skipped_length >= current.len() {
-                            skipped = true;
                             self.skip_response = trunc.skipped_length - current.len();
+                            self.handle_msg(flow, msg, true);
+                            SCLogDebug!("skip_response now {}", self.skip_response);
+                            return AppLayerResult::ok();
                         } else {
+                            consumed += trunc.skipped_length;
                             current = &current[trunc.skipped_length..];
+                            self.handle_msg(flow, msg, true);
                             self.skip_response = 0;
+                            continue;
                         }
-                        SCLogDebug!("skip_response now {}", self.skip_response);
                     }
-                    self.handle_msg(msg, true);
-                    if skipped {
-                        return AppLayerResult::ok();
-                    }
+
+                    self.mqtt_hdr_and_data_frames(flow, &stream_slice, &msg);
+                    self.handle_msg(flow, msg, true);
                     consumed += current.len() - rem.len();
                     current = rem;
                 }
-                Err(nom::Err::Incomplete(_)) => {
-                    SCLogDebug!("incomplete response: consumed {} needed {} (input len {})", consumed, (current.len() + 1), input.len());
+                Err(Err::Incomplete(_)) => {
+                    SCLogDebug!(
+                        "incomplete response: consumed {} needed {} (input len {})",
+                        consumed,
+                        (current.len() + 1),
+                        input.len()
+                    );
                     return AppLayerResult::incomplete(consumed as u32, (current.len() + 1) as u32);
                 }
                 Err(_) => {
+                    self.set_event_notx(MQTTEvent::MalformedTraffic, true);
                     return AppLayerResult::err();
                 }
             }
@@ -521,120 +589,121 @@ impl MQTTState {
     }
 
     fn set_event(tx: &mut MQTTTransaction, event: MQTTEvent) {
-        let ev = event as u8;
-        core::sc_app_layer_decoder_events_set_event_raw(&mut tx.events, ev);
+        tx.tx_data.set_event(event as u8);
     }
 
-    fn tx_iterator(
-        &mut self,
-        min_tx_id: u64,
-        state: &mut u64,
-    ) -> Option<(&MQTTTransaction, u64, bool)> {
-        let mut index = *state as usize;
-        let len = self.transactions.len();
-
-        while index < len {
-            let tx = &self.transactions[index];
-            if tx.tx_id < min_tx_id + 1 {
-                index += 1;
-                continue;
-            }
-            *state = index as u64;
-            return Some((tx, tx.tx_id - 1, (len - index) > 1));
+    fn set_event_notx(&mut self, event: MQTTEvent, toclient: bool) {
+        let mut tx = MQTTTransaction::new_empty(if toclient {
+            Direction::ToClient
+        } else {
+            Direction::ToServer
+        });
+        self.tx_id += 1;
+        tx.tx_id = self.tx_id;
+        if toclient {
+            tx.toclient = true;
+        } else {
+            tx.toserver = true;
         }
+        tx.complete = true;
+        tx.tx_data.set_event(event as u8);
+        self.transactions.push_back(tx);
+    }
 
-        return None;
+    fn mqtt_hdr_and_data_frames(
+        &mut self, flow: *const Flow, stream_slice: &StreamSlice, input: &MQTTMessage,
+    ) {
+        let hdr = stream_slice.as_slice();
+        //MQTT payload has a fixed header of 2 bytes
+        let _mqtt_hdr = Frame::new(
+            flow,
+            stream_slice,
+            hdr,
+            2,
+            MQTTFrameType::Header as u8,
+            None,
+        );
+        SCLogDebug!("mqtt_hdr Frame {:?}", _mqtt_hdr);
+        let rem_length = input.header.remaining_length as usize;
+        let data = &hdr[2..rem_length + 2];
+        let _mqtt_data = Frame::new(
+            flow,
+            stream_slice,
+            data,
+            rem_length as i64,
+            MQTTFrameType::Data as u8,
+            None,
+        );
+        SCLogDebug!("mqtt_data Frame {:?}", _mqtt_data);
     }
 }
 
 // C exports.
 
-export_tx_get_detect_state!(rs_mqtt_tx_get_detect_state, MQTTTransaction);
-export_tx_set_detect_state!(rs_mqtt_tx_set_detect_state, MQTTTransaction);
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_probing_parser(
-    _flow: *const Flow,
-    _direction: u8,
-    input: *const u8,
-    input_len: u32,
-    _rdir: *mut u8,
+unsafe extern "C" fn mqtt_probing_parser(
+    _flow: *const Flow, _direction: u8, input: *const u8, input_len: u32, _rdir: *mut u8,
 ) -> AppProto {
+    if input.is_null() {
+        return ALPROTO_UNKNOWN;
+    }
     let buf = build_slice!(input, input_len as usize);
     match parse_fixed_header(buf) {
         Ok((_, hdr)) => {
             // reject unassigned message type
             if hdr.message_type == MQTTTypeCode::UNASSIGNED {
-                return unsafe { ALPROTO_FAILED } ;
+                return ALPROTO_FAILED;
             }
             // with 2 being the highest valid QoS level
             if hdr.qos_level > 2 {
-                return unsafe { ALPROTO_FAILED };
+                return ALPROTO_FAILED;
             }
-            return unsafe { ALPROTO_MQTT };
-        },
-        Err(nom::Err::Incomplete(_)) => ALPROTO_UNKNOWN,
-        Err(_) => unsafe { ALPROTO_FAILED }
+            return ALPROTO_MQTT;
+        }
+        Err(Err::Incomplete(_)) => ALPROTO_UNKNOWN,
+        Err(_) => ALPROTO_FAILED,
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_new() -> *mut std::os::raw::c_void {
+extern "C" fn mqtt_state_new(
+    _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
+) -> *mut std::os::raw::c_void {
     let state = MQTTState::new();
     let boxed = Box::new(state);
-    return unsafe { transmute(boxed) };
+    return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_free(state: *mut std::os::raw::c_void) {
-    let _drop: Box<MQTTState> = unsafe { transmute(state) };
+extern "C" fn mqtt_state_free(state: *mut std::os::raw::c_void) {
+    std::mem::drop(unsafe { Box::from_raw(state as *mut MQTTState) });
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn mqtt_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, MQTTState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_parse_request(
-    _flow: *const Flow,
-    state: *mut std::os::raw::c_void,
-    _pstate: *mut std::os::raw::c_void,
-    input: *const u8,
-    input_len: u32,
-    _data: *const std::os::raw::c_void,
-    _flags: u8,
+unsafe extern "C" fn mqtt_parse_request(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, MQTTState);
-    let buf = build_slice!(input, input_len as usize);
-    return state.parse_request(buf).into();
+    return state.parse_request(flow, stream_slice);
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_parse_response(
-    _flow: *const Flow,
-    state: *mut std::os::raw::c_void,
-    _pstate: *mut std::os::raw::c_void,
-    input: *const u8,
-    input_len: u32,
-    _data: *const std::os::raw::c_void,
-    _flags: u8,
+unsafe extern "C" fn mqtt_parse_response(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, MQTTState);
-    let buf = build_slice!(input, input_len as usize);
-    return state.parse_response(buf).into();
+    return state.parse_response(flow, stream_slice);
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_tx(
-    state: *mut std::os::raw::c_void,
-    tx_id: u64,
+unsafe extern "C" fn mqtt_state_get_tx(
+    state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, MQTTState);
     match state.get_tx(tx_id) {
         Some(tx) => {
-            return unsafe { transmute(tx) };
+            return tx as *const _ as *mut _;
         }
         None => {
             return std::ptr::null_mut();
@@ -642,39 +711,31 @@ pub extern "C" fn rs_mqtt_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn mqtt_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, MQTTState);
     return state.tx_id;
 }
 
 #[no_mangle]
-pub extern "C" fn rs_mqtt_state_progress_completion_status(_direction: u8) -> std::os::raw::c_int {
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_tx_is_toclient(tx: *const std::os::raw::c_void) -> std::os::raw::c_int {
-    let tx = cast_pointer!(tx, MQTTTransaction);
+pub unsafe extern "C" fn SCMqttTxIsToClient(tx: &MQTTTransaction) -> std::os::raw::c_int {
     if tx.toclient {
         return 1;
     }
     return 0;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_tx_get_alstate_progress(
-    tx: *mut std::os::raw::c_void,
-    direction: u8,
+unsafe extern "C" fn mqtt_tx_get_alstate_progress(
+    tx: *mut std::os::raw::c_void, direction: u8,
 ) -> std::os::raw::c_int {
     let tx = cast_pointer!(tx, MQTTTransaction);
-    if tx.complete {
-        if direction == core::STREAM_TOSERVER {
-            if tx.toserver {
+    match direction.into() {
+        Direction::ToServer => {
+            if tx.complete || tx.toclient {
                 return 1;
             }
-        } else if direction == core::STREAM_TOCLIENT {
-            if tx.toclient {
+        }
+        Direction::ToClient => {
+            if tx.complete || tx.toserver {
                 return 1;
             }
         }
@@ -682,163 +743,70 @@ pub extern "C" fn rs_mqtt_tx_get_alstate_progress(
     return 0;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_mqtt_tx_get_logged(
-    _state: *mut std::os::raw::c_void,
-    tx: *mut std::os::raw::c_void,
-) -> u32 {
-    let tx = cast_pointer!(tx, MQTTTransaction);
-    return tx.logged.get();
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_tx_set_logged(
-    _state: *mut std::os::raw::c_void,
-    tx: *mut std::os::raw::c_void,
-    logged: u32,
-) {
-    let tx = cast_pointer!(tx, MQTTTransaction);
-    tx.logged.set(logged);
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_events(
-    tx: *mut std::os::raw::c_void,
-) -> *mut core::AppLayerDecoderEvents {
-    let tx = cast_pointer!(tx, MQTTTransaction);
-    return tx.events;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_event_info_by_id(event_id: std::os::raw::c_int,
-                                                      event_name: *mut *const std::os::raw::c_char,
-                                                      event_type: *mut core::AppLayerEventType)
-                                                      -> i8
-{
-    if let Some(e) = FromPrimitive::from_i32(event_id as i32) {
-        let estr = match e {
-            MQTTEvent::MissingConnect      => { "missing_connect\0" },
-            MQTTEvent::MissingPublish      => { "missing_publish\0" },
-            MQTTEvent::MissingSubscribe    => { "missing_subscribe\0" },
-            MQTTEvent::MissingUnsubscribe  => { "missing_unsubscribe\0" },
-            MQTTEvent::DoubleConnect       => { "double_connect\0" },
-            MQTTEvent::UnintroducedMessage => { "unintroduced_message\0" },
-            MQTTEvent::InvalidQosLevel     => { "invalid_qos_level\0" },
-            MQTTEvent::MissingMsgId        => { "missing_msg_id\0" },
-            MQTTEvent::UnassignedMsgtype   => { "unassigned_msg_type\0" },
-        };
-        unsafe{
-            *event_name = estr.as_ptr() as *const std::os::raw::c_char;
-            *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        };
-        0
-    } else {
-        -1
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_event_info(event_name: *const std::os::raw::c_char,
-                                              event_id: *mut std::os::raw::c_int,
-                                              event_type: *mut core::AppLayerEventType)
-                                              -> std::os::raw::c_int
-{
-    if event_name == std::ptr::null() { return -1; }
-    let c_event_name: &CStr = unsafe { CStr::from_ptr(event_name) };
-    let event = match c_event_name.to_str() {
-        Ok(s) => {
-            match s {
-                "missing_connect"      => MQTTEvent::MissingConnect as i32,
-                "missing_publish"      => MQTTEvent::MissingPublish as i32,
-                "missing_subscribe"    => MQTTEvent::MissingSubscribe as i32,
-                "missing_unsubscribe"  => MQTTEvent::MissingUnsubscribe as i32,
-                "double_connect"       => MQTTEvent::DoubleConnect as i32,
-                "unintroduced_message" => MQTTEvent::UnintroducedMessage as i32,
-                "invalid_qos_level"    => MQTTEvent::InvalidQosLevel as i32,
-                "missing_msg_id"       => MQTTEvent::MissingMsgId as i32,
-                "unassigned_msg_type"  => MQTTEvent::UnassignedMsgtype as i32,
-                _                      => -1, // unknown event
-            }
-        },
-        Err(_) => -1, // UTF-8 conversion failed
-    };
-    unsafe{
-        *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        *event_id = event as std::os::raw::c_int;
-    };
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn rs_mqtt_state_get_tx_iterator(
-    _ipproto: u8,
-    _alproto: AppProto,
-    state: *mut std::os::raw::c_void,
-    min_tx_id: u64,
-    _max_tx_id: u64,
-    istate: &mut u64,
-) -> applayer::AppLayerGetTxIterTuple {
-    let state = cast_pointer!(state, MQTTState);
-    match state.tx_iterator(min_tx_id, istate) {
-        Some((tx, out_tx_id, has_next)) => {
-            let c_tx = unsafe { transmute(tx) };
-            let ires = applayer::AppLayerGetTxIterTuple::with_values(c_tx, out_tx_id, has_next);
-            return ires;
-        }
-        None => {
-            return applayer::AppLayerGetTxIterTuple::not_found();
-        }
-    }
-}
-
 // Parser name as a C style string.
-const PARSER_NAME: &'static [u8] = b"mqtt\0";
+const PARSER_NAME: &[u8] = b"mqtt\0";
 
-export_tx_data_get!(rs_mqtt_get_tx_data, MQTTTransaction);
+export_tx_data_get!(mqtt_get_tx_data, MQTTTransaction);
+export_state_data_get!(mqtt_get_state_data, MQTTState);
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_mqtt_register_parser(cfg_max_msg_len: u32) {
+pub unsafe extern "C" fn SCMqttRegisterParser() {
     let default_port = CString::new("[1883]").unwrap();
-    let max_msg_len = &mut MAX_MSG_LEN;
-    *max_msg_len = cfg_max_msg_len;
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_TCP,
-        probe_ts: Some(rs_mqtt_probing_parser),
-        probe_tc: Some(rs_mqtt_probing_parser),
+        probe_ts: Some(mqtt_probing_parser),
+        probe_tc: Some(mqtt_probing_parser),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_mqtt_state_new,
-        state_free: rs_mqtt_state_free,
-        tx_free: rs_mqtt_state_tx_free,
-        parse_ts: rs_mqtt_parse_request,
-        parse_tc: rs_mqtt_parse_response,
-        get_tx_count: rs_mqtt_state_get_tx_count,
-        get_tx: rs_mqtt_state_get_tx,
-        tx_get_comp_st: rs_mqtt_state_progress_completion_status,
-        tx_get_progress: rs_mqtt_tx_get_alstate_progress,
-        get_de_state: rs_mqtt_tx_get_detect_state,
-        set_de_state: rs_mqtt_tx_set_detect_state,
-        get_events: Some(rs_mqtt_state_get_events),
-        get_eventinfo: Some(rs_mqtt_state_get_event_info),
-        get_eventinfo_byid: Some(rs_mqtt_state_get_event_info_by_id),
+        state_new: mqtt_state_new,
+        state_free: mqtt_state_free,
+        tx_free: mqtt_state_tx_free,
+        parse_ts: mqtt_parse_request,
+        parse_tc: mqtt_parse_response,
+        get_tx_count: mqtt_state_get_tx_count,
+        get_tx: mqtt_state_get_tx,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
+        tx_get_progress: mqtt_tx_get_alstate_progress,
+        get_eventinfo: Some(MQTTEvent::get_event_info),
+        get_eventinfo_byid: Some(MQTTEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
-        get_files: None,
-        get_tx_iterator: Some(rs_mqtt_state_get_tx_iterator),
-        get_tx_data: rs_mqtt_get_tx_data,
+        get_tx_files: None,
+        get_tx_iterator: Some(crate::applayer::state_get_tx_iterator::<MQTTState, MQTTTransaction>),
+        get_tx_data: mqtt_get_tx_data,
+        get_state_data: mqtt_get_state_data,
         apply_tx_config: None,
         flags: 0,
+        get_frame_id_by_name: Some(MQTTFrameType::ffi_id_from_name),
+        get_frame_name_by_id: Some(MQTTFrameType::ffi_name_from_id),
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
         let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
         ALPROTO_MQTT = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
+        }
+        if let Some(val) = conf_get("app-layer.protocols.mqtt.max-tx") {
+            if let Ok(v) = val.parse::<usize>() {
+                MQTT_MAX_TX = v;
+            } else {
+                SCLogError!("Invalid value for mqtt.max-tx");
+            }
+        }
+        if let Some(val) = conf_get("app-layer.protocols.mqtt.max-msg-length") {
+            if let Ok(v) = get_memval(val) {
+                MAX_MSG_LEN = v as u32;
+            } else {
+                SCLogError!("Invalid value for mqtt.max-msg-length: {}", val);
+            }
         }
     } else {
         SCLogDebug!("Protocol detector and parser disabled for MQTT.");

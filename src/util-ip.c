@@ -27,6 +27,7 @@
 #include "suricata-common.h"
 #include "util-ip.h"
 #include "util-byte.h"
+#include "util-debug.h"
 
 /** \brief determine if a string is a valid ipv4 address
  *  \retval bool is addr valid?
@@ -39,8 +40,8 @@ bool IPv4AddressStringIsValid(const char *str)
 
     memset(&addr, 0, sizeof(addr));
 
-    uint32_t len = strlen(str);
-    uint32_t i = 0;
+    size_t len = strlen(str);
+    size_t i = 0;
     for (i = 0; i < len; i++) {
         if (!(str[i] == '.' || isdigit(str[i]))) {
             return false;
@@ -84,8 +85,8 @@ bool IPv6AddressStringIsValid(const char *str)
     int sep = 0;
     bool colon_seen = false;
 
-    uint32_t len = strlen(str);
-    uint32_t i = 0;
+    size_t len = strlen(str);
+    size_t i = 0;
     for (i = 0; i < len && str[i] != 0; i++) {
         if (!(str[i] == '.' || str[i] == ':' ||
             isxdigit(str[i])))
@@ -134,8 +135,7 @@ struct in_addr *ValidateIPV4Address(const char *addr_str)
         return NULL;
 
     if ( (addr = SCMalloc(sizeof(struct in_addr))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in ValidateIPV4Address. Exiting...");
+        FatalError("Fatal error encountered in ValidateIPV4Address. Exiting...");
     }
 
     if (inet_pton(AF_INET, addr_str, addr) <= 0) {
@@ -148,7 +148,7 @@ struct in_addr *ValidateIPV4Address(const char *addr_str)
 
 /**
  * \brief Validates an IPV6 address and returns the network endian arranged
- *        version of the IPV6 addresss
+ *        version of the IPV6 address
  *
  * \param addr Pointer to a character string containing an IPV6 address
  *
@@ -164,8 +164,7 @@ struct in6_addr *ValidateIPV6Address(const char *addr_str)
         return NULL;
 
     if ( (addr = SCMalloc(sizeof(struct in6_addr))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in ValidateIPV6Address. Exiting...");
+        FatalError("Fatal error encountered in ValidateIPV6Address. Exiting...");
     }
 
     if (inet_pton(AF_INET6, addr_str, addr) <= 0) {
@@ -201,6 +200,4 @@ void MaskIPNetblock(uint8_t *stream, int netmask, int key_bitlen)
         }
         stream[i] &= mask;
     }
-
-    return;
 }

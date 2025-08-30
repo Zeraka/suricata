@@ -27,6 +27,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-content-inspection.h"
@@ -65,10 +66,7 @@ void DetectIpv6hdrRegister(void)
 
     DetectPktMpmRegister("ipv6.hdr", 2, PrefilterGenericMpmPktRegister, GetData);
 
-    DetectPktInspectEngineRegister("ipv6.hdr", GetData,
-            DetectEngineInspectPktBufferGeneric);
-
-    return;
+    DetectPktInspectEngineRegister("ipv6.hdr", GetData, DetectEngineInspectPktBufferGeneric);
 }
 
 /**
@@ -87,7 +85,7 @@ static int DetectIpv6hdrSetup (DetectEngineCtx *de_ctx, Signature *s, const char
 
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
-    if (DetectBufferSetActiveList(s, g_ipv6hdr_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_ipv6hdr_buffer_id) < 0)
         return -1;
 
     return 0;
@@ -100,22 +98,25 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
+        if (!PacketIsIPv6(p)) {
+            return NULL;
+        }
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
         uint32_t hlen = IPV6_HEADER_LEN + IPV6_GET_EXTHDRS_LEN(p);
-        if (((uint8_t *)p->ip6h + (ptrdiff_t)hlen) >
-                ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p)))
-        {
+        if (((uint8_t *)ip6h + (ptrdiff_t)hlen) >
+                ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p))) {
             SCLogDebug("data out of range: %p > %p (exthdrs_len %u)",
-                    ((uint8_t *)p->ip6h + (ptrdiff_t)hlen),
+                    ((uint8_t *)ip6h + (ptrdiff_t)hlen),
                     ((uint8_t *)GET_PKT_DATA(p) + (ptrdiff_t)GET_PKT_LEN(p)),
                     IPV6_GET_EXTHDRS_LEN(p));
             SCReturnPtr(NULL, "InspectionBuffer");
         }
 
         const uint32_t data_len = hlen;
-        const uint8_t *data = (const uint8_t *)p->ip6h;
+        const uint8_t *data = (const uint8_t *)ip6h;
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     SCReturnPtr(buffer, "InspectionBuffer");

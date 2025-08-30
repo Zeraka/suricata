@@ -20,8 +20,8 @@
  *  \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __RUNMODE_UNIX_SOCKET_H__
-#define __RUNMODE_UNIX_SOCKET_H__
+#ifndef SURICATA_RUNMODE_UNIX_SOCKET_H
+#define SURICATA_RUNMODE_UNIX_SOCKET_H
 
 void RunModeUnixSocketRegister(void);
 const char *RunModeUnixSocketGetDefaultMode(void);
@@ -30,13 +30,20 @@ int RunModeUnixSocketIsActive(void);
 
 TmEcode UnixSocketPcapFile(TmEcode tm, struct timespec *last_processed);
 
+float MemcapsGetPressure(void);
+
 #ifdef BUILD_UNIX_SOCKET
 TmEcode UnixSocketDatasetAdd(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketDatasetRemove(json_t *cmd, json_t* answer, void *data);
+TmEcode UnixSocketDatasetDump(json_t *cmd, json_t *answer, void *data);
+TmEcode UnixSocketDatasetClear(json_t *cmd, json_t *answer, void *data);
+TmEcode UnixSocketDatasetLookup(json_t *cmd, json_t *answer, void *data);
+TmEcode UnixSocketDatajsonAdd(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketRegisterTenantHandler(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketReloadTenant(json_t *cmd, json_t* answer, void *data);
+TmEcode UnixSocketReloadTenants(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketUnregisterTenant(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketHostbitAdd(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketHostbitRemove(json_t *cmd, json_t* answer, void *data);
@@ -44,6 +51,7 @@ TmEcode UnixSocketHostbitList(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketSetMemcap(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketShowMemcap(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketShowAllMemcap(json_t *cmd, json_t *answer, void *data);
+TmEcode UnixSocketGetFlowStatsById(json_t *cmd, json_t *answer, void *data);
 #endif
 
-#endif /* __RUNMODE_UNIX_SOCKET_H__ */
+#endif /* SURICATA_RUNMODE_UNIX_SOCKET_H */

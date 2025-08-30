@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2020-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -19,12 +19,19 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-base64-decode.h"
-#include "util-base64.h"
 #include "util-byte.h"
 #include "util-print.h"
+#include "detect-engine-build.h"
+#include "rust.h"
 
 /* Arbitrary maximum buffer size for decoded base64 data. */
 #define BASE64_DECODE_MAX 65535
+
+typedef struct DetectBase64Decode_ {
+    uint16_t bytes;
+    uint32_t offset;
+    uint8_t relative;
+} DetectBase64Decode;
 
 static const char decode_pattern[] = "\\s*(bytes\\s+(\\d+),?)?"
     "\\s*(offset\\s+(\\d+),?)?"
@@ -60,7 +67,6 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
     const SigMatchData *smd, const uint8_t *payload, uint32_t payload_len)
 {
     DetectBase64Decode *data = (DetectBase64Decode *)smd->ctx;
-    int decode_len;
 
 #if 0
     printf("Input data:\n");
@@ -69,6 +75,7 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
 
     if (data->relative) {
         payload += det_ctx->buffer_offset;
+        DEBUG_VALIDATE_BUG_ON(det_ctx->buffer_offset > payload_len);
         payload_len -= det_ctx->buffer_offset;
     }
 
@@ -80,17 +87,18 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
         payload_len -= data->offset;
     }
 
-    decode_len = MIN(payload_len, data->bytes);
-
+    uint32_t decode_len = MIN(payload_len, data->bytes);
 #if 0
     printf("Decoding:\n");
     PrintRawDataFp(stdout, payload, decode_len);
 #endif
 
-    det_ctx->base64_decoded_len = DecodeBase64(det_ctx->base64_decoded,
-        payload, decode_len, 0);
-    SCLogDebug("Decoded %d bytes from base64 data.",
-        det_ctx->base64_decoded_len);
+    if (decode_len > 0) {
+        uint32_t num_decoded =
+                SCBase64Decode(payload, decode_len, SCBase64ModeRFC4648, det_ctx->base64_decoded);
+        det_ctx->base64_decoded_len = num_decoded;
+        SCLogDebug("Decoded %d bytes from base64 data.", det_ctx->base64_decoded_len);
+    }
 #if 0
     if (det_ctx->base64_decoded_len) {
         printf("Decoded data:\n");
@@ -102,12 +110,9 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
     return det_ctx->base64_decoded_len > 0;
 }
 
-static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
-    uint32_t *offset, uint8_t *relative)
+static int DetectBase64DecodeParse(
+        const char *str, uint16_t *bytes, uint32_t *offset, uint8_t *relative)
 {
-    static const int max = 30;
-    int ov[max];
-    int pcre_rc;
     const char *bytes_str = NULL;
     const char *offset_str = NULL;
     const char *relative_str = NULL;
@@ -116,55 +121,63 @@ static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
     *bytes = 0;
     *offset = 0;
     *relative = 0;
+    size_t pcre2_len;
+    pcre2_match_data *match = NULL;
 
-    pcre_rc = DetectParsePcreExec(&decode_pcre, str,  0, 0, ov, max);
+    int pcre_rc = DetectParsePcreExec(&decode_pcre, &match, str, 0, 0);
     if (pcre_rc < 3) {
         goto error;
     }
 
     if (pcre_rc >= 3) {
-        if (pcre_get_substring((char *)str, ov, max, 2, &bytes_str) > 0) {
-            if (StringParseUint32(bytes, 10, 0, bytes_str) <= 0) {
-                SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,
-                    "Bad value for bytes: \"%s\"", bytes_str);
+        if (pcre2_substring_get_bynumber(match, 2, (PCRE2_UCHAR8 **)&bytes_str, &pcre2_len) == 0) {
+            if (StringParseUint16(bytes, 10, 0, bytes_str) <= 0) {
+                SCLogError("Bad value for bytes: \"%s\"", bytes_str);
                 goto error;
             }
         }
      }
 
     if (pcre_rc >= 5) {
-        if (pcre_get_substring((char *)str, ov, max, 4, &offset_str)) {
+        if (pcre2_substring_get_bynumber(match, 4, (PCRE2_UCHAR8 **)&offset_str, &pcre2_len) == 0) {
             if (StringParseUint32(offset, 10, 0, offset_str) <= 0) {
-                SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,
-                    "Bad value for offset: \"%s\"", offset_str);
+                SCLogError("Bad value for offset: \"%s\"", offset_str);
                 goto error;
             }
         }
     }
 
     if (pcre_rc >= 6) {
-        if (pcre_get_substring((char *)str, ov, max, 5, &relative_str)) {
+        if (pcre2_substring_get_bynumber(match, 5, (PCRE2_UCHAR8 **)&relative_str, &pcre2_len) ==
+                0) {
             if (strcmp(relative_str, "relative") == 0) {
                 *relative = 1;
             }
             else {
-                SCLogError(SC_ERR_INVALID_RULE_ARGUMENT,
-                    "Invalid argument: \"%s\"", relative_str);
+                SCLogError("Invalid argument: \"%s\"", relative_str);
                 goto error;
             }
         }
     }
 
     retval = 1;
+
+    pcre2_match_data_free(match);
+    match = NULL;
+
 error:
+
     if (bytes_str != NULL) {
-        pcre_free_substring(bytes_str);
+        pcre2_substring_free((PCRE2_UCHAR8 *)bytes_str);
     }
     if (offset_str != NULL) {
-        pcre_free_substring(offset_str);
+        pcre2_substring_free((PCRE2_UCHAR8 *)offset_str);
     }
     if (relative_str != NULL) {
-        pcre_free_substring(relative_str);
+        pcre2_substring_free((PCRE2_UCHAR8 *)relative_str);
+    }
+    if (match) {
+        pcre2_match_data_free(match);
     }
     return retval;
 }
@@ -172,12 +185,11 @@ error:
 static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
     const char *str)
 {
-    uint32_t bytes = 0;
+    uint16_t bytes = 0;
     uint32_t offset = 0;
     uint8_t relative = 0;
     DetectBase64Decode *data = NULL;
     int sm_list;
-    SigMatch *sm = NULL;
     SigMatch *pm = NULL;
 
     if (str != NULL) {
@@ -195,13 +207,6 @@ static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
 
     if (s->init_data->list != DETECT_SM_LIST_NOTSET) {
         sm_list = s->init_data->list;
-#if 0
-        if (data->relative) {
-            pm = SigMatchGetLastSMFromLists(s, 4,
-                DETECT_CONTENT, s->sm_lists_tail[sm_list],
-                DETECT_PCRE, s->sm_lists_tail[sm_list]);
-        }
-#endif
     }
     else {
         pm = DetectGetLastSMFromLists(s,
@@ -219,13 +224,10 @@ static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
         }
     }
 
-    sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BASE64_DECODE, (SigMatchCtx *)data, sm_list) ==
+            NULL) {
         goto error;
     }
-    sm->type = DETECT_BASE64_DECODE;
-    sm->ctx = (SigMatchCtx *)data;
-    SigMatchAppendSMToList(s, sm, sm_list);
 
     if (!data->bytes) {
         data->bytes = BASE64_DECODE_MAX;
@@ -262,7 +264,7 @@ static int g_http_header_buffer_id = 0;
 static int DetectBase64TestDecodeParse(void)
 {
     int retval = 0;
-    uint32_t bytes = 0;
+    uint16_t bytes = 0;
     uint32_t offset = 0;
     uint8_t relative = 0;
 
@@ -344,88 +346,17 @@ end:
  */
 static int DetectBase64DecodeTestSetup(void)
 {
-    DetectEngineCtx *de_ctx = NULL;
-    Signature *s;
-    int retval = 0;
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
 
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any ("
+                                                 "base64_decode; content:\"content\"; "
+                                                 "sid:1; rev:1;)");
+    FAIL_IF_NULL(s);
+    FAIL_IF_NULL(s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]);
 
-    de_ctx->sig_list = SigInit(de_ctx,
-        "alert tcp any any -> any any ("
-        "msg:\"DetectBase64DecodeTestSetup\"; "
-        "base64_decode; content:\"content\"; "
-        "sid:1; rev:1;)");
-    if (de_ctx->sig_list == NULL) {
-        goto end;
-    }
-    s = de_ctx->sig_list;
-    if (s == NULL) {
-        goto end;
-    }
-    if (s->sm_lists_tail[DETECT_SM_LIST_PMATCH] == NULL) {
-        goto end;
-    }
-
-    retval = 1;
-end:
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
-    return retval;
-}
-
-/**
- * Test keyword setup when the prior rule has a content modifier on
- * it.
- */
-static int DetectBase64DecodeHttpHeaderTestSetup(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    Signature *s;
-    int retval = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
-    de_ctx->sig_list = SigInit(de_ctx,
-        "alert tcp any any -> any any ("
-        "msg:\"DetectBase64DecodeTestSetup\"; "
-        "content:\"Authorization: basic \"; http_header; "
-        "base64_decode; content:\"content\"; "
-        "sid:1; rev:1;)");
-    if (de_ctx->sig_list == NULL) {
-        goto end;
-    }
-    s = de_ctx->sig_list;
-    if (s == NULL) {
-        goto end;
-    }
-
-    /* I'm not complete sure if this list should not be NULL. */
-    if (s->sm_lists_tail[DETECT_SM_LIST_PMATCH] == NULL) {
-        goto end;
-    }
-
-    /* Test that the http header list is not NULL. */
-    if (s->sm_lists_tail[g_http_header_buffer_id] == NULL) {
-        goto end;
-    }
-
-    retval = 1;
-end:
-    if (de_ctx != NULL) {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
-    return retval;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 static int DetectBase64DecodeTestDecode(void)
@@ -666,8 +597,6 @@ static void DetectBase64DecodeRegisterTests(void)
 
     UtRegisterTest("DetectBase64TestDecodeParse", DetectBase64TestDecodeParse);
     UtRegisterTest("DetectBase64DecodeTestSetup", DetectBase64DecodeTestSetup);
-    UtRegisterTest("DetectBase64DecodeHttpHeaderTestSetup",
-                   DetectBase64DecodeHttpHeaderTestSetup);
     UtRegisterTest("DetectBase64DecodeTestDecode",
                    DetectBase64DecodeTestDecode);
     UtRegisterTest("DetectBase64DecodeTestDecodeWithOffset",

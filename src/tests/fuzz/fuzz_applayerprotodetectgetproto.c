@@ -6,46 +6,49 @@
 
 
 #include "suricata-common.h"
+#include "suricata.h"
 #include "app-layer-detect-proto.h"
 #include "flow-util.h"
-#include "app-layer-parser.h"
+#include "app-layer.h"
 #include "util-unittest-helper.h"
-
+#include "conf-yaml-loader.h"
 
 #define HEADER_LEN 6
 
-//rule of thumb constant, so as not to timeout target
-#define PROTO_DETECT_MAX_LEN 1024
+extern const char *configNoChecksum;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 AppLayerProtoDetectThreadCtx *alpd_tctx = NULL;
+SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     Flow *f;
     TcpSession ssn;
-    bool reverse;
-    AppProto alproto;
-    AppProto alproto2;
+    bool reverse = false;
+
+    if (alpd_tctx == NULL) {
+        //global init
+        InitGlobal();
+        SCRunmodeSet(RUNMODE_UNITTEST);
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+            abort();
+        }
+        MpmTableSetup();
+        SpmTableSetup();
+        EngineModeSetIDS();
+        AppLayerSetup();
+        alpd_tctx = AppLayerProtoDetectGetCtxThread();
+        SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
+    }
 
     if (size < HEADER_LEN) {
         return 0;
     }
 
-    if (alpd_tctx == NULL) {
-        //global init
-        InitGlobal();
-        run_mode = RUNMODE_UNITTEST;
-        MpmTableSetup();
-        SpmTableSetup();
-        AppLayerProtoDetectSetup();
-        AppLayerParserSetup();
-        AppLayerParserRegisterProtocolParsers();
-        alpd_tctx = AppLayerProtoDetectGetCtxThread();
-    }
-
-    f = TestHelperBuildFlow(AF_INET, "1.2.3.4", "5.6.7.8", (data[2] << 8) | data[3], (data[4] << 8) | data[5]);
+    f = TestHelperBuildFlow(AF_INET, "1.2.3.4", "5.6.7.8", (uint16_t)((data[2] << 8) | data[3]),
+            (uint16_t)((data[4] << 8) | data[5]));
     if (f == NULL) {
         return 0;
     }
@@ -54,21 +57,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     f->protoctx = &ssn;
     f->protomap = FlowGetProtoMapping(f->proto);
 
-    alproto = AppLayerProtoDetectGetProto(alpd_tctx, f, data+HEADER_LEN, size-HEADER_LEN, f->proto, data[0], &reverse);
-    if (alproto != ALPROTO_UNKNOWN && alproto != ALPROTO_FAILED && f->proto == IPPROTO_TCP) {
-        /* If we find a valid protocol :
-         * check that with smaller input
-         * we find the same protocol or ALPROTO_UNKNOWN.
-         * Otherwise, we have evasion with TCP splitting
-         */
-        for (size_t i = 0; i < size-HEADER_LEN && i < PROTO_DETECT_MAX_LEN; i++) {
-            alproto2 = AppLayerProtoDetectGetProto(alpd_tctx, f, data+HEADER_LEN, i, f->proto, data[0], &reverse);
-            if (alproto2 != ALPROTO_UNKNOWN && alproto2 != alproto) {
-                printf("Assertion failure : With input length %"PRIuMAX", found %s instead of %s\n", (uintmax_t) i, AppProtoToString(alproto2), AppProtoToString(alproto));
-                abort();
-            }
-        }
+    uint8_t flags = STREAM_TOCLIENT;
+    if (data[0] & STREAM_TOSERVER) {
+        flags = STREAM_TOSERVER;
     }
+    AppLayerProtoDetectGetProto(alpd_tctx, f, data + HEADER_LEN, (uint32_t)(size - HEADER_LEN),
+            f->proto, flags, &reverse);
     FlowFree(f);
 
     return 0;

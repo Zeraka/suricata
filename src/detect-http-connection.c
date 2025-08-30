@@ -36,8 +36,9 @@
 #define BUFFER_NAME "http_connection"
 #define BUFFER_DESC "http connection header"
 #define HEADER_NAME "Connection"
-#define KEYWORD_ID DETECT_AL_HTTP_HEADER_CONNECTION
+#define KEYWORD_ID          DETECT_HTTP_HEADER_CONNECTION
 #define KEYWORD_TOSERVER 1
+#define KEYWORD_TOCLIENT    1
 
 #include "detect-http-headers-stub.h"
 #include "detect-http-connection.h"

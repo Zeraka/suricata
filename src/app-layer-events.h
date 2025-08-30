@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,11 +22,13 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __APP_LAYER_EVENTS_H__
-#define __APP_LAYER_EVENTS_H__
+#ifndef SURICATA_APP_LAYER_EVENTS_H
+#define SURICATA_APP_LAYER_EVENTS_H
 
 /* contains fwd declaration of AppLayerDecoderEvents_ */
 #include "decode.h"
+#include "rust.h"
+#include "util-enum.h"
 
 /**
  * \brief Data structure to store app layer decoder events.
@@ -52,28 +54,20 @@ enum {
     APPLAYER_UNEXPECTED_PROTOCOL,
 };
 
-/* the event types for app events */
-typedef enum AppLayerEventType_ {
-    APP_LAYER_EVENT_TYPE_TRANSACTION = 1,
-    APP_LAYER_EVENT_TYPE_PACKET,
-} AppLayerEventType;
+int AppLayerGetPktEventInfo(const char *event_name, uint8_t *event_id);
 
-int AppLayerGetPktEventInfo(const char *event_name, int *event_id);
-
-int AppLayerGetEventInfoById(int event_id, const char **event_name,
-                             AppLayerEventType *event_type);
+int AppLayerGetEventInfoById(
+        uint8_t event_id, const char **event_name, AppLayerEventType *event_type);
 void AppLayerDecoderEventsSetEventRaw(AppLayerDecoderEvents **sevents, uint8_t event);
-void AppLayerDecoderEventsSetEvent(Flow *f, uint8_t event);
 
-static inline int AppLayerDecoderEventsIsEventSet(AppLayerDecoderEvents *devents,
-                                                  uint8_t event)
+static inline int AppLayerDecoderEventsIsEventSet(
+        const AppLayerDecoderEvents *devents, uint8_t event)
 {
     if (devents == NULL)
         return 0;
 
-    int i;
     int cnt = devents->cnt;
-    for (i = 0; i < cnt; i++) {
+    for (int i = 0; i < cnt; i++) {
         if (devents->events[i] == event)
             return 1;
     }
@@ -83,6 +77,8 @@ static inline int AppLayerDecoderEventsIsEventSet(AppLayerDecoderEvents *devents
 
 void AppLayerDecoderEventsResetEvents(AppLayerDecoderEvents *events);
 void AppLayerDecoderEventsFreeEvents(AppLayerDecoderEvents **events);
+int DetectEngineGetEventInfo(
+        const char *event_name, uint8_t *event_id, AppLayerEventType *event_type);
+int SCAppLayerGetEventIdByName(const char *event_name, SCEnumCharMap *table, uint8_t *event_id);
 
-#endif /* __APP_LAYER_EVENTS_H__ */
-
+#endif /* SURICATA_APP_LAYER_EVENTS_H */

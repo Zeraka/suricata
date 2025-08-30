@@ -27,9 +27,8 @@
  * used for testing.
  */
 
-
-#ifndef __UTIL_VALIDATE_H__
-#define __UTIL_VALIDATE_H__
+#ifndef SURICATA_UTIL_VALIDATE_H
+#define SURICATA_UTIL_VALIDATE_H
 
 #ifdef DEBUG_VALIDATION
 
@@ -66,41 +65,33 @@
  *
  *  BUG_ON's on problems
  */
-#define DEBUG_VALIDATE_PACKET(p) do {               \
-    if ((p) != NULL) {                              \
-        if ((p)->flow != NULL) {                    \
-            DEBUG_VALIDATE_FLOW((p)->flow);         \
-        }                                           \
-        if (!((p)->flags & (PKT_IS_FRAGMENT|PKT_IS_INVALID))) {          \
-            if ((p)->proto == IPPROTO_TCP) {            \
-                BUG_ON((p)->tcph == NULL);              \
-            } else if ((p)->proto == IPPROTO_UDP) {     \
-                BUG_ON((p)->udph == NULL);              \
-            } else if ((p)->proto == IPPROTO_ICMP) {    \
-                BUG_ON((p)->icmpv4h == NULL);           \
-            } else if ((p)->proto == IPPROTO_SCTP) {    \
-                BUG_ON((p)->sctph == NULL);             \
-            } else if ((p)->proto == IPPROTO_ICMPV6) {  \
-                BUG_ON((p)->icmpv6h == NULL);           \
-            }                                           \
-        }                                           \
-        if ((p)->payload_len > 0) {                 \
-            BUG_ON((p)->payload == NULL);           \
-        }                                           \
-        BUG_ON((p)->ip4h != NULL && (p)->ip6h != NULL);     \
-        BUG_ON((p)->flowflags != 0 && (p)->flow == NULL);   \
-        BUG_ON((p)->flowflags & FLOW_PKT_TOSERVER &&\
-               (p)->flowflags & FLOW_PKT_TOCLIENT); \
-    }                                               \
-} while(0)
+#define DEBUG_VALIDATE_PACKET(p)                                                                   \
+    do {                                                                                           \
+        if ((p) != NULL) {                                                                         \
+            if ((p)->flow != NULL) {                                                               \
+                DEBUG_VALIDATE_FLOW((p)->flow);                                                    \
+            }                                                                                      \
+            if (!((p)->flags & (PKT_IS_FRAGMENT | PKT_IS_INVALID))) {                              \
+                if ((p)->proto == IPPROTO_TCP) {                                                   \
+                    BUG_ON(PacketGetTCP((p)) == NULL);                                             \
+                } else if ((p)->proto == IPPROTO_UDP) {                                            \
+                    BUG_ON(PacketGetUDP((p)) == NULL);                                             \
+                } else if ((p)->proto == IPPROTO_ICMP) {                                           \
+                    BUG_ON(PacketGetICMPv4((p)) == NULL);                                          \
+                } else if ((p)->proto == IPPROTO_SCTP) {                                           \
+                    BUG_ON(PacketGetSCTP((p)) == NULL);                                            \
+                } else if ((p)->proto == IPPROTO_ICMPV6) {                                         \
+                    BUG_ON(PacketGetICMPv6((p)) == NULL);                                          \
+                }                                                                                  \
+            }                                                                                      \
+            if ((p)->payload_len > 0) {                                                            \
+                BUG_ON((p)->payload == NULL);                                                      \
+            }                                                                                      \
+            BUG_ON((p)->flowflags != 0 && (p)->flow == NULL);                                      \
+            BUG_ON((p)->flowflags &FLOW_PKT_TOSERVER && (p)->flowflags & FLOW_PKT_TOCLIENT);       \
+        }                                                                                          \
+    } while (0)
 
-#define DEBUG_VALIDATE_BUG_ON(exp) BUG_ON((exp))
-
-#elif defined(__clang_analyzer__)
-
-#define DEBUG_ASSERT_FLOW_LOCKED(f)
-#define DEBUG_VALIDATE_FLOW(f)
-#define DEBUG_VALIDATE_PACKET(p)
 #define DEBUG_VALIDATE_BUG_ON(exp) BUG_ON((exp))
 
 #else /* DEBUG_VALIDATE */
@@ -112,5 +103,4 @@
 
 #endif /* DEBUG_VALIDATE */
 
-#endif /* __UTIL_VALIDATE_H__ */
-
+#endif /* SURICATA_UTIL_VALIDATE_H */

@@ -22,30 +22,14 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
-#include "detect.h"
-#include "pkt-var.h"
-#include "conf.h"
-
-#include "threads.h"
-#include "threadvars.h"
-#include "tm-threads.h"
-
-#include "util-print.h"
-#include "util-unittest.h"
-
-#include "util-debug.h"
-
-#include "output.h"
 #include "log-tcp-data.h"
-#include "app-layer-htp.h"
-#include "app-layer.h"
-#include "app-layer-parser.h"
-#include "util-privs.h"
-#include "util-buffer.h"
 
+#include "threadvars.h"
+
+#include "util-conf.h"
 #include "util-logopenfile.h"
-#include "util-time.h"
+#include "util-path.h"
+#include "util-print.h"
 
 #define DEFAULT_LOG_FILENAME "tcp-data.log"
 
@@ -60,17 +44,17 @@ static void LogTcpDataLogDeInitCtx(OutputCtx *);
 int LogTcpDataLogger(ThreadVars *tv, void *thread_data, const Flow *f, const uint8_t *data, uint32_t data_len, uint64_t tx_id, uint8_t flags);
 
 void LogTcpDataLogRegister (void) {
-    OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "tcp-data",
-        LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_TCP_DATA,
-        LogTcpDataLogThreadInit, LogTcpDataLogThreadDeinit, NULL);
+    OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "tcp-data", LogTcpDataLogInitCtx,
+            LogTcpDataLogger, STREAMING_TCP_DATA, LogTcpDataLogThreadInit,
+            LogTcpDataLogThreadDeinit);
     OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "http-body-data",
-        LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_HTTP_BODIES,
-        LogTcpDataLogThreadInit, LogTcpDataLogThreadDeinit, NULL);
+            LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_HTTP_BODIES, LogTcpDataLogThreadInit,
+            LogTcpDataLogThreadDeinit);
 }
 
 typedef struct LogTcpDataFileCtx_ {
     LogFileCtx *file_ctx;
-    enum OutputStreamingType type;
+    enum SCOutputStreamingType type;
     const char *log_dir;
     int file;
     int dir;
@@ -181,10 +165,9 @@ int LogTcpDataLogger(ThreadVars *tv, void *thread_data, const Flow *f,
 
 TmEcode LogTcpDataLogThreadInit(ThreadVars *t, const void *initdata, void **data)
 {
-    LogTcpDataLogThread *aft = SCMalloc(sizeof(LogTcpDataLogThread));
+    LogTcpDataLogThread *aft = SCCalloc(1, sizeof(LogTcpDataLogThread));
     if (unlikely(aft == NULL))
         return TM_ECODE_FAILED;
-    memset(aft, 0, sizeof(LogTcpDataLogThread));
 
     if(initdata == NULL)
     {
@@ -199,7 +182,7 @@ TmEcode LogTcpDataLogThreadInit(ThreadVars *t, const void *initdata, void **data
         return TM_ECODE_FAILED;
     }
 
-    /* Use the Ouptut Context (file pointer and mutex) */
+    /* Use the Output Context (file pointer and mutex) */
     aft->tcpdatalog_ctx= ((OutputCtx *)initdata)->data;
 
     *data = (void *)aft;
@@ -225,7 +208,7 @@ TmEcode LogTcpDataLogThreadDeinit(ThreadVars *t, void *data)
  *  \param conf Pointer to ConfNode containing this loggers configuration.
  *  \return NULL if failure, LogFileCtx* to the file_ctx if succesful
  * */
-OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
+OutputInitResult LogTcpDataLogInitCtx(SCConfNode *conf)
 {
     OutputInitResult result = { NULL, false };
     char filename[PATH_MAX] = "";
@@ -234,16 +217,15 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
 
     LogFileCtx *file_ctx = LogFileNewCtx();
     if(file_ctx == NULL) {
-        SCLogError(SC_ERR_TCPDATA_LOG_GENERIC, "couldn't create new file_ctx");
+        SCLogError("couldn't create new file_ctx");
         return result;
     }
 
-    LogTcpDataFileCtx *tcpdatalog_ctx = SCMalloc(sizeof(LogTcpDataFileCtx));
+    LogTcpDataFileCtx *tcpdatalog_ctx = SCCalloc(1, sizeof(LogTcpDataFileCtx));
     if (unlikely(tcpdatalog_ctx == NULL)) {
         LogFileFreeCtx(file_ctx);
         return result;
     }
-    memset(tcpdatalog_ctx, 0x00, sizeof(LogTcpDataFileCtx));
 
     tcpdatalog_ctx->file_ctx = file_ctx;
 
@@ -260,7 +242,7 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
             }
         }
 
-        const char *logtype = ConfNodeLookupChildValue(conf, "type");
+        const char *logtype = SCConfNodeLookupChildValue(conf, "type");
         if (logtype == NULL)
             logtype = "file";
 
@@ -287,7 +269,7 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
     }
 
     if (tcpdatalog_ctx->dir == 1) {
-        tcpdatalog_ctx->log_dir = ConfigGetLogDirectory();
+        tcpdatalog_ctx->log_dir = SCConfigGetLogDirectory();
         char dirfull[PATH_MAX];
 
         /* create the filename to use */
@@ -315,7 +297,7 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
 parsererror:
     LogFileFreeCtx(file_ctx);
     SCFree(tcpdatalog_ctx);
-    SCLogError(SC_ERR_INVALID_ARGUMENT,"Syntax error in custom http log format string.");
+    SCLogError("Syntax error in custom http log format string.");
     return result;
 
 }

@@ -21,10 +21,12 @@
 #include "../conf-yaml-loader.h"
 #include "../detect-parse.h"
 #include "../detect-engine-content-inspection.h"
+#include "../detect-engine-build.h"
 #include "../pkt-var.h"
 #include "../flow-util.h"
 #include "../stream-tcp-reassemble.h"
 #include "../util-unittest.h"
+#include "../util-var-name.h"
 #include "../util-unittest-helper.h"
 
 static const char *dummy_conf_string =
@@ -332,9 +334,9 @@ static int SigTest06 (void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -350,8 +352,7 @@ static int SigTest06 (void)
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
     FAIL_IF_NULL(det_ctx);
 
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, buf, buflen);
+    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, buf, buflen);
     FAIL_IF(r != 0);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
@@ -362,7 +363,7 @@ static int SigTest06 (void)
     DetectEngineCtxFree(de_ctx);
     AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     PASS;
 }
@@ -399,9 +400,9 @@ static int SigTest07 (void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -424,16 +425,12 @@ static int SigTest07 (void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx,(void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, buf, buflen);
+    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, buf, buflen);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
         result = 0;
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     if (PacketAlertCheck(p, 1) && PacketAlertCheck(p, 2))
@@ -445,7 +442,7 @@ end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FlowCleanupAppLayer(&f);
     FLOW_DESTROY(&f);
     SigGroupCleanup(de_ctx);
@@ -489,9 +486,9 @@ static int SigTest08 (void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -514,16 +511,12 @@ static int SigTest08 (void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx,(void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, buf, buflen);
+    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, buf, buflen);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
         result = 0;
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     if (PacketAlertCheck(p, 1) && PacketAlertCheck(p, 2))
@@ -544,7 +537,7 @@ end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -581,9 +574,9 @@ static int SigTest09 (void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -606,16 +599,12 @@ static int SigTest09 (void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx,(void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, buf, buflen);
+    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, buf, buflen);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
         result = 0;
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     if (PacketAlertCheck(p, 1) && PacketAlertCheck(p, 2))
@@ -633,7 +622,7 @@ end:
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -665,9 +654,9 @@ static int SigTest10 (void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -690,16 +679,12 @@ static int SigTest10 (void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx,(void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, buf, buflen);
+    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, buf, buflen);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
         result = 0;
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     if (PacketAlertCheck(p, 1) && PacketAlertCheck(p, 2))
@@ -717,7 +702,7 @@ static int SigTest10 (void)
     if (alp_tctx != NULL)
         AppLayerParserThreadCtxFree(alp_tctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -747,9 +732,9 @@ static int SigTest11 (void)
     p->flow = &f;
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -781,7 +766,7 @@ static int SigTest11 (void)
         DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     UTHFreePackets(&p, 1);
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
     return result;
 }
@@ -943,7 +928,7 @@ static int SigTest15 (void)
     uint8_t *buf = (uint8_t *)
                     "CONNECT 213.92.8.7:31204 HTTP/1.1";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     ThreadVars th_v;
@@ -951,7 +936,6 @@ static int SigTest15 (void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -959,9 +943,9 @@ static int SigTest15 (void)
     p->proto = IPPROTO_TCP;
     p->dp = 80;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -990,8 +974,8 @@ static int SigTest15 (void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     SCFree(p);
     return result;
 }
@@ -1011,9 +995,9 @@ static int SigTest16 (void)
 
     p = UTHBuildPacketSrcDstPorts((uint8_t *)buf, buflen, IPPROTO_TCP, 12345, 1234);
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -1040,8 +1024,8 @@ static int SigTest16 (void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     UTHFreePackets(&p, 1);
     return result;
 }
@@ -1064,9 +1048,9 @@ static int SigTest17 (void)
     p = UTHBuildPacketSrcDstPorts((uint8_t *)buf, buflen, IPPROTO_TCP, 12345, 80);
     FAIL_IF_NULL(p);
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -1080,18 +1064,15 @@ static int SigTest17 (void)
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
     uint32_t capid = VarNameStoreLookupByName("http_host", VAR_TYPE_PKT_VAR);
-
     PktVar *pv_hn = PktVarGet(p, capid);
     FAIL_IF_NULL(pv_hn);
-
     FAIL_IF(pv_hn->value_len != 15);
     FAIL_IF_NOT(memcmp(pv_hn->value, "one.example.org", pv_hn->value_len) == 0);
 
-    PktVarFree(pv_hn);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     UTHFreePackets(&p, 1);
 
     PASS;
@@ -1102,7 +1083,7 @@ static int SigTest18 (void)
     uint8_t *buf = (uint8_t *)
                     "220 (vsFTPd 2.0.5)\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     ThreadVars th_v;
@@ -1110,7 +1091,6 @@ static int SigTest18 (void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -1155,7 +1135,7 @@ static int SigTest19 (void)
     uint8_t *buf = (uint8_t *)
                     "220 (vsFTPd 2.0.5)\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     ThreadVars th_v;
@@ -1163,7 +1143,6 @@ static int SigTest19 (void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->src.addr_data32[0] = UTHSetIPv4Address("192.168.0.1");
     p->dst.addr_data32[0] = UTHSetIPv4Address("1.2.3.4");
@@ -1175,9 +1154,9 @@ static int SigTest19 (void)
     p->sp = 21;
     p->flowflags |= FLOW_PKT_TOSERVER;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -1205,8 +1184,8 @@ static int SigTest19 (void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     SCFree(p);
     return result;
 }
@@ -1216,7 +1195,7 @@ static int SigTest20 (void)
     uint8_t *buf = (uint8_t *)
                     "220 (vsFTPd 2.0.5)\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     ThreadVars th_v;
@@ -1224,7 +1203,6 @@ static int SigTest20 (void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->src.addr_data32[0] = UTHSetIPv4Address("192.168.0.1");
     p->dst.addr_data32[0] = UTHSetIPv4Address("1.2.3.4");
@@ -1236,9 +1214,9 @@ static int SigTest20 (void)
     p->sp = 21;
     p->flowflags |= FLOW_PKT_TOSERVER;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -1267,8 +1245,8 @@ static int SigTest20 (void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     SCFree(p);
     return result;
 }
@@ -1513,10 +1491,10 @@ static int SigTest24IPV4Keyword(void)
         0x40, 0x01, 0xb7, 0x52, 0xc0, 0xa8, 0x01, 0x03,
         0xc0, 0xa8, 0x01, 0x06};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -1530,21 +1508,15 @@ static int SigTest24IPV4Keyword(void)
     uint16_t buflen = strlen((char *)buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
-    PACKET_RESET_CHECKSUMS(p1);
-    PACKET_RESET_CHECKSUMS(p2);
 
-    p1->ip4h = (IPV4Hdr *)valid_raw_ipv4;
-
+    PacketSetIPV4(p1, valid_raw_ipv4);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = buflen;
     p1->proto = IPPROTO_TCP;
 
-    p2->ip4h = (IPV4Hdr *)invalid_raw_ipv4;
-
+    PacketSetIPV4(p2, invalid_raw_ipv4);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -1617,10 +1589,10 @@ static int SigTest25NegativeIPV4Keyword(void)
         0x40, 0x01, 0xb7, 0x52, 0xc0, 0xa8, 0x01, 0x03,
         0xc0, 0xa8, 0x01, 0x06};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -1634,21 +1606,15 @@ static int SigTest25NegativeIPV4Keyword(void)
     uint16_t buflen = strlen((char *)buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
-    PACKET_RESET_CHECKSUMS(p1);
-    PACKET_RESET_CHECKSUMS(p2);
 
-    p1->ip4h = (IPV4Hdr *)valid_raw_ipv4;
-
+    PacketSetIPV4(p1, valid_raw_ipv4);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = buflen;
     p1->proto = IPPROTO_TCP;
 
-    p2->ip4h = (IPV4Hdr *)invalid_raw_ipv4;
-
+    PacketSetIPV4(p2, invalid_raw_ipv4);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -1727,11 +1693,11 @@ static int SigTest26TCPV4Keyword(void)
         0x04, 0x02, 0x08, 0x0a, 0x6e, 0x18, 0x78, 0x73,
         0x01, 0x71, 0x74, 0xde, 0x01, 0x03, 0x03, 0x03};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
 
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -1741,8 +1707,6 @@ static int SigTest26TCPV4Keyword(void)
     DetectEngineThreadCtx *det_ctx = NULL;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
     PacketCopyData(p1, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p1, GET_PKT_LEN(p1), valid_raw_tcp, sizeof(valid_raw_tcp));
@@ -1750,18 +1714,16 @@ static int SigTest26TCPV4Keyword(void)
     PacketCopyData(p2, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p2, GET_PKT_LEN(p2), invalid_raw_tcp, sizeof(invalid_raw_tcp));
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)GET_PKT_DATA(p1);
-    p1->tcph = (TCPHdr *)(GET_PKT_DATA(p1) + sizeof(raw_ipv4));
+    PacketSetIPV4(p1, GET_PKT_DATA(p1));
+    PacketSetTCP(p1, (GET_PKT_DATA(p1) + sizeof(raw_ipv4)));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = (uint8_t *)GET_PKT_DATA(p1) + sizeof(raw_ipv4) + 20;
     p1->payload_len = 20;
     p1->proto = IPPROTO_TCP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)GET_PKT_DATA(p2);
-    p2->tcph = (TCPHdr *)(GET_PKT_DATA(p2) + sizeof(raw_ipv4));
+    PacketSetIPV4(p2, GET_PKT_DATA(p2));
+    PacketSetTCP(p2, (GET_PKT_DATA(p2) + sizeof(raw_ipv4)));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = (uint8_t *)GET_PKT_DATA(p2) + sizeof(raw_ipv4) + 20;
@@ -1826,11 +1788,11 @@ static int SigTest26TCPV4AndNegativeIPV4Keyword(void)
         0x04, 0x02, 0x08, 0x0a, 0x6e, 0x18, 0x78, 0x73,
         0x01, 0x71, 0x74, 0xde, 0x01, 0x03, 0x03, 0x03};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
 
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -1841,8 +1803,6 @@ static int SigTest26TCPV4AndNegativeIPV4Keyword(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
     PacketCopyData(p1, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p1, GET_PKT_LEN(p1), valid_raw_tcp, sizeof(valid_raw_tcp));
@@ -1850,18 +1810,16 @@ static int SigTest26TCPV4AndNegativeIPV4Keyword(void)
     PacketCopyData(p2, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p2, GET_PKT_LEN(p2), invalid_raw_tcp, sizeof(invalid_raw_tcp));
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)GET_PKT_DATA(p1);
-    p1->tcph = (TCPHdr *)(GET_PKT_DATA(p1) + sizeof(raw_ipv4));
+    PacketSetIPV4(p1, GET_PKT_DATA(p1));
+    PacketSetTCP(p1, (GET_PKT_DATA(p1) + sizeof(raw_ipv4)));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = (uint8_t *)GET_PKT_DATA(p1) + sizeof(raw_ipv4) + 20;
     p1->payload_len = 20;
     p1->proto = IPPROTO_TCP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)GET_PKT_DATA(p2);
-    p2->tcph = (TCPHdr *)(GET_PKT_DATA(p2) + sizeof(raw_ipv4));
+    PacketSetIPV4(p2, GET_PKT_DATA(p2));
+    PacketSetTCP(p2, (GET_PKT_DATA(p2) + sizeof(raw_ipv4)));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = (uint8_t *)GET_PKT_DATA(p2) + sizeof(raw_ipv4) + 20;
@@ -1952,11 +1910,11 @@ static int SigTest26TCPV4AndIPV4Keyword(void)
         0x19, 0x69, 0x81, 0x7e, 0xFF, 0xAA, 0x00, 0x00,
         0x04, 0x02, 0x00, 0x00};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
 
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -1967,8 +1925,6 @@ static int SigTest26TCPV4AndIPV4Keyword(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
     PacketCopyData(p1, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p1, GET_PKT_LEN(p1), valid_raw_tcp, sizeof(valid_raw_tcp));
@@ -1976,18 +1932,16 @@ static int SigTest26TCPV4AndIPV4Keyword(void)
     PacketCopyData(p2, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p2, GET_PKT_LEN(p2), invalid_raw_tcp, sizeof(invalid_raw_tcp));
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)GET_PKT_DATA(p1);
-    p1->tcph = (TCPHdr *)(GET_PKT_DATA(p1) + sizeof(raw_ipv4));
+    PacketSetIPV4(p1, GET_PKT_DATA(p1));
+    PacketSetTCP(p1, (GET_PKT_DATA(p1) + sizeof(raw_ipv4)));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = (uint8_t *)GET_PKT_DATA(p1) + sizeof(raw_ipv4) + 20 + 24;
     p1->payload_len = 0;
     p1->proto = IPPROTO_TCP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)GET_PKT_DATA(p2);
-    p2->tcph = (TCPHdr *)(GET_PKT_DATA(p2) + sizeof(raw_ipv4));
+    PacketSetIPV4(p2, GET_PKT_DATA(p2));
+    PacketSetTCP(p2, (GET_PKT_DATA(p2) + sizeof(raw_ipv4)));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = (uint8_t *)GET_PKT_DATA(p2) + sizeof(raw_ipv4) + 20 + 24;
@@ -2067,11 +2021,10 @@ static int SigTest27NegativeTCPV4Keyword(void)
         0x04, 0x02, 0x08, 0x0a, 0x6e, 0x18, 0x78, 0x73,
         0x01, 0x71, 0x74, 0xde, 0x01, 0x03, 0x03, 0x03};
 
-
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2081,8 +2034,6 @@ static int SigTest27NegativeTCPV4Keyword(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
     PacketCopyData(p1, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p1, GET_PKT_LEN(p1), valid_raw_tcp, sizeof(valid_raw_tcp));
@@ -2090,18 +2041,16 @@ static int SigTest27NegativeTCPV4Keyword(void)
     PacketCopyData(p2, raw_ipv4, sizeof(raw_ipv4));
     PacketCopyDataOffset(p2, GET_PKT_LEN(p2), invalid_raw_tcp, sizeof(invalid_raw_tcp));
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)GET_PKT_DATA(p1);
-    p1->tcph = (TCPHdr *)(GET_PKT_DATA(p1) + sizeof(raw_ipv4));
+    PacketSetIPV4(p1, GET_PKT_DATA(p1));
+    PacketSetTCP(p1, (GET_PKT_DATA(p1) + sizeof(raw_ipv4)));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = (uint8_t *)GET_PKT_DATA(p1) + sizeof(raw_ipv4) + 20;
     p1->payload_len = 20;
     p1->proto = IPPROTO_TCP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)GET_PKT_DATA(p2);
-    p2->tcph = (TCPHdr *)(GET_PKT_DATA(p2) + sizeof(raw_ipv4));
+    PacketSetIPV4(p2, GET_PKT_DATA(p2));
+    PacketSetTCP(p2, (GET_PKT_DATA(p2) + sizeof(raw_ipv4)));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = (uint8_t *)GET_PKT_DATA(p2) + sizeof(raw_ipv4) + 20;
@@ -2194,10 +2143,10 @@ static int SigTest28TCPV6Keyword(void)
         0x01, 0x01, 0x08, 0x0a, 0x00, 0x08, 0xca, 0x5a,
         0x00, 0x01, 0x69, 0x28};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2207,32 +2156,28 @@ static int SigTest28TCPV6Keyword(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip6h = (IPV6Hdr *)(valid_raw_ipv6 + 14);
-    p1->tcph = (TCPHdr *) (valid_raw_ipv6 + 54);
+    PacketSetIPV6(p1, valid_raw_ipv6 + 14);
+    PacketSetTCP(p1, (valid_raw_ipv6 + 54));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = valid_raw_ipv6 + 54 + 20;
     p1->payload_len = 12;
     p1->proto = IPPROTO_TCP;
 
-    if (TCP_GET_HLEN(p1) != 20) {
+    if (TCP_GET_RAW_HLEN(PacketGetTCP(p1)) != 20) {
         BUG_ON(1);
     }
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip6h = (IPV6Hdr *)(invalid_raw_ipv6 + 14);
-    p2->tcph = (TCPHdr *) (invalid_raw_ipv6 + 54);
+    PacketSetIPV6(p2, invalid_raw_ipv6 + 14);
+    PacketSetTCP(p2, (invalid_raw_ipv6 + 54));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
-    p2->payload = invalid_raw_ipv6 + 54 + 20;;
+    p2->payload = invalid_raw_ipv6 + 54 + 20;
     p2->payload_len = 12;
     p2->proto = IPPROTO_TCP;
 
-    if (TCP_GET_HLEN(p2) != 20) {
+    if (TCP_GET_RAW_HLEN(PacketGetTCP(p2)) != 20) {
         BUG_ON(1);
     }
 
@@ -2322,10 +2267,10 @@ static int SigTest29NegativeTCPV6Keyword(void)
         0x01, 0x01, 0x08, 0x0a, 0x00, 0x08, 0xca, 0x5a,
         0x00, 0x01, 0x69, 0x28};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2335,34 +2280,28 @@ static int SigTest29NegativeTCPV6Keyword(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip6h = (IPV6Hdr *)(valid_raw_ipv6 + 14);
-    p1->tcph = (TCPHdr *) (valid_raw_ipv6 + 54);
+    PacketSetIPV6(p1, valid_raw_ipv6 + 14);
+    PacketSetTCP(p1, valid_raw_ipv6 + 54);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = valid_raw_ipv6 + 54 + 20;
     p1->payload_len = 12;
     p1->proto = IPPROTO_TCP;
 
-    if (TCP_GET_HLEN(p1) != 20) {
+    if (TCP_GET_RAW_HLEN(PacketGetTCP(p1)) != 20) {
         BUG_ON(1);
     }
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip6h = (IPV6Hdr *)(invalid_raw_ipv6 + 14);
-    p2->tcph = (TCPHdr *) (invalid_raw_ipv6 + 54);
+    PacketSetIPV6(p2, invalid_raw_ipv6 + 14);
+    PacketSetTCP(p2, invalid_raw_ipv6 + 54);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
-    p2->payload = invalid_raw_ipv6 + 54 + 20;;
+    p2->payload = invalid_raw_ipv6 + 54 + 20;
     p2->payload_len = 12;
     p2->proto = IPPROTO_TCP;
 
-    if (TCP_GET_HLEN(p2) != 20) {
-        BUG_ON(1);
-    }
+    FAIL_IF(TCP_GET_RAW_HLEN(PacketGetTCP(p2)) != 20);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -2445,9 +2384,9 @@ static int SigTest30UDPV4Keyword(void)
         0x61, 0x64, 0x01, 0x6c, 0x06, 0x67, 0x6f, 0x6f,
         0x67, 0x6c, 0x65, 0xc0, 0x27};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     FAIL_IF_NULL(p1);
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     FAIL_IF_NULL(p2);
 
     ThreadVars th_v;
@@ -2457,21 +2396,17 @@ static int SigTest30UDPV4Keyword(void)
                     "\r\n\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)raw_ipv4;
-    p1->udph = (UDPHdr *)valid_raw_udp;
+    PacketSetIPV4(p1, raw_ipv4);
+    PacketSetUDP(p1, valid_raw_udp);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = sizeof(valid_raw_udp) - UDP_HEADER_LEN;
     p1->proto = IPPROTO_UDP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)raw_ipv4;
-    p2->udph = (UDPHdr *)invalid_raw_udp;
+    PacketSetIPV4(p2, raw_ipv4);
+    PacketSetUDP(p2, invalid_raw_udp);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -2549,10 +2484,10 @@ static int SigTest31NegativeUDPV4Keyword(void)
         0x61, 0x64, 0x01, 0x6c, 0x06, 0x67, 0x6f, 0x6f,
         0x67, 0x6c, 0x65, 0xc0, 0x27};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2565,21 +2500,17 @@ static int SigTest31NegativeUDPV4Keyword(void)
                     "\r\n\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)raw_ipv4;
-    p1->udph = (UDPHdr *)valid_raw_udp;
+    PacketSetIPV4(p1, raw_ipv4);
+    PacketSetUDP(p1, valid_raw_udp);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = sizeof(valid_raw_udp) - UDP_HEADER_LEN;
     p1->proto = IPPROTO_UDP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)raw_ipv4;
-    p2->udph = (UDPHdr *)invalid_raw_udp;
+    PacketSetIPV4(p2, raw_ipv4);
+    PacketSetUDP(p2, invalid_raw_udp);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -2666,9 +2597,9 @@ static int SigTest32UDPV6Keyword(void)
         0x00, 0x00, 0xf9, 0xc8, 0xe7, 0x36, 0x57, 0xb0,
         0x09, 0x01};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     FAIL_IF_NULL(p1);
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     FAIL_IF_NULL(p2);
 
     ThreadVars th_v;
@@ -2678,25 +2609,21 @@ static int SigTest32UDPV6Keyword(void)
                     "\r\n\r\n";
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip6h = (IPV6Hdr *)(valid_raw_ipv6 + 14);
-    p1->udph = (UDPHdr *) (valid_raw_ipv6 + 54);
+    PacketSetIPV6(p1, valid_raw_ipv6 + 14);
+    PacketSetUDP(p1, valid_raw_ipv6 + 54);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
-    p1->payload_len = IPV6_GET_PLEN((p1)) - UDP_HEADER_LEN;
+    p1->payload_len = IPV6_GET_RAW_PLEN(PacketGetIPv6(p1)) - UDP_HEADER_LEN;
     p1->proto = IPPROTO_UDP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip6h = (IPV6Hdr *)(invalid_raw_ipv6 + 14);
-    p2->udph = (UDPHdr *) (invalid_raw_ipv6 + 54);
+    PacketSetIPV6(p2, invalid_raw_ipv6 + 14);
+    PacketSetUDP(p2, invalid_raw_ipv6 + 54);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
-    p2->payload_len = IPV6_GET_PLEN((p2)) - UDP_HEADER_LEN;
+    p2->payload_len = IPV6_GET_RAW_PLEN(PacketGetIPv6(p2)) - UDP_HEADER_LEN;
     p2->proto = IPPROTO_UDP;
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
@@ -2763,10 +2690,10 @@ static int SigTest33NegativeUDPV6Keyword(void)
         0x00, 0x00, 0xf9, 0xc8, 0xe7, 0x36, 0x57, 0xb0,
         0x09, 0x01};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2779,25 +2706,21 @@ static int SigTest33NegativeUDPV6Keyword(void)
                     "\r\n\r\n";
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip6h = (IPV6Hdr *)(valid_raw_ipv6 + 14);
-    p1->udph = (UDPHdr *) (valid_raw_ipv6 + 54);
+    PacketSetIPV6(p1, valid_raw_ipv6 + 14);
+    PacketSetUDP(p1, valid_raw_ipv6 + 54);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
-    p1->payload_len = IPV6_GET_PLEN((p1)) - UDP_HEADER_LEN;
+    p1->payload_len = IPV6_GET_RAW_PLEN(PacketGetIPv6(p1)) - UDP_HEADER_LEN;
     p1->proto = IPPROTO_UDP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip6h = (IPV6Hdr *)(invalid_raw_ipv6 + 14);
-    p2->udph = (UDPHdr *) (invalid_raw_ipv6 + 54);
+    PacketSetIPV6(p2, invalid_raw_ipv6 + 14);
+    PacketSetUDP(p2, invalid_raw_ipv6 + 54);
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
-    p2->payload_len = IPV6_GET_PLEN((p2)) - UDP_HEADER_LEN;
+    p2->payload_len = IPV6_GET_RAW_PLEN(PacketGetIPv6(p2)) - UDP_HEADER_LEN;
     p2->proto = IPPROTO_UDP;
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
@@ -2880,10 +2803,10 @@ static int SigTest34ICMPV4Keyword(void)
         0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33,
         0x34, 0x35, 0x36, 0x38};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -2897,23 +2820,19 @@ static int SigTest34ICMPV4Keyword(void)
     uint16_t buflen = strlen((char *)buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)(valid_raw_ipv4);
-    p1->ip4h->ip_verhl = 69;
-    p1->icmpv4h = (ICMPV4Hdr *) (valid_raw_ipv4 + IPV4_GET_RAW_HLEN(p1->ip4h) * 4);
+    IPV4Hdr *ip4h = PacketSetIPV4(p1, valid_raw_ipv4);
+    ip4h->ip_verhl = 69;
+    (void)PacketSetICMPv4(p1, valid_raw_ipv4 + IPV4_GET_RAW_HLEN(ip4h));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = buflen;
     p1->proto = IPPROTO_ICMP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)(invalid_raw_ipv4);
-    p2->ip4h->ip_verhl = 69;
-    p2->icmpv4h = (ICMPV4Hdr *) (invalid_raw_ipv4 + IPV4_GET_RAW_HLEN(p2->ip4h) * 4);
+    ip4h = PacketSetIPV4(p2, invalid_raw_ipv4);
+    ip4h->ip_verhl = 69;
+    (void)PacketSetICMPv4(p2, invalid_raw_ipv4 + IPV4_GET_RAW_HLEN(ip4h));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -3000,10 +2919,10 @@ static int SigTest35NegativeICMPV4Keyword(void)
         0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33,
         0x34, 0x35, 0x36, 0x38};
 
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    Packet *p2 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
         SCFree(p1);
         return 0;
@@ -3017,23 +2936,19 @@ static int SigTest35NegativeICMPV4Keyword(void)
     uint16_t buflen = strlen((char *)buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
-    memset(p2, 0, SIZE_OF_PACKET);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ip4h = (IPV4Hdr *)(valid_raw_ipv4);
-    p1->ip4h->ip_verhl = 69;
-    p1->icmpv4h = (ICMPV4Hdr *) (valid_raw_ipv4 + IPV4_GET_RAW_HLEN(p1->ip4h) * 4);
+    IPV4Hdr *ip4h = PacketSetIPV4(p1, valid_raw_ipv4);
+    ip4h->ip_verhl = 69;
+    (void)PacketSetICMPv4(p1, valid_raw_ipv4 + IPV4_GET_RAW_HLEN(ip4h));
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = buf;
     p1->payload_len = buflen;
     p1->proto = IPPROTO_ICMP;
 
-    PACKET_RESET_CHECKSUMS(p2);
-    p2->ip4h = (IPV4Hdr *)(invalid_raw_ipv4);
-    p2->ip4h->ip_verhl = 69;
-    p2->icmpv4h = (ICMPV4Hdr *) (invalid_raw_ipv4 + IPV4_GET_RAW_HLEN(p2->ip4h) * 4);
+    ip4h = PacketSetIPV4(p2, invalid_raw_ipv4);
+    ip4h->ip_verhl = 69;
+    (void)PacketSetICMPv4(p2, invalid_raw_ipv4 + IPV4_GET_RAW_HLEN(ip4h));
     p2->src.family = AF_INET;
     p2->dst.family = AF_INET;
     p2->payload = buf;
@@ -3095,7 +3010,7 @@ end:
 
 static int SigTest38(void)
 {
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
+    Packet *p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
     ThreadVars th_v;
@@ -3136,7 +3051,6 @@ static int SigTest38(void)
     uint16_t buflen = sizeof(buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
 
     /* Copy raw data into packet */
     if (PacketCopyData(p1, raw_eth, ethlen) == -1) {
@@ -3157,10 +3071,9 @@ static int SigTest38(void)
     }
     SET_PKT_LEN(p1, ethlen + ipv4len + tcplen + buflen);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ethh = (EthernetHdr *)raw_eth;
-    p1->ip4h = (IPV4Hdr *)raw_ipv4;
-    p1->tcph = (TCPHdr *)raw_tcp;
+    PacketSetEthernet(p1, raw_eth);
+    PacketSetIPV4(p1, raw_ipv4);
+    PacketSetTCP(p1, raw_tcp);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = GET_PKT_DATA(p1) + ethlen + ipv4len + tcplen;
@@ -3226,12 +3139,8 @@ end:
 
 static int SigTest39(void)
 {
-    Packet *p1 = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p1 == NULL))
-        return 0;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-    int result = 1;
     uint8_t raw_eth[] = {
         0x00, 0x00, 0x03, 0x04, 0x00, 0x06, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -3267,31 +3176,19 @@ static int SigTest39(void)
     uint16_t buflen = sizeof(buf);
 
     memset(&th_v, 0, sizeof(ThreadVars));
-    memset(p1, 0, SIZE_OF_PACKET);
 
+    Packet *p1 = PacketGetFromAlloc();
+    FAIL_IF_NULL(p1);
     /* Copy raw data into packet */
-    if (PacketCopyData(p1, raw_eth, ethlen) == -1) {
-        SCFree(p1);
-        return 1;
-    }
-    if (PacketCopyDataOffset(p1, ethlen, raw_ipv4, ipv4len) == -1) {
-        SCFree(p1);
-        return 1;
-    }
-    if (PacketCopyDataOffset(p1, ethlen + ipv4len, raw_tcp, tcplen) == -1) {
-        SCFree(p1);
-        return 1;
-    }
-    if (PacketCopyDataOffset(p1, ethlen + ipv4len + tcplen, buf, buflen) == -1) {
-        SCFree(p1);
-        return 1;
-    }
+    FAIL_IF(PacketCopyData(p1, raw_eth, ethlen) == -1);
+    FAIL_IF(PacketCopyDataOffset(p1, ethlen, raw_ipv4, ipv4len) == -1);
+    FAIL_IF(PacketCopyDataOffset(p1, ethlen + ipv4len, raw_tcp, tcplen) == -1);
+    FAIL_IF(PacketCopyDataOffset(p1, ethlen + ipv4len + tcplen, buf, buflen) == -1);
     SET_PKT_LEN(p1, ethlen + ipv4len + tcplen + buflen);
 
-    PACKET_RESET_CHECKSUMS(p1);
-    p1->ethh = (EthernetHdr *)raw_eth;
-    p1->ip4h = (IPV4Hdr *)raw_ipv4;
-    p1->tcph = (TCPHdr *)raw_tcp;
+    PacketSetEthernet(p1, raw_eth);
+    PacketSetIPV4(p1, raw_ipv4);
+    PacketSetTCP(p1, raw_tcp);
     p1->src.family = AF_INET;
     p1->dst.family = AF_INET;
     p1->payload = GET_PKT_DATA(p1) + ethlen + ipv4len + tcplen;
@@ -3299,64 +3196,36 @@ static int SigTest39(void)
     p1->proto = IPPROTO_TCP;
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(content:\"LEN1|20|\"; "
-                               "byte_test:4,=,8,0; "
-                               "byte_jump:4,0; "
-                               "byte_test:6,=,0x4c454e312038,0,relative; "
-                               "msg:\"byte_jump keyword check(1)\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        result &= 0;
-        goto end;
-    }
-    // XXX TODO
-    de_ctx->sig_list->next = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(content:\"LEN1|20|\"; "
-                               "byte_test:4,=,8,4,relative,string,dec; "
-                               "byte_jump:4,4,relative,string,dec,post_offset 2; "
-                               "byte_test:4,=,0x4c454e32,0,relative; "
-                               "msg:\"byte_jump keyword check(2)\"; sid:2;)");
-    if (de_ctx->sig_list->next == NULL) {
-        result &= 0;
-        goto end;
-    }
-
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(content:\"LEN1|20|\"; "
+                                                 "byte_test:4,=,8,0; "
+                                                 "byte_jump:4,0; "
+                                                 "byte_test:6,=,0x4c454e312038,0,relative; "
+                                                 "msg:\"byte_jump keyword check(1)\"; sid:1;)");
+    FAIL_IF_NULL(s);
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(content:\"LEN1|20|\"; "
+                                      "byte_test:4,=,8,4,relative,string,dec; "
+                                      "byte_jump:4,4,relative,string,dec,post_offset 2; "
+                                      "byte_test:4,=,0x4c454e32,0,relative; "
+                                      "msg:\"byte_jump keyword check(2)\"; sid:2;)");
+    FAIL_IF_NULL(s);
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
-    if (PacketAlertCheck(p1, 1)) {
-        result = 1;
-    } else {
-        result = 0;
-        printf("sid 1 didn't alert, but should have: ");
-        goto cleanup;
-    }
-    if (PacketAlertCheck(p1, 2)) {
-        result = 1;
-    } else {
-        result = 0;
-        printf("sid 2 didn't alert, but should have: ");
-        goto cleanup;
-    }
 
-cleanup:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    FAIL_IF_NOT(PacketAlertCheck(p1, 1));
+    FAIL_IF_NOT(PacketAlertCheck(p1, 2));
+
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-end:
     SCFree(p1);
-    return result;
+    PASS;
 }
 
 /**
@@ -3368,7 +3237,7 @@ static int SigTest36ContentAndIsdataatKeywords01 (void)
 {
     int result = 0;
 
-    // Buid and decode the packet
+    // Build and decode the packet
 
     uint8_t raw_eth [] = {
      0x00,0x25,0x00,0x9e,0xfa,0xfe,0x00,0x02,0xcf,0x74,0xfe,0xe1,0x08,0x00,0x45,0x00
@@ -3402,7 +3271,7 @@ static int SigTest36ContentAndIsdataatKeywords01 (void)
 	,0x65,0x72,0x65,0x3c,0x2f,0x41,0x3e,0x2e,0x0d,0x0a,0x3c,0x2f,0x42,0x4f,0x44,0x59
 	,0x3e,0x3c,0x2f,0x48,0x54,0x4d,0x4c,0x3e,0x0d,0x0a };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     DecodeThreadVars dtv;
@@ -3410,7 +3279,6 @@ static int SigTest36ContentAndIsdataatKeywords01 (void)
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
 
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(th_v));
 
@@ -3447,7 +3315,7 @@ static int SigTest36ContentAndIsdataatKeywords01 (void)
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
 
     SCFree(p);
@@ -3469,7 +3337,7 @@ end:
              DetectEngineCtxFree(de_ctx);
 
     if (p != NULL)
-        PACKET_RECYCLE(p);
+        PacketRecycle(p);
 
     FlowShutdown();
 
@@ -3487,7 +3355,7 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
 {
     int result = 0;
 
-    // Buid and decode the packet
+    // Build and decode the packet
 
     uint8_t raw_eth [] = {
    0x00,0x25,0x00,0x9e,0xfa,0xfe,0x00,0x02,0xcf,0x74,0xfe,0xe1,0x08,0x00,0x45,0x00
@@ -3521,7 +3389,7 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
 	,0x65,0x72,0x65,0x3c,0x2f,0x41,0x3e,0x2e,0x0d,0x0a,0x3c,0x2f,0x42,0x4f,0x44,0x59
 	,0x3e,0x3c,0x2f,0x48,0x54,0x4d,0x4c,0x3e,0x0d,0x0a };
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     DecodeThreadVars dtv;
@@ -3529,7 +3397,6 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
 
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(th_v));
 
@@ -3551,7 +3418,7 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
         goto end;
     }
 
-    if (s->sm_lists[DETECT_SM_LIST_PMATCH]->type != DETECT_CONTENT) {
+    if (s->init_data->smlists[DETECT_SM_LIST_PMATCH]->type != DETECT_CONTENT) {
         printf("type not content: ");
         goto end;
     }
@@ -3573,7 +3440,7 @@ static int SigTest37ContentAndIsdataatKeywords02 (void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    PACKET_RECYCLE(p);
+    PacketRecycle(p);
     FlowShutdown();
 
     SCFree(p);
@@ -3593,7 +3460,7 @@ end:
         DetectEngineCtxFree(de_ctx);
 
     if (p != NULL)
-        PACKET_RECYCLE(p);
+        PacketRecycle(p);
 
     FlowShutdown();
 
@@ -3612,7 +3479,7 @@ static int SigTest40NoPacketInspection01(void)
     uint8_t *buf = (uint8_t *)
                     "220 (vsFTPd 2.0.5)\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     TCPHdr tcphdr;
     if (unlikely(p == NULL))
     return 0;
@@ -3623,7 +3490,6 @@ static int SigTest40NoPacketInspection01(void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&pq, 0, sizeof(pq));
     memset(&f, 0, sizeof(f));
     memset(&tcphdr, 0, sizeof(tcphdr));
@@ -3639,7 +3505,7 @@ static int SigTest40NoPacketInspection01(void)
     p->sp = 21;
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flags |= PKT_NOPACKET_INSPECTION;
-    p->tcph = &tcphdr;
+    PacketSetTCP(p, (uint8_t *)&tcphdr);
     p->flow = &f;
 
     FLOW_INITIALIZE(&f);
@@ -3679,7 +3545,7 @@ end:
 
 /**
  * \test SigTest42NoPayloadInspection is a test to check that when PKT_NOPAYLOAD_INSPECTION
- *  flasg is set, we don't need to inspect the packet contents.
+ *  flag is set, we don't need to inspect the packet contents.
  */
 
 static int SigTest40NoPayloadInspection02(void)
@@ -3691,9 +3557,8 @@ static int SigTest40NoPayloadInspection02(void)
     ThreadVars th_v;
     memset(&th_v, 0, sizeof(th_v));
 
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
-    memset(p, 0, SIZE_OF_PACKET);
 
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
@@ -3734,7 +3599,7 @@ static int SigTestMemory01 (void)
                     "Host: two.example.org\r\n"
                     "\r\n\r\n";
     uint16_t buflen = strlen((char *)buf);
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
+    Packet *p = PacketGetFromAlloc();
     if (unlikely(p == NULL))
         return 0;
     ThreadVars th_v;
@@ -3742,7 +3607,6 @@ static int SigTestMemory01 (void)
     int result = 0;
 
     memset(&th_v, 0, sizeof(th_v));
-    memset(p, 0, SIZE_OF_PACKET);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -4276,10 +4140,9 @@ static int SigTestWithin01 (void)
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     /* packet 1 */
-    p1 = SCMalloc(SIZE_OF_PACKET);
+    p1 = PacketGetFromAlloc();
     if (unlikely(p1 == NULL))
         return 0;
-    memset(p1, 0, SIZE_OF_PACKET);
     DecodeEthernet(&th_v, &dtv, p1, rawpkt1, sizeof(rawpkt1));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
     if (!(PacketAlertCheck(p1, 556))) {
@@ -4288,10 +4151,9 @@ static int SigTestWithin01 (void)
     }
 
     /* packet 2 */
-    p2 = SCMalloc(SIZE_OF_PACKET);
+    p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL))
         return 0;
-    memset(p2, 0, SIZE_OF_PACKET);
     DecodeEthernet(&th_v, &dtv, p2, rawpkt2, sizeof(rawpkt2));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
     if (!(PacketAlertCheck(p2, 556))) {
@@ -4300,10 +4162,9 @@ static int SigTestWithin01 (void)
     }
 
     /* packet 3 */
-    p3 = SCMalloc(SIZE_OF_PACKET);
+    p3 = PacketGetFromAlloc();
     if (unlikely(p3 == NULL))
         return 0;
-    memset(p3, 0, SIZE_OF_PACKET);
     DecodeEthernet(&th_v, &dtv, p3, rawpkt3, sizeof(rawpkt3));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p3);
     if (!(PacketAlertCheck(p3, 556))) {
@@ -4312,10 +4173,9 @@ static int SigTestWithin01 (void)
     }
 
     /* packet 4 */
-    p4 = SCMalloc(SIZE_OF_PACKET);
+    p4 = PacketGetFromAlloc();
     if (unlikely(p4 == NULL))
         return 0;
-    memset(p4, 0, SIZE_OF_PACKET);
     DecodeEthernet(&th_v, &dtv, p4, rawpkt4, sizeof(rawpkt4));
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p4);
     if (!(PacketAlertCheck(p4, 556))) {
@@ -4348,19 +4208,19 @@ end:
         DetectEngineCtxFree(de_ctx);
 
     if (p1 != NULL) {
-        PACKET_RECYCLE(p1);
+        PacketRecycle(p1);
         SCFree(p1);
     }
     if (p2 != NULL) {
-        PACKET_RECYCLE(p2);
+        PacketRecycle(p2);
         SCFree(p2);
     }
     if (p3 != NULL) {
-        PACKET_RECYCLE(p3);
+        PacketRecycle(p3);
         SCFree(p3);
     }
     if (p4 != NULL) {
-        PACKET_RECYCLE(p4);
+        PacketRecycle(p4);
         SCFree(p4);
     }
     FlowShutdown();
@@ -4458,7 +4318,6 @@ static int SigTestDetectAlertCounter(void)
  *        triggered a drop action on IPS mode */
 static int SigTestDropFlow01(void)
 {
-    int result = 0;
     Flow f;
     HtpState *http_state = NULL;
     uint8_t http_buf1[] = "POST /one HTTP/1.0\r\n"
@@ -4487,74 +4346,45 @@ static int SigTestDropFlow01(void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     s = de_ctx->sig_list = SigInit(de_ctx, "drop http any any -> any any "
                                    "(msg:\"Test proto match\"; "
                                    "sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&tv, (void *)de_ctx, (void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, http_buf1, http_buf1_len);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, http_buf1, http_buf1_len);
+    FAIL_IF_NOT(r == 0);
 
     http_state = f.alstate;
-    if (http_state == NULL) {
-        printf("no http state: ");
-        goto end;
-    }
+    FAIL_IF_NULL(http_state);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
 
-    if (!PacketAlertCheck(p, 1)) {
-        printf("sig 1 didn't alert, but it should: ");
-        goto end;
-    }
+    FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    if ( !(p->flow->flags & FLOW_ACTION_DROP)) {
-        printf("sig 1 alerted but flow was not flagged correctly: ");
-        goto end;
-    }
+    FAIL_IF_NOT(p->flow->flags & FLOW_ACTION_DROP);
 
-    /* Ok, now we know that the flag is set for proto http */
+    AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, det_ctx);
+    DetectEngineCtxFree(de_ctx);
 
-    result = 1;
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&tv, det_ctx);
-    if (de_ctx != NULL)
-        SigGroupCleanup(de_ctx);
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
-    return result;
+    PASS;
 }
 
 /** \test test if the engine set flag to drop pkts of a flow that
@@ -4590,9 +4420,9 @@ static int SigTestDropFlow02(void)
     p->flowflags |= FLOW_PKT_TOSERVER;
     p->flowflags |= FLOW_PKT_ESTABLISHED;
     p->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -4610,15 +4440,12 @@ static int SigTestDropFlow02(void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&tv, (void *)de_ctx, (void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, http_buf1, http_buf1_len);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, http_buf1, http_buf1_len);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     http_state = f.alstate;
     if (http_state == NULL) {
@@ -4654,7 +4481,7 @@ end:
     if (de_ctx != NULL)
         DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
@@ -4711,9 +4538,9 @@ static int SigTestDropFlow03(void)
     p2->flowflags |= FLOW_PKT_TOSERVER;
     p2->flowflags |= FLOW_PKT_ESTABLISHED;
     p2->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
+    f.alproto = ALPROTO_HTTP1;
 
-    StreamTcpInitConfig(TRUE);
+    StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -4741,15 +4568,12 @@ static int SigTestDropFlow03(void)
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&tv, (void *)de_ctx, (void *)&det_ctx);
 
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, http_buf1, http_buf1_len);
+    int r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, http_buf1, http_buf1_len);
     if (r != 0) {
         printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     http_state = f.alstate;
     if (http_state == NULL) {
@@ -4773,7 +4597,6 @@ static int SigTestDropFlow03(void)
     /* Second part.. Let's feed with another packet */
     if (StreamTcpCheckFlowDrops(p2) == 1) {
         SCLogDebug("This flow/stream triggered a drop rule");
-        FlowSetNoPacketInspectionFlag(p2->flow);
         DecodeSetNoPacketInspectionFlag(p2);
         StreamTcpDisableAppLayer(p2->flow);
         p2->action |= ACTION_DROP;
@@ -4787,15 +4610,12 @@ static int SigTestDropFlow03(void)
         goto end;
     }
 
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                            STREAM_TOSERVER, http_buf2, http_buf2_len);
+    r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, http_buf2, http_buf2_len);
     if (r != 0) {
         printf("toserver chunk 2 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
         goto end;
     }
-    FLOWLOCK_UNLOCK(&f);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p2);
@@ -4810,7 +4630,7 @@ static int SigTestDropFlow03(void)
         goto end;
     }
 
-    if ( !(PACKET_TEST_ACTION(p2, ACTION_DROP))) {
+    if (!(PacketTestAction(p2, ACTION_DROP))) {
         printf("A \"drop\" action should be set from the flow to the packet: ");
         goto end;
     }
@@ -4827,7 +4647,7 @@ end:
     if (de_ctx != NULL)
         DetectEngineCtxFree(de_ctx);
 
-    StreamTcpFreeConfig(TRUE);
+    StreamTcpFreeConfig(true);
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p1, 1);
@@ -4835,189 +4655,6 @@ end:
 
     /* Restore mode to IDS */
     EngineModeSetIDS();
-    return result;
-}
-
-/** \test test if the engine set flag to drop pkts of a flow that
- *        triggered a drop action on IDS mode, but continue the inspection
- *        as usual (instead of on IPS mode) */
-static int SigTestDropFlow04(void)
-{
-    int result = 0;
-    Flow f;
-    HtpState *http_state = NULL;
-    uint8_t http_buf1[] = "POST /one HTTP/1.0\r\n"
-        "User-Agent: Mozilla/1.0\r\n"
-        "Cookie: hellocatch\r\n\r\n";
-    uint32_t http_buf1_len = sizeof(http_buf1) - 1;
-
-    uint8_t http_buf2[] = "POST /two HTTP/1.0\r\n"
-        "User-Agent: Mozilla/1.0\r\n"
-        "Cookie: hellocatch\r\n\r\n";
-    uint32_t http_buf2_len = sizeof(http_buf1) - 1;
-
-    TcpSession ssn;
-    Packet *p1 = NULL;
-    Packet *p2 = NULL;
-    Signature *s = NULL;
-    ThreadVars tv;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-
-    memset(&tv, 0, sizeof(ThreadVars));
-    memset(&f, 0, sizeof(Flow));
-    memset(&ssn, 0, sizeof(TcpSession));
-
-    p1 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-    p2 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.flags |= FLOW_IPV4;
-
-    p1->flow = &f;
-    p1->flowflags |= FLOW_PKT_TOSERVER;
-    p1->flowflags |= FLOW_PKT_ESTABLISHED;
-    p1->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-
-    p2->flow = &f;
-    p2->flowflags |= FLOW_PKT_TOSERVER;
-    p2->flowflags |= FLOW_PKT_ESTABLISHED;
-    p2->flags |= PKT_HAS_FLOW|PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
-
-    StreamTcpInitConfig(TRUE);
-
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-    de_ctx->flags |= DE_QUIET;
-
-    s = de_ctx->sig_list = SigInit(de_ctx, "drop tcp any any -> any 80 "
-                                   "(msg:\"Test proto match\"; uricontent:\"one\";"
-                                   "sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    /* the no inspection flag should be set after the first sig gets triggered,
-     * so the second packet should not match the next sig (because of no inspection) */
-    s = de_ctx->sig_list->next = SigInit(de_ctx, "alert tcp any any -> any 80 "
-                                   "(msg:\"Test proto match\"; uricontent:\"two\";"
-                                   "sid:2;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&tv, (void *)de_ctx, (void *)&det_ctx);
-
-    FLOWLOCK_WRLOCK(&f);
-    int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                                STREAM_TOSERVER, http_buf1, http_buf1_len);
-    if (r != 0) {
-        printf("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
-
-    http_state = f.alstate;
-    if (http_state == NULL) {
-        printf("no http state: ");
-        goto end;
-    }
-
-    /* do detect */
-    SigMatchSignatures(&tv, de_ctx, det_ctx, p1);
-
-    if (!PacketAlertCheck(p1, 1)) {
-        printf("sig 1 didn't alert on p1, but it should: ");
-        goto end;
-    }
-
-    if (PacketAlertCheck(p1, 2)) {
-        printf("sig 2 alerted on p1, but it should not: ");
-        goto end;
-    }
-
-    if ( !(p1->flow->flags & FLOW_ACTION_DROP)) {
-        printf("sig 1 alerted but flow was not flagged correctly: ");
-        goto end;
-    }
-
-    if (!(PACKET_TEST_ACTION(p1, ACTION_DROP))) {
-        printf("A \"drop\" action was set from the flow to the packet "
-               "which is right, but setting the flag shouldn't disable "
-               "inspection on the packet in IDS mode");
-        goto end;
-    }
-
-    /* Second part.. Let's feed with another packet */
-    if (StreamTcpCheckFlowDrops(p2) == 1) {
-        FlowSetNoPacketInspectionFlag(p2->flow);
-        DecodeSetNoPacketInspectionFlag(p2);
-        StreamTcpDisableAppLayer(p2->flow);
-        p2->action |= ACTION_DROP;
-        /* return the segments to the pool */
-        StreamTcpSessionPktFree(p2);
-    }
-
-    if ( (p2->flags & PKT_NOPACKET_INSPECTION)) {
-        printf("The packet was flagged with no-inspection but we are not on IPS mode: ");
-        goto end;
-    }
-
-    FLOWLOCK_WRLOCK(&f);
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_HTTP,
-                            STREAM_TOSERVER, http_buf2, http_buf2_len);
-    if (r != 0) {
-        printf("toserver chunk 2 returned %" PRId32 ", expected 0: ", r);
-        FLOWLOCK_UNLOCK(&f);
-        goto end;
-    }
-    FLOWLOCK_UNLOCK(&f);
-
-    /* do detect */
-    SigMatchSignatures(&tv, de_ctx, det_ctx, p2);
-
-    if (PacketAlertCheck(p2, 1)) {
-        printf("sig 1 alerted, but it should not: ");
-        goto end;
-    }
-
-    if (!PacketAlertCheck(p2, 2)) {
-        printf("sig 2 didn't alert, but it should, since we are not on IPS mode: ");
-        goto end;
-    }
-
-    if (!(PACKET_TEST_ACTION(p2, ACTION_DROP))) {
-        printf("A \"drop\" action was set from the flow to the packet "
-               "which is right, but setting the flag shouldn't disable "
-               "inspection on the packet in IDS mode");
-        goto end;
-    }
-
-    result = 1;
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    if (det_ctx != NULL)
-        DetectEngineThreadCtxDeinit(&tv, det_ctx);
-    if (de_ctx != NULL)
-        SigGroupCleanup(de_ctx);
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-
-    UTHFreePackets(&p1, 1);
-    UTHFreePackets(&p2, 1);
-
     return result;
 }
 
@@ -5151,9 +4788,9 @@ static int DetectAddressYamlParsing01 (void)
 {
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string2, strlen(dummy_conf_string2));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string2, strlen(dummy_conf_string2));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -5173,8 +4810,8 @@ static int DetectAddressYamlParsing01 (void)
 
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     return result;
 }
 
@@ -5198,9 +4835,9 @@ static int DetectAddressYamlParsing02 (void)
 {
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string3, strlen(dummy_conf_string3));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string3, strlen(dummy_conf_string3));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -5220,8 +4857,8 @@ static int DetectAddressYamlParsing02 (void)
 
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     return result;
 }
 
@@ -5245,9 +4882,9 @@ static int DetectAddressYamlParsing03 (void)
 {
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string4, strlen(dummy_conf_string4));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string4, strlen(dummy_conf_string4));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -5267,8 +4904,8 @@ static int DetectAddressYamlParsing03 (void)
 
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     return result;
 }
 
@@ -5293,9 +4930,9 @@ static int DetectAddressYamlParsing04 (void)
 {
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string5, strlen(dummy_conf_string5));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string5, strlen(dummy_conf_string5));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     if (de_ctx == NULL) {
@@ -5315,8 +4952,8 @@ static int DetectAddressYamlParsing04 (void)
 
     DetectEngineCtxFree(de_ctx);
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     return result;
 }
 
@@ -5417,7 +5054,6 @@ void SigRegisterTests(void)
     UtRegisterTest("SigTestDropFlow01", SigTestDropFlow01);
     UtRegisterTest("SigTestDropFlow02", SigTestDropFlow02);
     UtRegisterTest("SigTestDropFlow03", SigTestDropFlow03);
-    UtRegisterTest("SigTestDropFlow04", SigTestDropFlow04);
 
     UtRegisterTest("DetectAddressYamlParsing01", DetectAddressYamlParsing01);
     UtRegisterTest("DetectAddressYamlParsing02", DetectAddressYamlParsing02);

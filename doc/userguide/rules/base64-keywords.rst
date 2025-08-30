@@ -10,11 +10,14 @@ base64_decode
 
 Decodes base64 data from a buffer and makes it available for the base64_data function.
 
+We recommend using the base64 transform instead -- see :ref:`from_base64 <from_base64>`.
+
 Syntax::
 
     base64_decode:bytes <value>, offset <value>, relative;
 
 The ``bytes`` option specifies how many bytes Suricata should decode and make available for base64_data.
+This number is limited to 64KiB.
 The decoding will stop at the end of the buffer.
 
 The ``offset`` option specifies how many bytes Suricata should skip before decoding.
@@ -26,6 +29,10 @@ This option makes ``offset`` skip bytes relative to the previous match.
 .. note:: Regarding ``relative`` and ``base64_decode``:
 
     The content match that you want to decode relative to must be the first match in the stream.
+
+.. note:: ``base64_decode`` follows RFC 4648 by default i.e. encounter with any character that is not found in the base64 alphabet leads to rejection of that character and the rest of the string.
+
+    See Redmine Bug 5223: https://redmine.openinfosecfoundation.org/issues/5223 and RFC 4648: https://www.rfc-editor.org/rfc/rfc4648#section-3.3
 
 base64_data
 -----------
@@ -58,3 +65,5 @@ Example::
     alert http any any -> any any (msg:"Example"; content:"somestring"; http_uri; \
          base64_decode:bytes 8, offset 1, relative; \
          base64_data; content:"test"; sid:10001; rev:1;)
+
+.. note:: ``base64_data`` cannot be used with ``fast_pattern`` and will result in a rule load error.

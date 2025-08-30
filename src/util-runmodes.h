@@ -20,8 +20,8 @@
  *  \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __UTIL_RUNMODES_H__
-#define __UTIL_RUNMODES_H__
+#ifndef SURICATA_UTIL_RUNMODES_H
+#define SURICATA_UTIL_RUNMODES_H
 
 typedef void *(*ConfigIfaceParserFunc) (const char *);
 typedef void *(*ConfigIPSParserFunc) (int);
@@ -34,10 +34,8 @@ int RunModeSetLiveCaptureAuto(ConfigIfaceParserFunc configparser,
                               const char *live_dev);
 
 int RunModeSetLiveCaptureAutoFp(ConfigIfaceParserFunc configparser,
-                              ConfigIfaceThreadsCountFunc ModThreadsCount,
-                              const char *recv_mod_name,
-                              const char *decode_mod_name, const char *thread_name,
-                              const char *live_dev);
+        ConfigIfaceThreadsCountFunc ModThreadsCount, const char *recv_mod_name,
+        const char *decode_mod_name, const char *thread_name, const char *live_dev);
 
 int RunModeSetLiveCaptureSingle(ConfigIfaceParserFunc configparser,
                               ConfigIfaceThreadsCountFunc ModThreadsCount,
@@ -46,10 +44,8 @@ int RunModeSetLiveCaptureSingle(ConfigIfaceParserFunc configparser,
                               const char *live_dev);
 
 int RunModeSetLiveCaptureWorkers(ConfigIfaceParserFunc configparser,
-                              ConfigIfaceThreadsCountFunc ModThreadsCount,
-                              const char *recv_mod_name,
-                              const char *decode_mod_name, const char *thread_name,
-                              const char *live_dev);
+        ConfigIfaceThreadsCountFunc ModThreadsCount, const char *recv_mod_name,
+        const char *decode_mod_name, const char *thread_name, const char *live_dev);
 
 int RunModeSetIPSAutoFp(ConfigIPSParserFunc ConfigParser,
                         const char *recv_mod_name,
@@ -63,4 +59,4 @@ int RunModeSetIPSWorker(ConfigIPSParserFunc ConfigParser,
 
 char *RunmodeAutoFpCreatePickupQueuesString(int n);
 
-#endif /* __UTIL_RUNMODES_H__ */
+#endif /* SURICATA_UTIL_RUNMODES_H */

@@ -19,6 +19,7 @@ Automatic Protocol Detection
    -  dns
    -  http
    -  imap (detection only by default; no parsing)
+   -  pop3 (detection only by default; no parsing)
    -  ftp
    -  modbus (disabled by default; minimalist probe parser; can lead to false positives)
    -  smb
@@ -263,6 +264,43 @@ See :doc:`http-keywords` for all HTTP keywords.
    use ``byte_extract`` and ``byte_test`` to verify that they
    work as expected.
 
+
+``byte_jump`` Keyword
+---------------------
+
+-  Suricata allows a variable name from ``byte_extract`` or
+   ``byte_math`` to be specified for the ``nbytes`` value. The
+   value of ``nbytes`` must adhere to the same constraints
+   as if it were supplied directly in the rule.
+
+
+``byte_math`` Keyword
+---------------------
+
+-  Suricata accepts ``dce`` as an endian value or as a separate keyword.
+   ``endian dce`` or ``dce`` are equivalent.
+
+-  Suricata's rule parser rejects rules that repeat keywords in a single
+   rule. E.g., ``byte_math: endian big, endian little``.
+
+-  Suricata's rule parser accepts ``rvalue`` values of ``0`` to the maximum
+   uint32 value. Snort rejects ``rvalue`` values of ``0`` and requires
+   values to be between ``[1..max-uint32 value]``.
+
+-  Suricata will never match if there's a zero divisor. Division by 0 is undefined.
+
+``byte_test`` Keyword
+---------------------
+
+- Suricata allows a variable name from ``byte_extract`` or ``byte_math``
+  to be specified for the ``nbytes`` value. The value of ``nbytes`` must adhere
+  to the same constraints as though a value was directly supplied by the rule.
+
+-  Suricata allows a variable name from ``byte_extract`` to be specified for
+   the ``nbytes`` value. The value of ``nbytes`` must adhere to the same constraints
+   as if it were supplied directly in the rule.
+
+
 ``isdataat`` Keyword
 --------------------
 
@@ -487,12 +525,12 @@ File Extraction
 Lua Scripting
 -------------
 
--  Suricata has the ``lua`` (or ``luajit``) keyword which allows for a
+-  Suricata has the ``lua`` keyword which allows for a
    rule to reference a Lua script that can access the packet, payload,
    HTTP buffers, etc.
 -  Provides powerful flexibility and capabilities that Snort does
    not have.
--  :doc:`rule-lua-scripting`
+-  More details in: :ref:`lua-detection`
 
 Fast Pattern
 ------------
@@ -549,7 +587,7 @@ Fast Pattern
 
 -  Using Hyperscan as the MPM matcher (``mpm-algo`` setting) for Suricata
    can greatly improve performance, especially when it comes to fast pattern
-   matching.  Hyperscan will also take in to account depth and offset
+   matching.  Hyperscan will also take into account depth and offset
    when doing fast pattern matching, something the other algorithms and
    Snort do not do.
 

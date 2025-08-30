@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,14 +21,9 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __DETECT_APP_LAYER_PROTOCOL__H__
-#define __DETECT_APP_LAYER_PROTOCOL__H__
-
-typedef struct DetectAppLayerProtocolData_ {
-    AppProto alproto;
-    uint8_t negated;
-} DetectAppLayerProtocolData;
+#ifndef SURICATA_DETECT_APP_LAYER_PROTOCOL__H
+#define SURICATA_DETECT_APP_LAYER_PROTOCOL__H
 
 void DetectAppLayerProtocolRegister(void);
 
-#endif /* __DETECT_APP_LAYER_PROTOCOL__H__ */
+#endif /* SURICATA_DETECT_APP_LAYER_PROTOCOL__H */

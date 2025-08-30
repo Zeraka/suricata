@@ -21,12 +21,9 @@
  * \author Mats Klepsland <mats.klepsland@gmail.com>
  */
 
-#ifndef __DETECT_TLS_SNI_H__
-#define __DETECT_TLS_SNI_H__
-
-#include "app-layer-ssl.h"
+#ifndef SURICATA_DETECT_TLS_SNI_H
+#define SURICATA_DETECT_TLS_SNI_H
 
 void DetectTlsSniRegister(void);
-uint32_t DetectTlsSniInspectMpm(DetectEngineThreadCtx *det_ctx, SSLState *ssl_state);
 
-#endif /* __DETECT_TLS_SNI_H__ */
+#endif /* SURICATA_DETECT_TLS_SNI_H */

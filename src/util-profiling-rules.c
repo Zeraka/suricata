@@ -25,39 +25,14 @@
  */
 
 #include "suricata-common.h"
-#include "decode.h"
-#include "detect.h"
-#include "conf.h"
-
-#include "tm-threads.h"
-
-#include "util-unittest.h"
-#include "util-byte.h"
 #include "util-profiling.h"
-#include "util-profiling-locks.h"
 
-#ifdef PROFILING
+#include "util-byte.h"
+#include "util-conf.h"
+#include "util-path.h"
+#include "util-time.h"
 
-/**
- * Extra data for rule profiling.
- */
-typedef struct SCProfileData_ {
-    uint32_t sid;
-    uint32_t gid;
-    uint32_t rev;
-    uint64_t checks;
-    uint64_t matches;
-    uint64_t max;
-    uint64_t ticks_match;
-    uint64_t ticks_no_match;
-} SCProfileData;
-
-typedef struct SCProfileDetectCtx_ {
-    uint32_t size;
-    uint32_t id;
-    SCProfileData *data;
-    pthread_mutex_t data_m;
-} SCProfileDetectCtx;
+#ifdef PROFILE_RULES
 
 /**
  * Used for generating the summary data to print.
@@ -118,15 +93,15 @@ void SCProfilingRulesGlobalInit(void)
         profiling_rules_sort_orders[1] = -1;  \
     }
 
-    ConfNode *conf;
+    SCConfNode *conf;
     const char *val;
 
-    conf = ConfGetNode("profiling.rules");
+    conf = SCConfGetNode("profiling.rules");
     if (conf != NULL) {
-        if (ConfNodeChildValueIsTrue(conf, "enabled")) {
+        if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
             profiling_rules_enabled = 1;
 
-            val = ConfNodeLookupChildValue(conf, "sort");
+            val = SCConfNodeLookupChildValue(conf, "sort");
             if (val != NULL) {
                 if (strcmp(val, "ticks") == 0) {
                     SET_ONE(SC_PROFILING_RULES_SORT_BY_TICKS);
@@ -150,31 +125,31 @@ void SCProfilingRulesGlobalInit(void)
                     SET_ONE(SC_PROFILING_RULES_SORT_BY_MAX_TICKS);
                 }
                 else {
-                    SCLogError(SC_ERR_INVALID_ARGUMENT,
-                            "Invalid profiling sort order: %s", val);
+                    SCLogError("Invalid profiling sort order: %s", val);
                     exit(EXIT_FAILURE);
                 }
             }
 
-            val = ConfNodeLookupChildValue(conf, "limit");
+            val = SCConfNodeLookupChildValue(conf, "limit");
             if (val != NULL) {
                 if (StringParseUint32(&profiling_rules_limit, 10,
                             (uint16_t)strlen(val), val) <= 0) {
-                    SCLogError(SC_ERR_INVALID_ARGUMENT, "Invalid limit: %s", val);
+                    SCLogError("Invalid limit: %s", val);
                     exit(EXIT_FAILURE);
                 }
             }
-            const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            const char *filename = SCConfNodeLookupChildValue(conf, "filename");
             if (filename != NULL) {
+                if (PathIsAbsolute(filename)) {
+                    strlcpy(profiling_file_name, filename, sizeof(profiling_file_name));
+                } else {
+                    const char *log_dir = SCConfigGetLogDirectory();
+                    snprintf(profiling_file_name, sizeof(profiling_file_name), "%s/%s", log_dir,
+                            filename);
+                }
 
-                const char *log_dir;
-                log_dir = ConfigGetLogDirectory();
-
-                snprintf(profiling_file_name, sizeof(profiling_file_name),
-                        "%s/%s", log_dir, filename);
-
-                const char *v = ConfNodeLookupChildValue(conf, "append");
-                if (v == NULL || ConfValIsTrue(v)) {
+                const char *v = SCConfNodeLookupChildValue(conf, "append");
+                if (v == NULL || SCConfValIsTrue(v)) {
                     profiling_file_mode = "a";
                 } else {
                     profiling_file_mode = "w";
@@ -182,7 +157,7 @@ void SCProfilingRulesGlobalInit(void)
 
                 profiling_output_to_file = 1;
             }
-            if (ConfNodeChildValueIsTrue(conf, "json")) {
+            if (SCConfNodeChildValueIsTrue(conf, "json")) {
                 profiling_rule_json = 1;
             }
         }
@@ -288,25 +263,25 @@ SCProfileSummarySortByMaxTicks(const void *a, const void *b)
         return s0->max > s1->max ? -1 : 1;
 }
 
-static void DumpJson(FILE *fp, SCProfileSummary *summary,
-        uint32_t count, uint64_t total_ticks,
-        const char *sort_desc)
+static json_t *BuildJson(
+        SCProfileSummary *summary, uint32_t count, uint64_t total_ticks, const char *sort_desc)
 {
+
     char timebuf[64];
     uint32_t i;
     struct timeval tval;
 
     json_t *js = json_object();
     if (js == NULL)
-        return;
+        return js;
     json_t *jsa = json_array();
     if (jsa == NULL) {
         json_decref(js);
-        return;
+        return js;
     }
 
     gettimeofday(&tval, NULL);
-    CreateIsoTimeString(&tval, timebuf, sizeof(timebuf));
+    CreateIsoTimeString(SCTIME_FROM_TIMEVAL(&tval), timebuf, sizeof(timebuf));
     json_object_set_new(js, "timestamp", json_string(timebuf));
     json_object_set_new(js, "sort", json_string(sort_desc));
 
@@ -339,14 +314,22 @@ static void DumpJson(FILE *fp, SCProfileSummary *summary,
         }
     }
     json_object_set_new(js, "rules", jsa);
+    return js;
+}
 
+static void DumpJson(FILE *fp, SCProfileSummary *summary, uint32_t count, uint64_t total_ticks,
+        const char *sort_desc)
+{
+    json_t *js = BuildJson(summary, count, total_ticks, sort_desc);
+    if (unlikely(js == NULL))
+        return;
     char *js_s = json_dumps(js,
             JSON_PRESERVE_ORDER|JSON_COMPACT|JSON_ENSURE_ASCII|
             JSON_ESCAPE_SLASH);
 
     if (unlikely(js_s == NULL))
         return;
-    fprintf(fp, "%s", js_s);
+    fprintf(fp, "%s\n", js_s);
     free(js_s);
     json_decref(js);
 }
@@ -418,32 +401,32 @@ static void DumpText(FILE *fp, SCProfileSummary *summary,
  *
  * \param de_ctx The active DetectEngineCtx, used to get at the loaded rules.
  */
-static void
-SCProfilingRuleDump(SCProfileDetectCtx *rules_ctx)
+static void *SCProfilingRuleDump(SCProfileDetectCtx *rules_ctx, int file_output)
 {
     uint32_t i;
-    FILE *fp;
+    FILE *fp = NULL;
 
     if (rules_ctx == NULL)
-        return;
+        return NULL;
 
-    if (profiling_output_to_file == 1) {
-        fp = fopen(profiling_file_name, profiling_file_mode);
+    if (file_output != 0) {
+        if (profiling_output_to_file == 1) {
+            fp = fopen(profiling_file_name, profiling_file_mode);
 
-        if (fp == NULL) {
-            SCLogError(SC_ERR_FOPEN, "failed to open %s: %s", profiling_file_name,
-                    strerror(errno));
-            return;
+            if (fp == NULL) {
+                SCLogError("failed to open %s: %s", profiling_file_name, strerror(errno));
+                return NULL;
+            }
+        } else {
+            fp = stdout;
         }
-    } else {
-       fp = stdout;
     }
 
     int summary_size = sizeof(SCProfileSummary) * rules_ctx->size;
     SCProfileSummary *summary = SCMalloc(summary_size);
     if (unlikely(summary == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory for profiling summary");
-        return;
+        SCLogError("Error allocating memory for profiling summary");
+        return NULL;
     }
 
     uint32_t count = rules_ctx->size;
@@ -460,7 +443,7 @@ SCProfilingRuleDump(SCProfileDetectCtx *rules_ctx)
         summary[i].ticks = rules_ctx->data[i].ticks_match + rules_ctx->data[i].ticks_no_match;
         summary[i].checks = rules_ctx->data[i].checks;
 
-        if (summary[i].ticks > 0) {
+        if (summary[i].checks > 0) {
             summary[i].avgticks = (long double)summary[i].ticks / (long double)summary[i].checks;
         }
 
@@ -521,17 +504,26 @@ SCProfilingRuleDump(SCProfileDetectCtx *rules_ctx)
                 break;
         }
         if (profiling_rule_json) {
-            DumpJson(fp, summary, count, total_ticks, sort_desc);
+            if (file_output != 1) {
+                json_t *js = BuildJson(summary, count, total_ticks, sort_desc);
+                SCFree(summary);
+                return js;
+            } else {
+                DumpJson(fp, summary, count, total_ticks, sort_desc);
+            }
         } else {
             DumpText(fp, summary, count, total_ticks, sort_desc);
         }
         order++;
     }
 
-    if (fp != stdout)
-        fclose(fp);
+    if (file_output != 0) {
+        if (fp != stdout)
+            fclose(fp);
+    }
     SCFree(summary);
     SCLogPerf("Done dumping profiling data.");
+    return NULL;
 }
 
 /**
@@ -572,13 +564,10 @@ SCProfilingRuleUpdateCounter(DetectEngineThreadCtx *det_ctx, uint16_t id, uint64
 
 static SCProfileDetectCtx *SCProfilingRuleInitCtx(void)
 {
-    SCProfileDetectCtx *ctx = SCMalloc(sizeof(SCProfileDetectCtx));
+    SCProfileDetectCtx *ctx = SCCalloc(1, sizeof(SCProfileDetectCtx));
     if (ctx != NULL) {
-        memset(ctx, 0x00, sizeof(SCProfileDetectCtx));
-
         if (pthread_mutex_init(&ctx->data_m, NULL) != 0) {
-                    FatalError(SC_ERR_FATAL,
-                               "Failed to initialize hash table mutex.");
+            FatalError("Failed to initialize hash table mutex.");
         }
     }
 
@@ -588,7 +577,7 @@ static SCProfileDetectCtx *SCProfilingRuleInitCtx(void)
 void SCProfilingRuleDestroyCtx(SCProfileDetectCtx *ctx)
 {
     if (ctx != NULL) {
-        SCProfilingRuleDump(ctx);
+        SCProfilingRuleDump(ctx, 1);
         if (ctx->data != NULL)
             SCFree(ctx->data);
         pthread_mutex_destroy(&ctx->data_m);
@@ -601,27 +590,31 @@ void SCProfilingRuleThreadSetup(SCProfileDetectCtx *ctx, DetectEngineThreadCtx *
     if (ctx == NULL|| ctx->size == 0)
         return;
 
-    SCProfileData *a = SCMalloc(sizeof(SCProfileData) * ctx->size);
+    SCProfileData *a = SCCalloc(ctx->size, sizeof(SCProfileData));
     if (a != NULL) {
-        memset(a, 0x00, sizeof(SCProfileData) * ctx->size);
-
         det_ctx->rule_perf_data = a;
         det_ctx->rule_perf_data_size = ctx->size;
     }
 }
 
-static void SCProfilingRuleThreadMerge(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx)
+static void SCProfilingRuleThreadMerge(
+        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx, bool reset)
 {
     if (de_ctx == NULL || de_ctx->profile_ctx == NULL || de_ctx->profile_ctx->data == NULL ||
-        det_ctx == NULL || det_ctx->rule_perf_data == NULL)
+            det_ctx == NULL || det_ctx->rule_perf_data == NULL)
         return;
 
-    int i;
-    for (i = 0; i < det_ctx->rule_perf_data_size; i++) {
+    for (int i = 0; i < det_ctx->rule_perf_data_size; i++) {
         de_ctx->profile_ctx->data[i].checks += det_ctx->rule_perf_data[i].checks;
         de_ctx->profile_ctx->data[i].matches += det_ctx->rule_perf_data[i].matches;
         de_ctx->profile_ctx->data[i].ticks_match += det_ctx->rule_perf_data[i].ticks_match;
         de_ctx->profile_ctx->data[i].ticks_no_match += det_ctx->rule_perf_data[i].ticks_no_match;
+        if (reset) {
+            det_ctx->rule_perf_data[i].checks = 0;
+            det_ctx->rule_perf_data[i].matches = 0;
+            det_ctx->rule_perf_data[i].ticks_match = 0;
+            det_ctx->rule_perf_data[i].ticks_no_match = 0;
+        }
         if (det_ctx->rule_perf_data[i].max > de_ctx->profile_ctx->data[i].max)
             de_ctx->profile_ctx->data[i].max = det_ctx->rule_perf_data[i].max;
     }
@@ -633,12 +626,22 @@ void SCProfilingRuleThreadCleanup(DetectEngineThreadCtx *det_ctx)
         return;
 
     pthread_mutex_lock(&det_ctx->de_ctx->profile_ctx->data_m);
-    SCProfilingRuleThreadMerge(det_ctx->de_ctx, det_ctx);
+    SCProfilingRuleThreadMerge(det_ctx->de_ctx, det_ctx, false);
     pthread_mutex_unlock(&det_ctx->de_ctx->profile_ctx->data_m);
 
     SCFree(det_ctx->rule_perf_data);
     det_ctx->rule_perf_data = NULL;
     det_ctx->rule_perf_data_size = 0;
+}
+
+void SCProfilingRuleThreatAggregate(DetectEngineThreadCtx *det_ctx)
+{
+
+    if (det_ctx == NULL || det_ctx->de_ctx == NULL || det_ctx->de_ctx->profile_ctx == NULL)
+        return;
+    pthread_mutex_lock(&det_ctx->de_ctx->profile_ctx->data_m);
+    SCProfilingRuleThreadMerge(det_ctx->de_ctx, det_ctx, true);
+    pthread_mutex_unlock(&det_ctx->de_ctx->profile_ctx->data_m);
 }
 
 /**
@@ -664,9 +667,8 @@ SCProfilingRuleInitCounters(DetectEngineCtx *de_ctx)
     }
 
     if (count > 0) {
-        de_ctx->profile_ctx->data = SCMalloc(sizeof(SCProfileData) * de_ctx->profile_ctx->size);
+        de_ctx->profile_ctx->data = SCCalloc(de_ctx->profile_ctx->size, sizeof(SCProfileData));
         BUG_ON(de_ctx->profile_ctx->data == NULL);
-        memset(de_ctx->profile_ctx->data, 0x00, sizeof(SCProfileData) * de_ctx->profile_ctx->size);
 
         sig = de_ctx->sig_list;
         while (sig != NULL) {
@@ -678,6 +680,11 @@ SCProfilingRuleInitCounters(DetectEngineCtx *de_ctx)
     }
 
     SCLogPerf("Registered %"PRIu32" rule profiling counters.", count);
+}
+
+json_t *SCProfileRuleTriggerDump(DetectEngineCtx *de_ctx)
+{
+    return SCProfilingRuleDump(de_ctx->profile_ctx, 0);
 }
 
 #endif /* PROFILING */

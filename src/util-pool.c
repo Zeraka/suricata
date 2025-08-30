@@ -54,14 +54,14 @@ static int PoolMemset(void *pitem, void *initdata)
 
 /**
  * \brief Check if data is preallocated
- * \retval 0 if not inside the prealloc'd block, 1 if inside */
-static int PoolDataPreAllocated(Pool *p, void *data)
+ * \retval false if not inside the prealloc'd block, true if inside */
+static bool PoolDataPreAllocated(Pool *p, void *data)
 {
     ptrdiff_t delta = data - p->data_buffer;
     if ((delta < 0) || (delta > p->data_buffer_size)) {
-        return 0;
+        return false;
     }
-    return 1;
+    return true;
 }
 
 /** \brief Init a Pool
@@ -85,29 +85,33 @@ Pool *PoolInit(uint32_t size, uint32_t prealloc_size, uint32_t elt_size,
         void *(*Alloc)(void), int (*Init)(void *, void *), void *InitData,
         void (*Cleanup)(void *), void (*Free)(void *))
 {
+    sc_errno = SC_OK;
+
     Pool *p = NULL;
 
     if (size != 0 && prealloc_size > size) {
-        SCLogError(SC_ERR_POOL_INIT, "size error");
+        sc_errno = SC_EINVAL;
         goto error;
     }
     if (size != 0 && elt_size == 0) {
-        SCLogError(SC_ERR_POOL_INIT, "size != 0 && elt_size == 0");
+        sc_errno = SC_EINVAL;
         goto error;
     }
     if (elt_size && Free) {
-        SCLogError(SC_ERR_POOL_INIT, "elt_size && Free");
+        sc_errno = SC_EINVAL;
+        goto error;
+    }
+    if (elt_size == 0 && Alloc == NULL) {
+        sc_errno = SC_EINVAL;
         goto error;
     }
 
     /* setup the filter */
-    p = SCMalloc(sizeof(Pool));
+    p = SCCalloc(1, sizeof(Pool));
     if (unlikely(p == NULL)) {
-        SCLogError(SC_ERR_POOL_INIT, "alloc error");
+        sc_errno = SC_ENOMEM;
         goto error;
     }
-
-    memset(p,0,sizeof(Pool));
 
     p->max_buckets = size;
     p->preallocated = prealloc_size;
@@ -128,7 +132,7 @@ Pool *PoolInit(uint32_t size, uint32_t prealloc_size, uint32_t elt_size,
     if (size > 0) {
         PoolBucket *pb = SCCalloc(size, sizeof(PoolBucket));
         if (unlikely(pb == NULL)) {
-            SCLogError(SC_ERR_POOL_INIT, "alloc error");
+            sc_errno = SC_ENOMEM;
             goto error;
         }
         memset(pb, 0, size * sizeof(PoolBucket));
@@ -145,19 +149,18 @@ Pool *PoolInit(uint32_t size, uint32_t prealloc_size, uint32_t elt_size,
         p->data_buffer = SCCalloc(prealloc_size, elt_size);
         /* FIXME better goto */
         if (p->data_buffer == NULL) {
-            SCLogError(SC_ERR_POOL_INIT, "alloc error");
+            sc_errno = SC_ENOMEM;
             goto error;
         }
     }
     /* prealloc the buckets and requeue them to the alloc list */
     for (u32 = 0; u32 < prealloc_size; u32++) {
         if (size == 0) { /* unlimited */
-            PoolBucket *pb = SCMalloc(sizeof(PoolBucket));
+            PoolBucket *pb = SCCalloc(1, sizeof(PoolBucket));
             if (unlikely(pb == NULL)) {
-                SCLogError(SC_ERR_POOL_INIT, "alloc error");
+                sc_errno = SC_ENOMEM;
                 goto error;
             }
-            memset(pb, 0, sizeof(PoolBucket));
 
             if (p->Alloc) {
                 pb->data = p->Alloc();
@@ -165,17 +168,17 @@ Pool *PoolInit(uint32_t size, uint32_t prealloc_size, uint32_t elt_size,
                 pb->data = SCMalloc(p->elt_size);
             }
             if (pb->data == NULL) {
-                SCLogError(SC_ERR_POOL_INIT, "alloc error");
                 SCFree(pb);
+                sc_errno = SC_ENOMEM;
                 goto error;
             }
             if (p->Init(pb->data, p->InitData) != 1) {
-                SCLogError(SC_ERR_POOL_INIT, "init error");
                 if (p->Free)
                     p->Free(pb->data);
                 else
                     SCFree(pb->data);
                 SCFree(pb);
+                sc_errno = SC_EINVAL;
                 goto error;
             }
             p->allocated++;
@@ -186,14 +189,14 @@ Pool *PoolInit(uint32_t size, uint32_t prealloc_size, uint32_t elt_size,
         } else {
             PoolBucket *pb = p->empty_stack;
             if (pb == NULL) {
-                SCLogError(SC_ERR_POOL_INIT, "alloc error");
+                sc_errno = SC_ENOMEM;
                 goto error;
             }
 
             pb->data = (char *)p->data_buffer + u32 * elt_size;
             if (p->Init(pb->data, p->InitData) != 1) {
-                SCLogError(SC_ERR_POOL_INIT, "init error");
                 pb->data = NULL;
+                sc_errno = SC_EINVAL;
                 goto error;
             }
 
@@ -227,7 +230,7 @@ void PoolFree(Pool *p)
         p->alloc_stack = pb->next;
         if (p->Cleanup)
             p->Cleanup(pb->data);
-        if (PoolDataPreAllocated(p, pb->data) == 0) {
+        if (!PoolDataPreAllocated(p, pb->data)) {
             if (p->Free)
                 p->Free(pb->data);
             else
@@ -245,7 +248,7 @@ void PoolFree(Pool *p)
         if (pb->data!= NULL) {
             if (p->Cleanup)
                 p->Cleanup(pb->data);
-            if (PoolDataPreAllocated(p, pb->data) == 0) {
+            if (!PoolDataPreAllocated(p, pb->data)) {
                 if (p->Free)
                     p->Free(pb->data);
                 else
@@ -263,13 +266,6 @@ void PoolFree(Pool *p)
     if (p->data_buffer)
         SCFree(p->data_buffer);
     SCFree(p);
-}
-
-void PoolPrint(Pool *p)
-{
-    printf("\n----------- Hash Table Stats ------------\n");
-    printf("Buckets:               %" PRIu32 "\n", p->empty_stack_size + p->alloc_stack_size);
-    printf("-----------------------------------------\n");
 }
 
 void *PoolGet(Pool *p)
@@ -344,7 +340,7 @@ void PoolReturn(Pool *p, void *data)
         if (p->Cleanup != NULL) {
             p->Cleanup(data);
         }
-        if (PoolDataPreAllocated(p, data) == 0) {
+        if (!PoolDataPreAllocated(p, data)) {
             if (p->Free)
                 p->Free(data);
             else
@@ -370,11 +366,6 @@ void PoolReturn(Pool *p, void *data)
     SCReturn;
 }
 
-void PoolPrintSaturation(Pool *p)
-{
-    SCLogDebug("pool %p is using %"PRIu32" out of %"PRIu32" items (%02.1f%%), max %"PRIu32" (%02.1f%%): pool struct memory %"PRIu64".", p, p->outstanding, p->max_buckets, (float)(p->outstanding/(float)(p->max_buckets))*100, p->max_outstanding, (float)(p->max_outstanding/(float)(p->max_buckets))*100, (uint64_t)(p->max_buckets * sizeof(PoolBucket)));
-}
-
 /*
  * ONLY TESTS BELOW THIS COMMENT
  */
@@ -398,7 +389,6 @@ static int PoolTestInitArg(void *data, void *allocdata)
 
 static void PoolTestFree(void *ptr)
 {
-    return;
 }
 
 static int PoolTestInit01 (void)

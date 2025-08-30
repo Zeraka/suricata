@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __HOST_BIT_H__
-#define __HOST_BIT_H__
+#ifndef SURICATA_HOST_BIT_H
+#define SURICATA_HOST_BIT_H
 
 #include "host.h"
 #include "util-var.h"
@@ -31,13 +31,13 @@ void HostBitInitCtx(void);
 void HostBitRegisterTests(void);
 
 int HostHasHostBits(Host *host);
-int HostBitsTimedoutCheck(Host *h, struct timeval *ts);
+int HostBitsTimedoutCheck(Host *h, SCTime_t ts);
 
-void HostBitSet(Host *, uint32_t, uint32_t);
+void HostBitSet(Host *, uint32_t, SCTime_t);
 void HostBitUnset(Host *, uint32_t);
-void HostBitToggle(Host *, uint32_t, uint32_t);
-int HostBitIsset(Host *, uint32_t, uint32_t);
-int HostBitIsnotset(Host *, uint32_t, uint32_t);
+void HostBitToggle(Host *, uint32_t, SCTime_t);
+int HostBitIsset(Host *, uint32_t, SCTime_t);
+int HostBitIsnotset(Host *, uint32_t, SCTime_t);
 int HostBitList(Host *, XBit **);
 
-#endif /* __HOST_BIT_H__ */
+#endif /* SURICATA_HOST_BIT_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,19 +21,10 @@
  * \author Pablo Rincon <pablo.rincon.crespo@gmail.com>
  */
 
-#ifndef __DETECT_FILENAME_H__
-#define __DETECT_FILENAME_H__
-
-#include "util-spm-bm.h"
-
-typedef struct DetectFilenameData {
-    uint8_t *name; /** name of the file to match */
-    BmCtx *bm_ctx; /** BM context */
-    uint16_t len; /** name length */
-    uint32_t flags;
-} DetectFilenameData;
+#ifndef SURICATA_DETECT_FILENAME_H
+#define SURICATA_DETECT_FILENAME_H
 
 /* prototypes */
 void DetectFilenameRegister (void);
 
-#endif /* __DETECT_FILENAME_H__ */
+#endif /* SURICATA_DETECT_FILENAME_H */

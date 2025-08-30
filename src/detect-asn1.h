@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2020-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -20,10 +20,13 @@
  *
  * Implements "asn1" keyword
  */
-#ifndef __DETECT_ASN1_H__
-#define __DETECT_ASN1_H__
+#ifndef SURICATA_DETECT_ASN1_H
+#define SURICATA_DETECT_ASN1_H
 
 /* prototypes */
 void DetectAsn1Register (void);
 
-#endif /* __DETECT_ASN1_H__ */
+bool DetectAsn1Match(const SigMatchData *smd, const uint8_t *buffer, const uint32_t buffer_len,
+        const uint32_t offset);
+
+#endif /* SURICATA_DETECT_ASN1_H */

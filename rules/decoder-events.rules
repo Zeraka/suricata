@@ -23,7 +23,7 @@ alert pkthdr any any -> any any (msg:"SURICATA IPv6 duplicated Hop-By-Hop Option
 alert pkthdr any any -> any any (msg:"SURICATA IPv6 duplicated Destination Options extension header"; decode-event:ipv6.exthdr_dupl_dh; classtype:protocol-command-decode; sid:2200018; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA IPv6 duplicated Authentication Header extension header"; decode-event:ipv6.exthdr_dupl_ah; classtype:protocol-command-decode; sid:2200019; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA IPv6 duplicate ESP extension header"; decode-event:ipv6.exthdr_dupl_eh; classtype:protocol-command-decode; sid:2200020; rev:2;)
-alert pkthdr any any -> any any (msg:"SURICATA IPv6 invalid option lenght in header"; decode-event:ipv6.exthdr_invalid_optlen; classtype:protocol-command-decode; sid:2200021; rev:2;)
+alert pkthdr any any -> any any (msg:"SURICATA IPv6 invalid option length in header"; decode-event:ipv6.exthdr_invalid_optlen; classtype:protocol-command-decode; sid:2200021; rev:3;)
 alert pkthdr any any -> any any (msg:"SURICATA IPv6 wrong IP version"; decode-event:ipv6.wrong_ip_version; classtype:protocol-command-decode; sid:2200022; rev:2;)
 # RFC 4302 states the reserved field should be 0.
 alert pkthdr any any -> any any (msg:"SURICATA IPv6 AH reserved field not 0"; decode-event:ipv6.exthdr_ah_res_not_null; classtype:protocol-command-decode; sid:2200081; rev:2;)
@@ -52,7 +52,7 @@ alert pkthdr any any -> any any (msg:"SURICATA ICMPv4 unknown code"; decode-even
 alert pkthdr any any -> any any (msg:"SURICATA ICMPv4 truncated packet"; decode-event:icmpv4.ipv4_trunc_pkt; classtype:protocol-command-decode; sid:2200026; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA ICMPv4 unknown version"; decode-event:icmpv4.ipv4_unknown_ver; classtype:protocol-command-decode; sid:2200027; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA ICMPv6 packet too small"; decode-event:icmpv6.pkt_too_small; classtype:protocol-command-decode; sid:2200028; rev:2;)
-# uncomment the following sginature if you plan to update suricata code to support more ICMPv6 type
+# uncomment the following signature if you plan to update suricata code to support more ICMPv6 type
 #alert pkthdr any any -> any any (msg:"SURICATA ICMPv6 unknown type"; decode-event:icmpv6.unknown_type; classtype:protocol-command-decode; sid:2200029; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA ICMPv6 unknown code"; decode-event:icmpv6.unknown_code; classtype:protocol-command-decode; sid:2200030; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA ICMPv6 truncated packet"; decode-event:icmpv6.ipv6_trunc_pkt; classtype:protocol-command-decode; sid:2200031; rev:2;)
@@ -67,9 +67,11 @@ alert pkthdr any any -> any any (msg:"SURICATA TCP option invalid length"; decod
 alert pkthdr any any -> any any (msg:"SURICATA TCP duplicated option"; decode-event:tcp.opt_duplicate; classtype:protocol-command-decode; sid:2200037; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA UDP packet too small"; decode-event:udp.pkt_too_small; classtype:protocol-command-decode; sid:2200038; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA UDP header length too small"; decode-event:udp.hlen_too_small; classtype:protocol-command-decode; sid:2200039; rev:2;)
-alert pkthdr any any -> any any (msg:"SURICATA UDP invalid header length"; decode-event:udp.hlen_invalid; classtype:protocol-command-decode; sid:2200040; rev:2;)
+# 2200040 "udp.hlen_invalid" has been retired.
+alert pkthdr any any -> any any (msg:"SURICATA UDP invalid length field in the header"; decode-event:udp.len_invalid; classtype:protocol-command-decode; sid:2200120; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA SLL packet too small"; decode-event:sll.pkt_too_small; classtype:protocol-command-decode; sid:2200041; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA Ethernet packet too small"; decode-event:ethernet.pkt_too_small; classtype:protocol-command-decode; sid:2200042; rev:2;)
+alert pkthdr any any -> any any (msg:"SURICATA Ethertype unknown"; decode-event:ethernet.unknown_ethertype; threshold: type limit, track by_rule, seconds 60, count 1; classtype:protocol-command-decode; sid:2200121; rev:1;)
 alert pkthdr any any -> any any (msg:"SURICATA PPP packet too small"; decode-event:ppp.pkt_too_small; classtype:protocol-command-decode; sid:2200043; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA PPP VJU packet too small"; decode-event:ppp.vju_pkt_too_small; classtype:protocol-command-decode; sid:2200044; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA PPP IPv4 packet too small"; decode-event:ppp.ip4_pkt_too_small; classtype:protocol-command-decode; sid:2200045; rev:2;)
@@ -97,6 +99,8 @@ alert pkthdr any any -> any any (msg:"SURICATA VLAN header too small "; decode-e
 alert pkthdr any any -> any any (msg:"SURICATA VLAN unknown type"; decode-event:vlan.unknown_type; classtype:protocol-command-decode; sid:2200067; rev:2;)
 # more than 2 vlan layers in the packet
 alert pkthdr any any -> any any (msg:"SURICATA VLAN too many layers"; decode-event:vlan.too_many_layers; classtype:protocol-command-decode; sid:2200091; rev:2;)
+alert pkthdr any any -> any any (msg:"SURICATA VNTAG header too small"; decode-event:vntag.header_too_small; classtype:protocol-command-decode; sid:2200117; rev:1;)
+alert pkthdr any any -> any any (msg:"SURICATA VNTAG unknown type"; decode-event:vntag.unknown_type; classtype:protocol-command-decode; sid:2200118; rev:1;)
 alert pkthdr any any -> any any (msg:"SURICATA IEEE802.1AH header too small"; decode-event:ieee8021ah.header_too_small; classtype:protocol-command-decode; sid:2200112; rev:1;)
 
 alert pkthdr any any -> any any (msg:"SURICATA IP raw invalid IP version "; decode-event:ipraw.invalid_ip_version; classtype:protocol-command-decode; sid:2200068; rev:2;)
@@ -104,6 +108,7 @@ alert pkthdr any any -> any any (msg:"SURICATA FRAG IPv4 Packet size too large";
 alert pkthdr any any -> any any (msg:"SURICATA FRAG IPv4 Fragmentation overlap"; decode-event:ipv4.frag_overlap; classtype:protocol-command-decode; sid:2200070; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA FRAG IPv6 Packet size too large"; decode-event:ipv6.frag_pkt_too_large; classtype:protocol-command-decode; sid:2200071; rev:3;)
 alert pkthdr any any -> any any (msg:"SURICATA FRAG IPv6 Fragmentation overlap"; decode-event:ipv6.frag_overlap; classtype:protocol-command-decode; sid:2200072; rev:2;)
+alert pkthdr any any -> any any (msg:"SURICATA FRAG IPv6 Fragment invalid length"; decode-event:ipv6.frag_invalid_length; classtype:protocol-command-decode; sid:2200119; rev:1;)
 
 # checksum rules
 alert ip any any -> any any (msg:"SURICATA IPv4 invalid checksum"; ipv4-csum:invalid; classtype:protocol-command-decode; sid:2200073; rev:2;)
@@ -113,7 +118,6 @@ alert icmp any any -> any any (msg:"SURICATA ICMPv4 invalid checksum"; icmpv4-cs
 alert tcp any any -> any any (msg:"SURICATA TCPv6 invalid checksum"; tcpv6-csum:invalid; classtype:protocol-command-decode; sid:2200077; rev:2;)
 alert udp any any -> any any (msg:"SURICATA UDPv6 invalid checksum"; udpv6-csum:invalid; classtype:protocol-command-decode; sid:2200078; rev:2;)
 alert icmp any any -> any any (msg:"SURICATA ICMPv6 invalid checksum"; icmpv6-csum:invalid; classtype:protocol-command-decode; sid:2200079; rev:2;)
-
 # IPv4 in IPv6 rules
 alert pkthdr any any -> any any (msg:"SURICATA IPv4-in-IPv6 packet too short"; decode-event:ipv6.ipv4_in_ipv6_too_small; classtype:protocol-command-decode; sid:2200082; rev:2;)
 alert pkthdr any any -> any any (msg:"SURICATA IPv4-in-IPv6 invalid protocol"; decode-event:ipv6.ipv4_in_ipv6_wrong_version; classtype:protocol-command-decode; sid:2200083; rev:2;)
@@ -146,5 +150,10 @@ alert pkthdr any any -> any any (msg:"SURICATA DCE packet too small"; decode-eve
 # Cisco HDLC
 alert pkthdr any any -> any any (msg:"SURICATA CHDLC packet too small"; decode-event:chdlc.pkt_too_small; classtype:protocol-command-decode; sid:2200115; rev:1;)
 
-# next sid is 2200116
+alert pkthdr any any -> any any (msg:"SURICATA packet with too many layers"; decode-event:too_many_layers; classtype:protocol-command-decode; sid:2200116; rev:1;)
+
+# Capture events.
+alert pkthdr any any -> any any (msg:"SURICATA AF-PACKET truncated packet"; decode-event:afpacket.trunc_pkt; classtype:protocol-command-decode; sid:2200122; rev:1;)
+
+# next sid is 2200123
 

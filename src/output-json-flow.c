@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -24,10 +24,10 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
 #include "detect.h"
 #include "pkt-var.h"
 #include "conf.h"
+#include "app-layer-parser.h"
 
 #include "threads.h"
 #include "threadvars.h"
@@ -41,6 +41,7 @@
 #include "output.h"
 #include "util-privs.h"
 #include "util-buffer.h"
+#include "util-device-private.h"
 #include "util-proto-name.h"
 #include "util-logopenfile.h"
 #include "util-time.h"
@@ -50,36 +51,22 @@
 #include "stream-tcp.h"
 #include "stream-tcp-private.h"
 #include "flow-storage.h"
+#include "util-exception-policy.h"
 
-typedef struct LogJsonFileCtx_ {
-    LogFileCtx *file_ctx;
-    uint32_t flags; /** Store mode */
-    OutputJsonCommonSettings cfg;
-} LogJsonFileCtx;
-
-typedef struct JsonFlowLogThread_ {
-    LogJsonFileCtx *flowlog_ctx;
-    /** LogFileCtx has the pointer to the file and a mutex to allow multithreading */
-    LogFileCtx *file_ctx;
-    MemBuffer *buffer;
-} JsonFlowLogThread;
-
-static JsonBuilder *CreateEveHeaderFromFlow(const Flow *f)
+static SCJsonBuilder *CreateEveHeaderFromFlow(const Flow *f)
 {
     char timebuf[64];
     char srcip[46] = {0}, dstip[46] = {0};
     Port sp, dp;
 
-    JsonBuilder *jb = jb_new_object();
+    SCJsonBuilder *jb = SCJbNewObject();
     if (unlikely(jb == NULL)) {
         return NULL;
     }
 
-    struct timeval tv;
-    memset(&tv, 0x00, sizeof(tv));
-    TimeGet(&tv);
+    SCTime_t ts = TimeGet();
 
-    CreateIsoTimeString(&tv, timebuf, sizeof(timebuf));
+    CreateIsoTimeString(ts, timebuf, sizeof(timebuf));
 
     if ((f->flags & FLOW_DIR_REVERSED) == 0) {
         if (FLOW_IS_IPV4(f)) {
@@ -104,7 +91,7 @@ static JsonBuilder *CreateEveHeaderFromFlow(const Flow *f)
     }
 
     /* time */
-    jb_set_string(jb, "timestamp", timebuf);
+    SCJbSetString(jb, "timestamp", timebuf);
 
     CreateEveFlowId(jb, (const Flow *)f);
 
@@ -116,161 +103,231 @@ static JsonBuilder *CreateEveHeaderFromFlow(const Flow *f)
 
     /* input interface */
     if (f->livedev) {
-        jb_set_string(jb, "in_iface", f->livedev->dev);
+        SCJbSetString(jb, "in_iface", f->livedev->dev);
     }
 
     JB_SET_STRING(jb, "event_type", "flow");
 
     /* vlan */
     if (f->vlan_idx > 0) {
-        jb_open_array(jb, "vlan");
-        jb_append_uint(jb, f->vlan_id[0]);
+        SCJbOpenArray(jb, "vlan");
+        SCJbAppendUint(jb, f->vlan_id[0]);
         if (f->vlan_idx > 1) {
-            jb_append_uint(jb, f->vlan_id[1]);
+            SCJbAppendUint(jb, f->vlan_id[1]);
         }
-        jb_close(jb);
+        if (f->vlan_idx > 2) {
+            SCJbAppendUint(jb, f->vlan_id[2]);
+        }
+        SCJbClose(jb);
     }
 
     /* tuple */
-    jb_set_string(jb, "src_ip", srcip);
+    SCJbSetString(jb, "src_ip", srcip);
     switch(f->proto) {
         case IPPROTO_ICMP:
             break;
         case IPPROTO_UDP:
         case IPPROTO_TCP:
         case IPPROTO_SCTP:
-            jb_set_uint(jb, "src_port", sp);
+            SCJbSetUint(jb, "src_port", sp);
             break;
     }
-    jb_set_string(jb, "dest_ip", dstip);
+    SCJbSetString(jb, "dest_ip", dstip);
     switch(f->proto) {
         case IPPROTO_ICMP:
             break;
         case IPPROTO_UDP:
         case IPPROTO_TCP:
         case IPPROTO_SCTP:
-            jb_set_uint(jb, "dest_port", dp);
+            SCJbSetUint(jb, "dest_port", dp);
             break;
     }
 
+    /* ip version */
+    if (FLOW_IS_IPV4(f)) {
+        SCJbSetUint(jb, "ip_v", 4);
+    } else if (FLOW_IS_IPV6(f)) {
+        SCJbSetUint(jb, "ip_v", 6);
+    }
+
     if (SCProtoNameValid(f->proto)) {
-        jb_set_string(jb, "proto", known_proto[f->proto]);
+        SCJbSetString(jb, "proto", known_proto[f->proto]);
     } else {
         char proto[4];
         snprintf(proto, sizeof(proto), "%"PRIu8"", f->proto);
-        jb_set_string(jb, "proto", proto);
+        SCJbSetString(jb, "proto", proto);
     }
 
     switch (f->proto) {
         case IPPROTO_ICMP:
         case IPPROTO_ICMPV6:
-            jb_set_uint(jb, "icmp_type", f->icmp_s.type);
-            jb_set_uint(jb, "icmp_code", f->icmp_s.code);
+            SCJbSetUint(jb, "icmp_type", f->icmp_s.type);
+            SCJbSetUint(jb, "icmp_code", f->icmp_s.code);
             if (f->tosrcpktcnt) {
-                jb_set_uint(jb, "response_icmp_type", f->icmp_d.type);
-                jb_set_uint(jb, "response_icmp_code", f->icmp_d.code);
+                SCJbSetUint(jb, "response_icmp_type", f->icmp_d.type);
+                SCJbSetUint(jb, "response_icmp_code", f->icmp_d.code);
             }
+            break;
+        case IPPROTO_ESP:
+            SCJbSetUint(jb, "spi", f->esp.spi);
             break;
     }
     return jb;
 }
 
-void EveAddAppProto(Flow *f, JsonBuilder *js)
+void EveAddAppProto(Flow *f, SCJsonBuilder *js)
 {
     if (f->alproto) {
-        jb_set_string(js, "app_proto", AppProtoToString(f->alproto));
+        SCJbSetString(js, "app_proto", AppProtoToString(f->alproto));
     }
     if (f->alproto_ts && f->alproto_ts != f->alproto) {
-        jb_set_string(js, "app_proto_ts", AppProtoToString(f->alproto_ts));
+        SCJbSetString(js, "app_proto_ts", AppProtoToString(f->alproto_ts));
     }
     if (f->alproto_tc && f->alproto_tc != f->alproto) {
-        jb_set_string(js, "app_proto_tc", AppProtoToString(f->alproto_tc));
+        SCJbSetString(js, "app_proto_tc", AppProtoToString(f->alproto_tc));
     }
     if (f->alproto_orig != f->alproto && f->alproto_orig != ALPROTO_UNKNOWN) {
-        jb_set_string(js, "app_proto_orig", AppProtoToString(f->alproto_orig));
+        SCJbSetString(js, "app_proto_orig", AppProtoToString(f->alproto_orig));
     }
     if (f->alproto_expect != f->alproto && f->alproto_expect != ALPROTO_UNKNOWN) {
-        jb_set_string(js, "app_proto_expected",
-                AppProtoToString(f->alproto_expect));
+        SCJbSetString(js, "app_proto_expected", AppProtoToString(f->alproto_expect));
     }
 
 }
 
-void EveAddFlow(Flow *f, JsonBuilder *js)
+void EveAddFlow(Flow *f, SCJsonBuilder *js)
 {
     FlowBypassInfo *fc = FlowGetStorageById(f, GetFlowBypassInfoID());
     if (fc) {
-        jb_set_uint(js, "pkts_toserver", f->todstpktcnt + fc->todstpktcnt);
-        jb_set_uint(js, "pkts_toclient", f->tosrcpktcnt + fc->tosrcpktcnt);
-        jb_set_uint(js, "bytes_toserver", f->todstbytecnt + fc->todstbytecnt);
-        jb_set_uint(js, "bytes_toclient", f->tosrcbytecnt + fc->tosrcbytecnt);
+        SCJbSetUint(js, "pkts_toserver", f->todstpktcnt + fc->todstpktcnt);
+        SCJbSetUint(js, "pkts_toclient", f->tosrcpktcnt + fc->tosrcpktcnt);
+        SCJbSetUint(js, "bytes_toserver", f->todstbytecnt + fc->todstbytecnt);
+        SCJbSetUint(js, "bytes_toclient", f->tosrcbytecnt + fc->tosrcbytecnt);
 
-        jb_open_object(js, "bypassed");
-        jb_set_uint(js, "pkts_toserver", fc->todstpktcnt);
-        jb_set_uint(js, "pkts_toclient", fc->tosrcpktcnt);
-        jb_set_uint(js, "bytes_toserver", fc->todstbytecnt);
-        jb_set_uint(js, "bytes_toclient", fc->tosrcbytecnt);
-        jb_close(js);
+        SCJbOpenObject(js, "bypassed");
+        SCJbSetUint(js, "pkts_toserver", fc->todstpktcnt);
+        SCJbSetUint(js, "pkts_toclient", fc->tosrcpktcnt);
+        SCJbSetUint(js, "bytes_toserver", fc->todstbytecnt);
+        SCJbSetUint(js, "bytes_toclient", fc->tosrcbytecnt);
+        SCJbClose(js);
     } else {
-        jb_set_uint(js, "pkts_toserver", f->todstpktcnt);
-        jb_set_uint(js, "pkts_toclient", f->tosrcpktcnt);
-        jb_set_uint(js, "bytes_toserver", f->todstbytecnt);
-        jb_set_uint(js, "bytes_toclient", f->tosrcbytecnt);
+        SCJbSetUint(js, "pkts_toserver", f->todstpktcnt);
+        SCJbSetUint(js, "pkts_toclient", f->tosrcpktcnt);
+        SCJbSetUint(js, "bytes_toserver", f->todstbytecnt);
+        SCJbSetUint(js, "bytes_toclient", f->tosrcbytecnt);
     }
 
     char timebuf1[64];
-    CreateIsoTimeString(&f->startts, timebuf1, sizeof(timebuf1));
-    jb_set_string(js, "start", timebuf1);
+    CreateIsoTimeString(f->startts, timebuf1, sizeof(timebuf1));
+    SCJbSetString(js, "start", timebuf1);
+}
+
+static void EveExceptionPolicyLog(SCJsonBuilder *js, uint16_t flag)
+{
+    if (flag & EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP) {
+        SCJbStartObject(js);
+        SCJbSetString(js, "target",
+                ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP), true));
+        SCJbClose(js);
+    }
+    if (flag & EXCEPTION_TARGET_FLAG_SESSION_MEMCAP) {
+        SCJbStartObject(js);
+        SCJbSetString(js, "target",
+                ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_SESSION_MEMCAP));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_SESSION_MEMCAP), true));
+        SCJbClose(js);
+    }
+    if (flag & EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP) {
+        SCJbStartObject(js);
+        SCJbSetString(js, "target",
+                ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP),
+                        true));
+        SCJbClose(js);
+    }
+    if (flag & EXCEPTION_TARGET_FLAG_FLOW_MEMCAP) {
+        SCJbStartObject(js);
+        SCJbSetString(
+                js, "target", ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_FLOW_MEMCAP));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_FLOW_MEMCAP), true));
+        SCJbClose(js);
+    }
+    if (flag & EXCEPTION_TARGET_FLAG_MIDSTREAM) {
+        SCJbStartObject(js);
+        SCJbSetString(
+                js, "target", ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_MIDSTREAM));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_MIDSTREAM), true));
+        SCJbClose(js);
+    }
+    if (flag & EXCEPTION_TARGET_FLAG_APPLAYER_ERROR) {
+        SCJbStartObject(js);
+        SCJbSetString(js, "target",
+                ExceptionPolicyTargetFlagToString(EXCEPTION_TARGET_FLAG_APPLAYER_ERROR));
+        SCJbSetString(js, "policy",
+                ExceptionPolicyEnumToString(
+                        ExceptionPolicyTargetPolicy(EXCEPTION_TARGET_FLAG_APPLAYER_ERROR), true));
+        SCJbClose(js);
+    }
 }
 
 /* Eve format logging */
-static void EveFlowLogJSON(JsonFlowLogThread *aft, JsonBuilder *jb, Flow *f)
+static void EveFlowLogJSON(OutputJsonThreadCtx *aft, SCJsonBuilder *jb, Flow *f)
 {
-    LogJsonFileCtx *flow_ctx = aft->flowlog_ctx;
-
     EveAddAppProto(f, jb);
-    jb_open_object(jb, "flow");
+    SCJbOpenObject(jb, "flow");
     EveAddFlow(f, jb);
 
     char timebuf2[64];
-    CreateIsoTimeString(&f->lastts, timebuf2, sizeof(timebuf2));
-    jb_set_string(jb, "end", timebuf2);
+    CreateIsoTimeString(f->lastts, timebuf2, sizeof(timebuf2));
+    SCJbSetString(jb, "end", timebuf2);
 
-    int32_t age = f->lastts.tv_sec - f->startts.tv_sec;
-    jb_set_uint(jb, "age", age);
+    uint64_t age = (SCTIME_SECS(f->lastts) - SCTIME_SECS(f->startts));
+    SCJbSetUint(jb, "age", age);
 
     if (f->flow_end_flags & FLOW_END_FLAG_EMERGENCY)
         JB_SET_TRUE(jb, "emergency");
-    const char *state = NULL;
-    if (f->flow_end_flags & FLOW_END_FLAG_STATE_NEW)
-        state = "new";
-    else if (f->flow_end_flags & FLOW_END_FLAG_STATE_ESTABLISHED)
-        state = "established";
-    else if (f->flow_end_flags & FLOW_END_FLAG_STATE_CLOSED)
-        state = "closed";
-    else if (f->flow_end_flags & FLOW_END_FLAG_STATE_BYPASSED) {
-        state = "bypassed";
-        int flow_state = f->flow_state;
-        switch (flow_state) {
-            case FLOW_STATE_LOCAL_BYPASSED:
-                JB_SET_STRING(jb, "bypass", "local");
-                break;
+
+    const int flow_state = f->flow_state;
+    switch (flow_state) {
+        case FLOW_STATE_NEW:
+            JB_SET_STRING(jb, "state", "new");
+            break;
+        case FLOW_STATE_ESTABLISHED:
+            JB_SET_STRING(jb, "state", "established");
+            break;
+        case FLOW_STATE_CLOSED:
+            JB_SET_STRING(jb, "state", "closed");
+            break;
+        case FLOW_STATE_LOCAL_BYPASSED:
+            JB_SET_STRING(jb, "state", "bypassed");
+            JB_SET_STRING(jb, "bypass", "local");
+            break;
 #ifdef CAPTURE_OFFLOAD
-            case FLOW_STATE_CAPTURE_BYPASSED:
-                JB_SET_STRING(jb, "bypass", "capture");
-                break;
+        case FLOW_STATE_CAPTURE_BYPASSED:
+            JB_SET_STRING(jb, "state", "bypassed");
+            JB_SET_STRING(jb, "bypass", "capture");
+            break;
 #endif
-            default:
-                SCLogError(SC_ERR_INVALID_VALUE,
-                           "Invalid flow state: %d, contact developers",
-                           flow_state);
-        }
+        case FLOW_STATE_SIZE:
+            DEBUG_VALIDATE_BUG_ON(1);
+            SCLogDebug("invalid flow state: %d, contact developers", flow_state);
     }
 
-    jb_set_string(jb, "state", state);
-
     const char *reason = NULL;
-    if (f->flow_end_flags & FLOW_END_FLAG_FORCED)
+    if (f->flow_end_flags & FLOW_END_FLAG_TCPREUSE)
+        reason = "tcp_reuse";
+    else if (f->flow_end_flags & FLOW_END_FLAG_FORCED)
         reason = "forced";
     else if (f->flow_end_flags & FLOW_END_FLAG_SHUTDOWN)
         reason = "shutdown";
@@ -279,213 +336,110 @@ static void EveFlowLogJSON(JsonFlowLogThread *aft, JsonBuilder *jb, Flow *f)
     else
         reason = "unknown";
 
-    jb_set_string(jb, "reason", reason);
+    SCJbSetString(jb, "reason", reason);
 
-    jb_set_bool(jb, "alerted", FlowHasAlerts(f));
+    SCJbSetBool(jb, "alerted", FlowHasAlerts(f));
     if (f->flags & FLOW_WRONG_THREAD)
         JB_SET_TRUE(jb, "wrong_thread");
 
-    /* Close flow. */
-    jb_close(jb);
+    if (f->flags & FLOW_IS_ELEPHANT)
+        JB_SET_TRUE(jb, "elephant");
 
-    EveAddCommonOptions(&flow_ctx->cfg, NULL, f, jb);
+    if (f->flags & FLOW_ACTION_DROP) {
+        JB_SET_STRING(jb, "action", "drop");
+    } else if (f->flags & FLOW_ACTION_ACCEPT) {
+        JB_SET_STRING(jb, "action", "accept");
+    } else if (f->flags & FLOW_ACTION_PASS) {
+        JB_SET_STRING(jb, "action", "pass");
+    }
+    if (f->applied_exception_policy != 0) {
+        SCJbOpenArray(jb, "exception_policy");
+        EveExceptionPolicyLog(jb, f->applied_exception_policy);
+        SCJbClose(jb); /* close array */
+    }
+
+    if (f->alstate) {
+        uint64_t tx_id = AppLayerParserGetTxCnt(f, f->alstate);
+        if (tx_id) {
+            SCJbSetUint(jb, "tx_cnt", tx_id);
+        }
+    }
+
+    /* Close flow. */
+    SCJbClose(jb);
+
+    EveAddCommonOptions(&aft->ctx->cfg, NULL, f, jb, LOG_DIR_FLOW);
 
     /* TCP */
     if (f->proto == IPPROTO_TCP) {
-        jb_open_object(jb, "tcp");
+        SCJbOpenObject(jb, "tcp");
 
         TcpSession *ssn = f->protoctx;
 
         char hexflags[3];
         snprintf(hexflags, sizeof(hexflags), "%02x",
                 ssn ? ssn->tcp_packet_flags : 0);
-        jb_set_string(jb, "tcp_flags", hexflags);
+        SCJbSetString(jb, "tcp_flags", hexflags);
 
         snprintf(hexflags, sizeof(hexflags), "%02x",
                 ssn ? ssn->client.tcp_flags : 0);
-        jb_set_string(jb, "tcp_flags_ts", hexflags);
+        SCJbSetString(jb, "tcp_flags_ts", hexflags);
 
         snprintf(hexflags, sizeof(hexflags), "%02x",
                 ssn ? ssn->server.tcp_flags : 0);
-        jb_set_string(jb, "tcp_flags_tc", hexflags);
+        SCJbSetString(jb, "tcp_flags_tc", hexflags);
 
         EveTcpFlags(ssn ? ssn->tcp_packet_flags : 0, jb);
 
         if (ssn) {
             const char *tcp_state = StreamTcpStateAsString(ssn->state);
             if (tcp_state != NULL)
-                jb_set_string(jb, "state", tcp_state);
-            if (ssn->client.flags & STREAMTCP_STREAM_FLAG_GAP)
-                JB_SET_TRUE(jb, "gap_ts");
-            if (ssn->server.flags & STREAMTCP_STREAM_FLAG_GAP)
-                JB_SET_TRUE(jb, "gap_tc");
+                SCJbSetString(jb, "state", tcp_state);
+            if (ssn->server.flags & STREAMTCP_STREAM_FLAG_HAS_GAP) {
+                JB_SET_TRUE(jb, "tc_gap");
+            }
+            if (ssn->client.flags & STREAMTCP_STREAM_FLAG_HAS_GAP) {
+                JB_SET_TRUE(jb, "ts_gap");
+            }
+
+            SCJbSetUint(jb, "ts_max_regions", ssn->client.sb.max_regions);
+            SCJbSetUint(jb, "tc_max_regions", ssn->server.sb.max_regions);
+
+            if (ssn->urg_offset_ts)
+                SCJbSetUint(jb, "ts_urgent_oob_data", ssn->urg_offset_ts);
+            if (ssn->urg_offset_tc)
+                SCJbSetUint(jb, "tc_urgent_oob_data", ssn->urg_offset_tc);
         }
 
         /* Close tcp. */
-        jb_close(jb);
+        SCJbClose(jb);
     }
 }
 
 static int JsonFlowLogger(ThreadVars *tv, void *thread_data, Flow *f)
 {
     SCEnter();
-    JsonFlowLogThread *jhl = (JsonFlowLogThread *)thread_data;
+    OutputJsonThreadCtx *thread = thread_data;
 
     /* reset */
-    MemBufferReset(jhl->buffer);
+    MemBufferReset(thread->buffer);
 
-    JsonBuilder *jb = CreateEveHeaderFromFlow(f);
+    SCJsonBuilder *jb = CreateEveHeaderFromFlow(f);
     if (unlikely(jb == NULL)) {
         SCReturnInt(TM_ECODE_OK);
     }
 
-    EveFlowLogJSON(jhl, jb, f);
+    EveFlowLogJSON(thread, jb, f);
 
-    OutputJsonBuilderBuffer(jb, jhl->file_ctx, &jhl->buffer);
-    jb_free(jb);
+    OutputJsonBuilderBuffer(tv, NULL, f, jb, thread);
+    SCJbFree(jb);
 
     SCReturnInt(TM_ECODE_OK);
 }
 
-static void OutputFlowLogDeinit(OutputCtx *output_ctx)
-{
-    LogJsonFileCtx *flow_ctx = output_ctx->data;
-    LogFileCtx *logfile_ctx = flow_ctx->file_ctx;
-    LogFileFreeCtx(logfile_ctx);
-    SCFree(flow_ctx);
-    SCFree(output_ctx);
-}
-
-#define DEFAULT_LOG_FILENAME "flow.json"
-static OutputInitResult OutputFlowLogInit(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    LogFileCtx *file_ctx = LogFileNewCtx();
-    if(file_ctx == NULL) {
-        SCLogError(SC_ERR_FLOW_LOG_GENERIC, "couldn't create new file_ctx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    LogJsonFileCtx *flow_ctx = SCMalloc(sizeof(LogJsonFileCtx));
-    if (unlikely(flow_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(file_ctx);
-        SCFree(flow_ctx);
-        return result;
-    }
-
-    flow_ctx->file_ctx = file_ctx;
-    output_ctx->data = flow_ctx;
-    output_ctx->DeInit = OutputFlowLogDeinit;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
-static void OutputFlowLogDeinitSub(OutputCtx *output_ctx)
-{
-    LogJsonFileCtx *flow_ctx = output_ctx->data;
-    SCFree(flow_ctx);
-    SCFree(output_ctx);
-}
-
-static OutputInitResult OutputFlowLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
-{
-    OutputInitResult result = { NULL, false };
-    OutputJsonCtx *ojc = parent_ctx->data;
-
-    LogJsonFileCtx *flow_ctx = SCMalloc(sizeof(LogJsonFileCtx));
-    if (unlikely(flow_ctx == NULL))
-        return result;
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        SCFree(flow_ctx);
-        return result;
-    }
-
-    flow_ctx->file_ctx = ojc->file_ctx;
-    flow_ctx->cfg = ojc->cfg;
-
-    output_ctx->data = flow_ctx;
-    output_ctx->DeInit = OutputFlowLogDeinitSub;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
-static TmEcode JsonFlowLogThreadInit(ThreadVars *t, const void *initdata, void **data)
-{
-    JsonFlowLogThread *aft = SCCalloc(1, sizeof(JsonFlowLogThread));
-    if (unlikely(aft == NULL))
-        return TM_ECODE_FAILED;
-
-    if(initdata == NULL)
-    {
-        SCLogDebug("Error getting context for EveLogFlow.  \"initdata\" argument NULL");
-        goto error_exit;
-    }
-
-    /* Use the Outptut Context (file pointer and mutex) */
-    aft->flowlog_ctx = ((OutputCtx *)initdata)->data; //TODO
-
-    aft->buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->buffer == NULL) {
-        goto error_exit;
-    }
-
-    aft->file_ctx = LogFileEnsureExists(aft->flowlog_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
-        goto error_exit;
-    }
-
-    *data = (void *)aft;
-    return TM_ECODE_OK;
-
-error_exit:
-    if (aft->buffer != NULL) {
-        MemBufferFree(aft->buffer);
-    }
-    SCFree(aft);
-    return TM_ECODE_FAILED;
-}
-
-static TmEcode JsonFlowLogThreadDeinit(ThreadVars *t, void *data)
-{
-    JsonFlowLogThread *aft = (JsonFlowLogThread *)data;
-    if (aft == NULL) {
-        return TM_ECODE_OK;
-    }
-
-    MemBufferFree(aft->buffer);
-    /* clear memory */
-    memset(aft, 0, sizeof(JsonFlowLogThread));
-
-    SCFree(aft);
-    return TM_ECODE_OK;
-}
-
 void JsonFlowLogRegister (void)
 {
-    /* register as separate module */
-    OutputRegisterFlowModule(LOGGER_JSON_FLOW, "JsonFlowLog", "flow-json-log",
-        OutputFlowLogInit, JsonFlowLogger, JsonFlowLogThreadInit,
-        JsonFlowLogThreadDeinit, NULL);
-
-    /* also register as child of eve-log */
-    OutputRegisterFlowSubModule(LOGGER_JSON_FLOW, "eve-log", "JsonFlowLog",
-        "eve-log.flow", OutputFlowLogInitSub, JsonFlowLogger,
-        JsonFlowLogThreadInit, JsonFlowLogThreadDeinit, NULL);
+    /* register as child of eve-log */
+    OutputRegisterFlowSubModule(LOGGER_JSON_FLOW, "eve-log", "JsonFlowLog", "eve-log.flow",
+            OutputJsonLogInitSub, JsonFlowLogger, JsonLogThreadInit, JsonLogThreadDeinit);
 }

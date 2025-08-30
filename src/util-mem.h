@@ -28,8 +28,8 @@
  * free, but there are more.
  */
 
-#ifndef __UTIL_MEM_H__
-#define __UTIL_MEM_H__
+#ifndef SURICATA_UTIL_MEM_H
+#define SURICATA_UTIL_MEM_H
 
 #if CPPCHECK==1 || defined(__clang_analyzer__)
 #define SCMalloc malloc
@@ -62,7 +62,7 @@ char *SCStrndupFunc(const char *s, size_t n);
 
 /** \brief wrapper for allocing aligned mem
  *  \param a size
- *  \param b alignement
+ *  \param b alignment
  */
 void *SCMallocAlignedFunc(const size_t size, const size_t align);
 #define SCMallocAligned(size, align) SCMallocAlignedFunc((size), (align))
@@ -78,5 +78,4 @@ void SCFreeAlignedFunc(void *ptr);
 
 #endif /* CPPCHECK */
 
-#endif /* __UTIL_MEM_H__ */
-
+#endif /* SURICATA_UTIL_MEM_H */

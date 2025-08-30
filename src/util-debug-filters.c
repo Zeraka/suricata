@@ -24,6 +24,9 @@
  */
 
 #include "suricata-common.h"
+#include "util-debug-filters.h"
+#include "threads.h"
+#include "util-debug.h"
 
 /* both of these are defined in util-debug.c */
 extern int sc_log_module_initialized;
@@ -41,7 +44,7 @@ int sc_log_fd_filters_present = 0;
 SCLogFGFilterFile *sc_log_fg_filters[SC_LOG_FILTER_MAX] = { NULL, NULL };
 
 /**
- * \brief Mutex for accessing the fine-grained fiters sc_log_fg_filters
+ * \brief Mutex for accessing the fine-grained filters sc_log_fg_filters
  */
 static SCMutex sc_log_fg_filters_m[SC_LOG_FILTER_MAX] = { SCMUTEX_INITIALIZER,
                                                           SCMUTEX_INITIALIZER };
@@ -298,7 +301,7 @@ int SCLogMatchFGFilterWL(const char *file, const char *function, int line)
  *        of the FG filters.  If there is a match it rejects the logging
  *        for that messages, else it allows that message to be logged
  *
- * \praram file    File_name from where the log_message originated
+ * \param file    File_name from where the log_message originated
  * \param function Function_name from where the log_message originated
  * \param line     Line number from where the log_message originated
  *
@@ -312,32 +315,11 @@ int SCLogMatchFGFilterBL(const char *file, const char *function, int line)
 }
 
 /**
- * \brief Adds a Whitelist(WL) fine-grained(FG) filter.  A FG filter WL filter
- *        allows messages that match this filter, to be logged, while the filter
- *        is defined using a file_name, function_name and line_number.
- *
- *        If a particular paramter in the fg-filter(file, function and line),
- *        shouldn't be considered while logging the message, one can supply
- *        NULL for the file_name or function_name and a negative line_no.
- *
- * \param file     File_name of the filter
- * \param function Function_name of the filter
- * \param line     Line number of the filter
- *
- * \retval  0 on successfully adding the filter;
- * \retval -1 on failure
- */
-int SCLogAddFGFilterWL(const char *file, const char *function, int line)
-{
-    return SCLogAddFGFilter(file, function, line, SC_LOG_FILTER_WL);
-}
-
-/**
  * \brief Adds a Blacklist(BL) fine-grained(FG) filter.  A FG filter BL filter
  *        allows messages that don't match this filter, to be logged, while the
  *        filter is defined using a file_name, function_name and line_number
  *
- *        If a particular paramter in the fg-filter(file, function and line),
+ *        If a particular parameter in the fg-filter(file, function and line),
  *        shouldn't be considered while logging the message, one can supply
  *        NULL for the file_name or function_name and a negative line_no.
  *
@@ -396,8 +378,6 @@ void SCLogReleaseFGFilters(void)
         SCMutexUnlock(&sc_log_fg_filters_m[i]);
         sc_log_fg_filters[i] = NULL;
     }
-
-    return;
 }
 
 /**
@@ -405,7 +385,7 @@ void SCLogReleaseFGFilters(void)
  *
  * \retval count The no of FG filters
  */
-int SCLogPrintFGFilters()
+int SCLogPrintFGFilters(void)
 {
     SCLogFGFilterFile *fgf_file = NULL;
     SCLogFGFilterFunc *fgf_func = NULL;
@@ -576,11 +556,10 @@ int SCLogCheckFDFilterEntry(const char *function)
         return 1;
     }
 
-    if ( (thread_list_temp = SCMalloc(sizeof(SCLogFDFilterThreadList))) == NULL) {
+    if ((thread_list_temp = SCCalloc(1, sizeof(SCLogFDFilterThreadList))) == NULL) {
         SCMutexUnlock(&sc_log_fd_filters_tl_m);
         return 0;
     }
-    memset(thread_list_temp, 0, sizeof(SCLogFDFilterThreadList));
 
     thread_list_temp->t = self;
     thread_list_temp->entered++;
@@ -647,8 +626,6 @@ void SCLogCheckFDFilterExit(const char *function)
 
     if (thread_list != NULL)
         thread_list->entered--;
-
-    return;
 }
 
 /**
@@ -691,11 +668,10 @@ int SCLogAddFDFilter(const char *function)
         curr = curr->next;
     }
 
-    if ( (temp = SCMalloc(sizeof(SCLogFDFilter))) == NULL) {
-        printf("Error Allocating memory (SCMalloc)\n");
+    if ((temp = SCCalloc(1, sizeof(SCLogFDFilter))) == NULL) {
+        printf("Error Allocating memory (SCCalloc)\n");
         exit(EXIT_FAILURE);
     }
-    memset(temp, 0, sizeof(SCLogFDFilter));
 
     if ( (temp->func = SCStrdup(function)) == NULL) {
         printf("Error Allocating memory (SCStrdup)\n");
@@ -735,9 +711,7 @@ void SCLogReleaseFDFilters(void)
 
     sc_log_fd_filters = NULL;
 
-    SCMutexUnlock( &sc_log_fd_filters_m );
-
-    return;
+    SCMutexUnlock(&sc_log_fd_filters_m);
 }
 
 /**
@@ -861,33 +835,27 @@ void SCLogAddToFGFFileList(SCLogFGFilterFile *fgf_file,
     SCLogFGFilterFunc *fgf_func_temp = NULL;
     SCLogFGFilterLine *fgf_line_temp = NULL;
 
-    if ( (fgf_file_temp = SCMalloc(sizeof(SCLogFGFilterFile))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
+    if ((fgf_file_temp = SCCalloc(1, sizeof(SCLogFGFilterFile))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
     }
-    memset(fgf_file_temp, 0, sizeof(SCLogFGFilterFile));
 
     if ( file != NULL && (fgf_file_temp->file = SCStrdup(file)) == NULL) {
         printf("Error Allocating memory\n");
         exit(EXIT_FAILURE);
     }
 
-    if ( (fgf_func_temp = SCMalloc(sizeof(SCLogFGFilterFunc))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
+    if ((fgf_func_temp = SCCalloc(1, sizeof(SCLogFGFilterFunc))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
     }
-    memset(fgf_func_temp, 0, sizeof(SCLogFGFilterFunc));
 
     if ( function != NULL && (fgf_func_temp->func = SCStrdup(function)) == NULL) {
         printf("Error Allocating memory\n");
         exit(EXIT_FAILURE);
     }
 
-    if ( (fgf_line_temp = SCMalloc(sizeof(SCLogFGFilterLine))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
+    if ((fgf_line_temp = SCCalloc(1, sizeof(SCLogFGFilterLine))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFFileList. Exiting...");
     }
-    memset(fgf_line_temp, 0, sizeof(SCLogFGFilterLine));
 
     fgf_line_temp->line = line;
 
@@ -900,8 +868,6 @@ void SCLogAddToFGFFileList(SCLogFGFilterFile *fgf_file,
         sc_log_fg_filters[listtype] = fgf_file_temp;
     else
         fgf_file->next = fgf_file_temp;
-
-    return;
 }
 
 /**
@@ -925,22 +891,18 @@ void SCLogAddToFGFFuncList(SCLogFGFilterFile *fgf_file,
     SCLogFGFilterFunc *fgf_func_temp = NULL;
     SCLogFGFilterLine *fgf_line_temp = NULL;
 
-    if ( (fgf_func_temp = SCMalloc(sizeof(SCLogFGFilterFunc))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFFuncList. Exiting...");
+    if ((fgf_func_temp = SCCalloc(1, sizeof(SCLogFGFilterFunc))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFFuncList. Exiting...");
     }
-    memset(fgf_func_temp, 0, sizeof(SCLogFGFilterFunc));
 
     if ( function != NULL && (fgf_func_temp->func = SCStrdup(function)) == NULL) {
         printf("Error Allocating memory\n");
         exit(EXIT_FAILURE);
     }
 
-    if ( (fgf_line_temp = SCMalloc(sizeof(SCLogFGFilterLine))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFFuncList. Exiting...");
+    if ((fgf_line_temp = SCCalloc(1, sizeof(SCLogFGFilterLine))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFFuncList. Exiting...");
     }
-    memset(fgf_line_temp, 0, sizeof(SCLogFGFilterLine));
 
     fgf_line_temp->line = line;
 
@@ -951,8 +913,6 @@ void SCLogAddToFGFFuncList(SCLogFGFilterFile *fgf_file,
         fgf_file->func = fgf_func_temp;
     else
         fgf_func->next = fgf_func_temp;
-
-    return;
 }
 
 /**
@@ -974,11 +934,9 @@ void SCLogAddToFGFLineList(SCLogFGFilterFunc *fgf_func,
 {
     SCLogFGFilterLine *fgf_line_temp = NULL;
 
-    if ( (fgf_line_temp = SCMalloc(sizeof(SCLogFGFilterLine))) == NULL) {
-        FatalError(SC_ERR_FATAL,
-                   "Fatal error encountered in SCLogAddToFGFLineList. Exiting...");
+    if ((fgf_line_temp = SCCalloc(1, sizeof(SCLogFGFilterLine))) == NULL) {
+        FatalError("Fatal error encountered in SCLogAddToFGFLineList. Exiting...");
     }
-    memset(fgf_line_temp, 0, sizeof(SCLogFGFilterLine));
 
     fgf_line_temp->line = line;
 
@@ -987,8 +945,6 @@ void SCLogAddToFGFLineList(SCLogFGFilterFunc *fgf_func,
         fgf_func->line = fgf_line_temp;
     else
         fgf_line->next = fgf_line_temp;
-
-    return;
 }
 
 /**
@@ -1003,7 +959,4 @@ void SCLogReleaseFDFilter(SCLogFDFilter *fdf)
             SCFree(fdf->func);
         SCFree(fdf);
     }
-
-    return;
 }
-

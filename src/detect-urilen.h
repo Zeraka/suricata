@@ -24,22 +24,8 @@
 #ifndef _DETECT_URILEN_H
 #define	_DETECT_URILEN_H
 
-#define DETECT_URILEN_LT   0   /**< "less than" operator */
-#define DETECT_URILEN_GT   1   /**< "greater than" operator */
-#define DETECT_URILEN_RA   2   /**< range operator */
-#define DETECT_URILEN_EQ   3   /**< equal operator */
-
-typedef struct DetectUrilenData_ {
-    uint16_t urilen1;   /**< 1st Uri Length value in the signature*/
-    uint16_t urilen2;   /**< 2nd Uri Length value in the signature*/
-    uint8_t mode;   /**< operator used in the signature */
-    uint8_t raw_buffer;
-}DetectUrilenData;
-
-bool DetectUrilenValidateContent(const Signature *s, int list, const char **);
+bool DetectUrilenValidateContent(const Signature *s, const char **, const DetectBufferType *dbt);
 void DetectUrilenApplyToContent(Signature *s, int list);
-int DetectUrilenMatch (ThreadVars *, DetectEngineThreadCtx *, Flow *,
-                       uint8_t, void *, Signature *, SigMatch *);
 void DetectUrilenRegister(void);
 
 #endif	/* _DETECT_URILEN_H */

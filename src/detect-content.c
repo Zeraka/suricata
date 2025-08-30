@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2019 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -30,6 +30,8 @@
 #include "detect-uricontent.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
+#include "detect-engine-build.h"
 #include "detect-engine-state.h"
 #include "detect-parse.h"
 #include "detect-pcre.h"
@@ -65,7 +67,8 @@ void DetectContentRegister (void)
 #ifdef UNITTESTS
     sigmatch_table[DETECT_CONTENT].RegisterTests = DetectContentRegisterTests;
 #endif
-    sigmatch_table[DETECT_CONTENT].flags = (SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION);
+    sigmatch_table[DETECT_CONTENT].flags =
+            (SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION | SIGMATCH_SUPPORT_FIREWALL);
 }
 
 /**
@@ -99,7 +102,7 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
     char converted = 0;
 
     {
-        uint16_t i, x;
+        size_t i, x;
         uint8_t bin = 0;
         uint8_t escape = 0;
         uint8_t binstr[3] = "";
@@ -111,6 +114,11 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
             if (str[i] == '|') {
                 bin_count++;
                 if (bin) {
+                    if (binpos > 0) {
+                        SCLogError("Incomplete hex code in content - %s. Invalidating signature.",
+                                contentstr);
+                        goto error;
+                    }
                     bin = 0;
                 } else {
                     bin = 1;
@@ -143,8 +151,9 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
                         // SCLogDebug("space as part of binary string");
                     }
                     else if (str[i] != ',') {
-                        SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid hex code in "
-                                    "content - %s, hex %c. Invalidating signature.", str, str[i]);
+                        SCLogError("Invalid hex code in "
+                                   "content - %s, hex %c. Invalidating signature.",
+                                contentstr, str[i]);
                         goto error;
                     }
                 } else if (escape) {
@@ -156,13 +165,13 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
                         str[x] = str[i];
                         x++;
                     } else {
-                        SCLogError(SC_ERR_INVALID_SIGNATURE, "'%c' has to be escaped", str[i-1]);
+                        SCLogError("'%c' has to be escaped", str[i - 1]);
                         goto error;
                     }
                     escape = 0;
                     converted = 1;
                 } else if (str[i] == '"') {
-                    SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid unescaped double quote within content section.");
+                    SCLogError("Invalid unescaped double quote within content section.");
                     goto error;
                 } else {
                     str[x] = str[i];
@@ -172,8 +181,9 @@ int DetectContentDataParse(const char *keyword, const char *contentstr,
         }
 
         if (bin_count % 2 != 0) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "Invalid hex code assembly in "
-                       "%s - %s.  Invalidating signature.", keyword, contentstr);
+            SCLogError("Invalid hex code assembly in "
+                       "%s - %s.  Invalidating signature.",
+                    keyword, contentstr);
             goto error;
         }
 
@@ -213,13 +223,11 @@ DetectContentData *DetectContentParse(SpmGlobalThreadCtx *spm_global_thread_ctx,
         return NULL;
     }
 
-    cd = SCMalloc(sizeof(DetectContentData) + len);
+    cd = SCCalloc(1, sizeof(DetectContentData) + len);
     if (unlikely(cd == NULL)) {
         SCFree(content);
         exit(EXIT_FAILURE);
     }
-
-    memset(cd, 0, sizeof(DetectContentData) + len);
 
     cd->content = (uint8_t *)cd + sizeof(DetectContentData);
     memcpy(cd->content, content, len);
@@ -321,13 +329,10 @@ void DetectContentPrint(DetectContentData *cd)
  */
 int DetectContentSetup(DetectEngineCtx *de_ctx, Signature *s, const char *contentstr)
 {
-    DetectContentData *cd = NULL;
-    SigMatch *sm = NULL;
-
-    cd = DetectContentParse(de_ctx->spm_global_thread_ctx, contentstr);
+    DetectContentData *cd = DetectContentParse(de_ctx->spm_global_thread_ctx, contentstr);
     if (cd == NULL)
         goto error;
-    if (s->init_data->negated == true) {
+    if (s->init_data->negated) {
         cd->flags |= DETECT_CONTENT_NEGATED;
     }
 
@@ -343,21 +348,16 @@ int DetectContentSetup(DetectEngineCtx *de_ctx, Signature *s, const char *conten
             0 == (cd->flags & DETECT_CONTENT_NEGATED)) {
         /* Check transform compatibility */
         const char *tstr;
-        if (!DetectBufferTypeValidateTransform(de_ctx, sm_list, cd->content,
-                    cd->content_len, &tstr)) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE,
-                    "content string \"%s\" incompatible with %s transform",
-                    contentstr, tstr);
+        if (!DetectEngineBufferTypeValidateTransform(
+                    de_ctx, sm_list, cd->content, cd->content_len, &tstr)) {
+            SCLogError("content string \"%s\" incompatible with %s transform", contentstr, tstr);
             goto error;
         }
     }
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_CONTENT, (SigMatchCtx *)cd, sm_list) == NULL) {
         goto error;
-    sm->ctx = (void *)cd;
-    sm->type = DETECT_CONTENT;
-    SigMatchAppendSMToList(s, sm, sm_list);
+    }
 
     return 0;
 
@@ -386,42 +386,96 @@ void DetectContentFree(DetectEngineCtx *de_ctx, void *ptr)
 }
 
 /**
- *  \retval 1 valid
- *  \retval 0 invalid
+ *  \brief Determine the size needed to accommodate the content
+ *         elements of a signature
+ *  \param s signature to get dsize value from
+ *  \param max_size Maximum buffer/data size allowed.
+ *  \param list signature match list.
+ *  \param len Maximum length required
+ *  \param offset Maximum offset encountered
+ *
+ *  Note that negated content does not contribute to the maximum
+ *  required size value. However, each negated content's values
+ *  must not exceed the size value.
+ *
+ *  Values from negated content blocks are used to determine if the
+ *  negated content block requires a value that exceeds "max_size". The
+ *  distance and within values from negated content blocks are added to
+ *  the running total of required content size to see if the max_size
+ *  would be exceeded.
+ *
+ *  - Non-negated content contributes to the required size (content length, distance)
+ *  - Negated content values are checked but not accumulated for the required size.
+ */
+void SigParseRequiredContentSize(
+        const Signature *s, const uint64_t max_size, const SigMatch *sm, int *len, int *offset)
+{
+    int max_offset = 0, total_len = 0;
+    bool first = true;
+    for (; sm != NULL; sm = sm->next) {
+        if (sm->type != DETECT_CONTENT || sm->ctx == NULL) {
+            continue;
+        }
+
+        DetectContentData *cd = (DetectContentData *)sm->ctx;
+        SCLogDebug("content_len %d; negated: %s; distance: %d, offset: %d, depth: %d",
+                cd->content_len, cd->flags & DETECT_CONTENT_NEGATED ? "yes" : "no", cd->distance,
+                cd->offset, cd->depth);
+
+        if (!first) {
+            /* only count content with relative modifiers */
+            if (!((cd->flags & DETECT_CONTENT_DISTANCE) || (cd->flags & DETECT_CONTENT_WITHIN)))
+                continue;
+
+            if (cd->flags & DETECT_CONTENT_NEGATED) {
+                /* Check if distance/within cause max to be exceeded */
+                int check = total_len + cd->distance + cd->within;
+                if (max_size < (uint64_t)check) {
+                    *len = check;
+                    return;
+                }
+
+                continue;
+            }
+        }
+        SCLogDebug("content_len %d; distance: %d, offset: %d, depth: %d", cd->content_len,
+                cd->distance, cd->offset, cd->depth);
+        total_len += cd->content_len + cd->distance;
+        max_offset = MAX(max_offset, cd->offset);
+        first = false;
+    }
+
+    *len = total_len;
+    *offset = max_offset;
+}
+
+/**
+ *  \retval true valid
+ *  \retval false invalid
  */
 bool DetectContentPMATCHValidateCallback(const Signature *s)
 {
     if (!(s->flags & SIG_FLAG_DSIZE)) {
-        return TRUE;
+        return true;
     }
 
-    int max_right_edge_i = SigParseGetMaxDsize(s);
-    if (max_right_edge_i < 0) {
-        return TRUE;
+    uint16_t max_right_edge_i;
+    if (SigParseGetMaxDsize(s, &max_right_edge_i) < 0) {
+        return true;
     }
+    uint32_t max_right_edge = max_right_edge_i;
 
-    uint32_t max_right_edge = (uint32_t)max_right_edge_i;
-
-    const SigMatch *sm = s->init_data->smlists[DETECT_SM_LIST_PMATCH];
-    for ( ; sm != NULL; sm = sm->next) {
-        if (sm->type != DETECT_CONTENT)
-            continue;
-        const DetectContentData *cd = (const DetectContentData *)sm->ctx;
-        uint32_t right_edge = cd->content_len + cd->offset;
-        if (cd->content_len > max_right_edge) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE,
-                    "signature can't match as content length %u is bigger than dsize %u.",
-                    cd->content_len, max_right_edge);
-            return FALSE;
-        }
-        if (right_edge > max_right_edge) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE,
-                    "signature can't match as content length %u with offset %u (=%u) is bigger than dsize %u.",
-                    cd->content_len, cd->offset, right_edge, max_right_edge);
-            return FALSE;
+    int min_dsize_required = SigParseMaxRequiredDsize(s);
+    if (min_dsize_required >= 0) {
+        SCLogDebug("min_dsize %d; max_right_edge %d", min_dsize_required, max_right_edge);
+        if ((uint32_t)min_dsize_required > max_right_edge) {
+            SCLogError("signature can't match as required content length %d exceeds dsize value %d",
+                    min_dsize_required, max_right_edge);
+            return false;
         }
     }
-    return TRUE;
+
+    return true;
 }
 
 /** \brief apply depth/offset and distance/within to content matches
@@ -437,87 +491,121 @@ bool DetectContentPMATCHValidateCallback(const Signature *s)
  *  cannot set a depth, but we can set an offset of 'offset:1;'. This will
  *  make the mpm a bit more precise.
  */
-void DetectContentPropagateLimits(Signature *s)
+static void PropagateLimits(Signature *s, SigMatch *sm_head)
 {
-    BUG_ON(s == NULL || s->init_data == NULL);
+#define VALIDATE(e)                                                                                \
+    if (!(e)) {                                                                                    \
+        return;                                                                                    \
+    }
+    uint16_t offset = 0;
+    uint16_t offset_plus_pat = 0;
+    uint16_t depth = 0;
+    bool has_active_depth_chain = false;
 
-    uint32_t list = 0;
-    for (list = 0; list < s->init_data->smlists_array_size; list++) {
-        uint16_t offset = 0;
-        uint16_t offset_plus_pat = 0;
-        uint16_t depth = 0;
-        bool last_reset = false; // TODO really last reset 'depth'
+    bool has_depth = false;
+    bool has_ends_with = false;
+    uint16_t ends_with_depth = 0;
 
-        bool has_depth = false;
-        bool has_ends_with = false;
-        uint16_t ends_with_depth = 0;
-
-        bool have_anchor = false;
-
-        SigMatch *sm = s->init_data->smlists[list];
-        for ( ; sm != NULL; sm = sm->next) {
-            switch (sm->type) {
-                case DETECT_CONTENT: {
-                    DetectContentData *cd = (DetectContentData *)sm->ctx;
-                    if ((cd->flags & (DETECT_CONTENT_DEPTH|DETECT_CONTENT_OFFSET|DETECT_CONTENT_WITHIN|DETECT_CONTENT_DISTANCE)) == 0) {
-                        offset = depth = 0;
-                        offset_plus_pat = cd->content_len;
-                        SCLogDebug("reset");
-                        last_reset = true;
-                        have_anchor = false;
-                        continue;
-                    }
-                    if (cd->flags & DETECT_CONTENT_NEGATED) {
-                        offset = depth = 0;
-                        offset_plus_pat = 0;
-                        SCLogDebug("reset because of negation");
-                        last_reset = true;
-                        have_anchor = false;
-                        continue;
-                    }
-
-                    if (cd->depth) {
-                        has_depth = true;
-                        have_anchor = true;
-                    }
-
-                    SCLogDebug("sm %p depth %u offset %u distance %d within %d", sm, cd->depth, cd->offset, cd->distance, cd->within);
-
-                    SCLogDebug("stored: offset %u depth %u offset_plus_pat %u", offset, depth, offset_plus_pat);
-
-                    if ((cd->flags & DETECT_CONTENT_WITHIN) == 0) {
-                        if (depth)
-                            SCLogDebug("no within, reset depth");
-                        depth = 0;
-                    }
-                    if ((cd->flags & DETECT_CONTENT_DISTANCE) == 0) {
-                        if (offset_plus_pat)
-                            SCLogDebug("no distance, reset offset_plus_pat & offset");
-                        offset_plus_pat = offset = 0;
-                    }
-
-                    SCLogDebug("stored: offset %u depth %u offset_plus_pat %u", offset, depth, offset_plus_pat);
-
-                    if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance >= 0) {
-                        if ((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX) {
-                            offset = cd->offset = offset_plus_pat + cd->distance;
-                        } else {
-                            SCLogDebug("not updated content offset as it would overflow : %u + %d", offset_plus_pat, cd->distance);
+    for (SigMatch *sm = sm_head; sm != NULL; sm = sm->next) {
+        switch (sm->type) {
+            case DETECT_CONTENT: {
+                DetectContentData *cd = (DetectContentData *)sm->ctx;
+                if ((cd->flags & (DETECT_CONTENT_DEPTH | DETECT_CONTENT_OFFSET |
+                                         DETECT_CONTENT_WITHIN | DETECT_CONTENT_DISTANCE)) == 0) {
+                    offset = depth = 0;
+                    offset_plus_pat = cd->content_len;
+                    SCLogDebug("reset");
+                    has_active_depth_chain = false;
+                    continue;
+                }
+                if (sm->prev == NULL) {
+                    if (cd->distance >= 0 && cd->distance <= (int32_t)USHRT_MAX &&
+                            cd->within >= 0 && cd->within <= (int32_t)USHRT_MAX) {
+                        if (cd->flags & DETECT_CONTENT_DISTANCE) {
+                            if (cd->distance > 0)
+                                cd->flags |= DETECT_CONTENT_OFFSET;
+                            cd->flags &= ~DETECT_CONTENT_DISTANCE;
+                            cd->offset = (uint16_t)cd->distance;
+                            cd->distance = 0;
+                            cd->flags |= DETECT_CONTENT_DISTANCE2OFFSET;
                         }
-                        SCLogDebug("updated content to have offset %u", cd->offset);
+                        if (cd->flags & DETECT_CONTENT_WITHIN) {
+                            cd->flags |= DETECT_CONTENT_DEPTH;
+                            cd->flags &= ~DETECT_CONTENT_WITHIN;
+                            cd->depth = (uint16_t)cd->within + cd->offset;
+                            cd->within = 0;
+                            cd->flags |= DETECT_CONTENT_WITHIN2DEPTH;
+                        }
                     }
-                    if (have_anchor && !last_reset && offset_plus_pat && cd->flags & DETECT_CONTENT_WITHIN && cd->within >= 0) {
+                }
+
+                if (cd->flags & DETECT_CONTENT_NEGATED) {
+                    offset = depth = 0;
+                    offset_plus_pat = 0;
+                    SCLogDebug("reset because of negation");
+                    has_active_depth_chain = false;
+                    continue;
+                }
+
+                if (cd->depth) {
+                    has_depth = true;
+                    has_active_depth_chain = true;
+                }
+
+                SCLogDebug("sm %p depth %u offset %u distance %d within %d", sm, cd->depth,
+                        cd->offset, cd->distance, cd->within);
+                SCLogDebug("stored: offset %u depth %u offset_plus_pat %u", offset, depth,
+                        offset_plus_pat);
+
+                if ((cd->flags & (DETECT_CONTENT_DEPTH | DETECT_CONTENT_WITHIN)) == 0) {
+                    if (depth)
+                        SCLogDebug("no within, reset depth");
+                    depth = 0;
+                    has_active_depth_chain = false;
+                }
+                if ((cd->flags & DETECT_CONTENT_DISTANCE) == 0) {
+                    if (offset_plus_pat)
+                        SCLogDebug("no distance, reset offset_plus_pat & offset");
+                    offset_plus_pat = offset = 0;
+                }
+
+                SCLogDebug("stored: offset %u depth %u offset_plus_pat %u "
+                           "has_active_depth_chain %s",
+                        offset, depth, offset_plus_pat, has_active_depth_chain ? "true" : "false");
+                if (cd->flags & DETECT_CONTENT_DISTANCE) {
+                    if (cd->distance >= 0) {
+                        VALIDATE((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX);
+                        offset = cd->offset = (uint16_t)(offset_plus_pat + cd->distance);
+                        SCLogDebug("distance %d: updated content to have offset %u", cd->distance,
+                                cd->offset);
+                    } else {
+                        if (abs(cd->distance) > offset_plus_pat)
+                            offset = cd->offset = 0;
+                        else
+                            offset = cd->offset = (uint16_t)(offset_plus_pat + cd->distance);
+                        offset_plus_pat = offset + cd->content_len;
+                        SCLogDebug("distance %d: updated content to have offset %u", cd->distance,
+                                cd->offset);
+                    }
+                }
+                if (has_active_depth_chain) {
+                    if (offset_plus_pat && cd->flags & DETECT_CONTENT_WITHIN && cd->within >= 0) {
                         if (depth && depth > offset_plus_pat) {
-                            uint16_t dist = 0;
+                            int32_t dist = 0;
                             if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance > 0) {
                                 dist = cd->distance;
-                                SCLogDebug("distance to add: %u. depth + dist %u", dist, depth + dist);
+                                SCLogDebug(
+                                        "distance to add: %u. depth + dist %u", dist, depth + dist);
                             }
                             SCLogDebug("depth %u + cd->within %u", depth, cd->within);
-                            depth = cd->depth = depth + cd->within + dist;
-                        } else {
+                            VALIDATE(depth + cd->within + dist >= 0 &&
+                                     depth + cd->within + dist <= UINT16_MAX);
+                            depth = cd->depth = (uint16_t)(depth + cd->within + dist);
+                        } else if ((cd->flags & DETECT_CONTENT_DISTANCE_VAR) == 0) {
+                            // we cannot know the depth yet if it comes from a var
                             SCLogDebug("offset %u + cd->within %u", offset, cd->within);
-                            depth = cd->depth = offset + cd->within;
+                            VALIDATE(depth + cd->within >= 0 && depth + cd->within <= UINT16_MAX);
+                            depth = cd->depth = (uint16_t)(offset + cd->within);
                         }
                         SCLogDebug("updated content to have depth %u", cd->depth);
                     } else {
@@ -525,12 +613,15 @@ void DetectContentPropagateLimits(Signature *s)
                             if (cd->within > 0) {
                                 SCLogDebug("within %d distance %d", cd->within, cd->distance);
                                 if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance >= 0) {
-                                    cd->offset = offset_plus_pat + cd->distance;
+                                    VALIDATE(offset_plus_pat + cd->distance >= 0 &&
+                                             offset_plus_pat + cd->distance <= UINT16_MAX);
+                                    cd->offset = (uint16_t)(offset_plus_pat + cd->distance);
                                     SCLogDebug("updated content to have offset %u", cd->offset);
                                 }
 
-                                cd->depth = cd->within + depth;
-                                depth = cd->depth;
+                                VALIDATE(depth + cd->within >= 0 &&
+                                         depth + cd->within <= UINT16_MAX);
+                                depth = cd->depth = (uint16_t)(cd->within + depth);
                                 SCLogDebug("updated content to have depth %u", cd->depth);
 
                                 if (cd->flags & DETECT_CONTENT_ENDS_WITH) {
@@ -542,92 +633,163 @@ void DetectContentPropagateLimits(Signature *s)
                             }
                         }
                     }
-                    if (cd->offset == 0) {// && offset != 0) {
-                        if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance >= 0) {
-                            cd->offset = offset_plus_pat;
-                            SCLogDebug("update content to have offset %u", cd->offset);
-                        }
+                }
+                if (cd->offset == 0) { // && offset != 0) {
+                    if (cd->flags & DETECT_CONTENT_DISTANCE && cd->distance >= 0) {
+                        cd->offset = offset_plus_pat;
+                        SCLogDebug("update content to have offset %u", cd->offset);
                     }
+                }
 
-                    if ((cd->flags & (DETECT_CONTENT_DEPTH|DETECT_CONTENT_OFFSET|DETECT_CONTENT_WITHIN|DETECT_CONTENT_DISTANCE)) == (DETECT_CONTENT_DISTANCE|DETECT_CONTENT_WITHIN) ||
-                            (cd->flags & (DETECT_CONTENT_DEPTH|DETECT_CONTENT_OFFSET|DETECT_CONTENT_WITHIN|DETECT_CONTENT_DISTANCE)) == (DETECT_CONTENT_DISTANCE)) {
-                        if (cd->distance >= 0) {
-                            // only distance
-                            if ((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX) {
-                                offset = cd->offset = offset_plus_pat + cd->distance;
-                            } else {
-                                SCLogDebug("not updated content offset as it would overflow : %u + %d", offset_plus_pat, cd->distance);
-                            }
-                            offset_plus_pat = offset + cd->content_len;
-                            SCLogDebug("offset %u offset_plus_pat %u", offset, offset_plus_pat);
-                        }
-                    }
-                    if (cd->flags & DETECT_CONTENT_OFFSET) {
-                        offset = cd->offset;
+                if ((cd->flags & (DETECT_CONTENT_DEPTH | DETECT_CONTENT_OFFSET |
+                                         DETECT_CONTENT_WITHIN | DETECT_CONTENT_DISTANCE)) ==
+                                (DETECT_CONTENT_DISTANCE | DETECT_CONTENT_WITHIN) ||
+                        (cd->flags & (DETECT_CONTENT_DEPTH | DETECT_CONTENT_OFFSET |
+                                             DETECT_CONTENT_WITHIN | DETECT_CONTENT_DISTANCE)) ==
+                                (DETECT_CONTENT_DISTANCE)) {
+                    if (cd->distance >= 0) {
+                        // only distance
+                        VALIDATE((uint32_t)offset_plus_pat + cd->distance <= UINT16_MAX);
+                        offset = cd->offset = (uint16_t)(offset_plus_pat + cd->distance);
                         offset_plus_pat = offset + cd->content_len;
-                        SCLogDebug("stored offset %u offset_plus_pat %u", offset, offset_plus_pat);
+                        SCLogDebug("offset %u offset_plus_pat %u", offset, offset_plus_pat);
                     }
-                    if (cd->depth) {
-                        depth = cd->depth;
-                        SCLogDebug("stored depth now %u", depth);
-                        offset_plus_pat = offset + cd->content_len;
-                        if (cd->flags & DETECT_CONTENT_ENDS_WITH) {
-                            has_ends_with = true;
-                            if (ends_with_depth == 0)
-                                ends_with_depth = depth;
-                            ends_with_depth = MIN(ends_with_depth, depth);
-                        }
-                    }
-                    if ((cd->flags & (DETECT_CONTENT_WITHIN|DETECT_CONTENT_DEPTH)) == 0) {
-                        last_reset = true;
-                        depth = 0;
-                    } else {
-                        last_reset = false;
-                    }
-                    break;
                 }
-                case DETECT_PCRE: {
-                    // relative could leave offset_plus_pat set.
-                    DetectPcreData *pd = (DetectPcreData *)sm->ctx;
-                    if (pd->flags & DETECT_PCRE_RELATIVE) {
-                        depth = 0;
-                        last_reset = true;
-                    } else {
-                        SCLogDebug("non-anchored PCRE not supported, reset offset_plus_pat & offset");
-                        offset_plus_pat = offset = depth = 0;
-                        last_reset = true;
+                if (cd->flags & DETECT_CONTENT_OFFSET) {
+                    offset = cd->offset;
+                    offset_plus_pat = offset + cd->content_len;
+                    SCLogDebug("stored offset %u offset_plus_pat %u", offset, offset_plus_pat);
+                }
+                if (cd->depth) {
+                    depth = cd->depth;
+                    SCLogDebug("stored depth now %u", depth);
+                    offset_plus_pat = offset + cd->content_len;
+                    if (cd->flags & DETECT_CONTENT_ENDS_WITH) {
+                        has_ends_with = true;
+                        if (ends_with_depth == 0)
+                            ends_with_depth = depth;
+                        ends_with_depth = MIN(ends_with_depth, depth);
                     }
-                    break;
                 }
-                default: {
-                    SCLogDebug("keyword not supported, reset offset_plus_pat & offset");
-                    offset_plus_pat = offset = depth = 0;
-                    last_reset = true;
-                    break;
+                if ((cd->flags & (DETECT_CONTENT_WITHIN | DETECT_CONTENT_DEPTH)) == 0) {
+                    has_active_depth_chain = false;
+                    depth = 0;
                 }
+                break;
             }
+            case DETECT_PCRE: {
+                // relative could leave offset_plus_pat set.
+                const DetectPcreData *pd = (const DetectPcreData *)sm->ctx;
+                if (pd->flags & DETECT_PCRE_RELATIVE) {
+                    depth = 0;
+                } else {
+                    SCLogDebug("non-anchored PCRE not supported, reset offset_plus_pat & offset");
+                    offset_plus_pat = offset = depth = 0;
+                }
+                has_active_depth_chain = false;
+                break;
+            }
+            default:
+                SCLogDebug("keyword not supported, reset offset_plus_pat & offset");
+                offset_plus_pat = offset = depth = 0;
+                has_active_depth_chain = false;
+                break;
         }
-        /* apply anchored 'ends with' as depth to all patterns */
-        if (has_depth && has_ends_with) {
-            sm = s->init_data->smlists[list];
-            for ( ; sm != NULL; sm = sm->next) {
-                switch (sm->type) {
-                    case DETECT_CONTENT: {
-                        DetectContentData *cd = (DetectContentData *)sm->ctx;
-                        if (cd->depth == 0)
-                            cd->depth = ends_with_depth;
-                        cd->depth = MIN(ends_with_depth, cd->depth);
-                        if (cd->depth)
-                            cd->flags |= DETECT_CONTENT_DEPTH;
-                        break;
-                    }
+    }
+    /* apply anchored 'ends with' as depth to all patterns */
+    if (has_depth && has_ends_with) {
+        for (SigMatch *sm = sm_head; sm != NULL; sm = sm->next) {
+            switch (sm->type) {
+                case DETECT_CONTENT: {
+                    DetectContentData *cd = (DetectContentData *)sm->ctx;
+                    if (cd->depth == 0)
+                        cd->depth = ends_with_depth;
+                    cd->depth = MIN(ends_with_depth, cd->depth);
+                    if (cd->depth)
+                        cd->flags |= DETECT_CONTENT_DEPTH;
+                    break;
                 }
             }
         }
     }
+#undef VALIDATE
+}
+
+void DetectContentPropagateLimits(Signature *s)
+{
+    PropagateLimits(s, s->init_data->smlists[DETECT_SM_LIST_PMATCH]);
+    for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
+        PropagateLimits(s, s->init_data->buffers[x].head);
+    }
+}
+
+static inline bool NeedsAsHex(uint8_t c)
+{
+    if (!isprint(c))
+        return true;
+
+    switch (c) {
+        case '/':
+        case ';':
+        case ':':
+        case '\\':
+        case ' ':
+        case '|':
+        case '"':
+        case '`':
+        case '\'':
+            return true;
+    }
+    return false;
+}
+
+void DetectContentPatternPrettyPrint(const DetectContentData *cd, char *str, size_t str_len)
+{
+    bool hex = false;
+    for (uint16_t i = 0; i < cd->content_len; i++) {
+        if (NeedsAsHex(cd->content[i])) {
+            char hex_str[4];
+            snprintf(hex_str, sizeof(hex_str), "%s%02X", !hex ? "|" : " ", cd->content[i]);
+            strlcat(str, hex_str, str_len);
+            hex = true;
+        } else {
+            char p_str[3];
+            snprintf(p_str, sizeof(p_str), "%s%c", hex ? "|" : "", cd->content[i]);
+            strlcat(str, p_str, str_len);
+            hex = false;
+        }
+    }
+    if (hex) {
+        strlcat(str, "|", str_len);
+    }
+}
+
+int DetectContentConvertToNocase(DetectEngineCtx *de_ctx, DetectContentData *cd)
+{
+    if (cd->flags & DETECT_CONTENT_NOCASE) {
+        SCLogError("can't use multiple nocase modifiers with the same content");
+        return -1;
+    }
+
+    /* for consistency in later use (e.g. by MPM construction and hashing),
+     * coerce the content string to lower-case. */
+    for (uint8_t *c = cd->content; c < cd->content + cd->content_len; c++) {
+        *c = u8_tolower(*c);
+    }
+
+    cd->flags |= DETECT_CONTENT_NOCASE;
+    /* Recreate the context with nocase chars */
+    SpmDestroyCtx(cd->spm_ctx);
+    cd->spm_ctx = SpmInitCtx(cd->content, cd->content_len, 1, de_ctx->spm_global_thread_ctx);
+    if (cd->spm_ctx == NULL) {
+        return -1;
+    }
+    return 0;
 }
 
 #ifdef UNITTESTS /* UNITTESTS */
+#include "detect-engine-alert.h"
+#include "packet.h"
 
 static bool TestLastContent(const Signature *s, uint16_t o, uint16_t d)
 {
@@ -652,20 +814,21 @@ static bool TestLastContent(const Signature *s, uint16_t o, uint16_t d)
     return true;
 }
 
-#define TEST_RUN(sig, o, d)                                                                 \
-{                                                                                           \
-    SCLogDebug("TEST_RUN start: '%s'", (sig));                                              \
-    DetectEngineCtx *de_ctx = DetectEngineCtxInit();                                        \
-    FAIL_IF_NULL(de_ctx);                                                                   \
-    char rule[2048];                                                                        \
-    snprintf(rule, sizeof(rule), "alert tcp any any -> any any (%s sid:1; rev:1;)", (sig)); \
-    Signature *s = DetectEngineAppendSig(de_ctx, rule);                                     \
-    FAIL_IF_NULL(s);                                                                        \
-    SigAddressPrepareStage1(de_ctx);                                                        \
-    bool res = TestLastContent(s, (o), (d));                                                \
-    FAIL_IF(res == false);                                                                  \
-    DetectEngineCtxFree(de_ctx);                                                            \
-}
+#define TEST_RUN(sig, o, d)                                                                        \
+    {                                                                                              \
+        SCLogDebug("TEST_RUN start: '%s'", (sig));                                                 \
+        DetectEngineCtx *de_ctx = DetectEngineCtxInit();                                           \
+        FAIL_IF_NULL(de_ctx);                                                                      \
+        de_ctx->flags |= DE_QUIET;                                                                 \
+        char rule[2048];                                                                           \
+        snprintf(rule, sizeof(rule), "alert tcp any any -> any any (%s sid:1; rev:1;)", (sig));    \
+        Signature *s = DetectEngineAppendSig(de_ctx, rule);                                        \
+        FAIL_IF_NULL(s);                                                                           \
+        SigPrepareStage1(de_ctx);                                                                  \
+        bool res = TestLastContent(s, (o), (d));                                                   \
+        FAIL_IF_NOT(res);                                                                          \
+        DetectEngineCtxFree(de_ctx);                                                               \
+    }
 
 #define TEST_DONE \
     PASS
@@ -677,6 +840,8 @@ static int DetectContentDepthTest01(void)
     TEST_RUN("content:\"abc\"; offset:1; depth:3;", 1, 4);
     // dsize applied as depth
     TEST_RUN("dsize:10; content:\"abc\";", 0, 10);
+    TEST_RUN("dsize:<10; content:\"abc\";", 0, 10);
+    TEST_RUN("dsize:5<>10; content:\"abc\";", 0, 10);
 
     // relative match, directly following anchored content
     TEST_RUN("content:\"abc\"; depth:3; content:\"xyz\"; distance:0; within:3; ", 3, 6);
@@ -722,7 +887,21 @@ static int DetectContentDepthTest01(void)
     // hi end: depth '13' (4+9) + distance 55 = 68 + within 2 = 70
     TEST_RUN("content:\"=\"; offset:4; depth:9; content:\"=&\"; distance:55; within:2;", 60, 70);
 
-    TEST_RUN("content:\"0123456789\"; content:\"abcdef\"; distance:2147483647;", 10, 0);
+    // distance value is too high so we bail and not set anything on this content
+    TEST_RUN("content:\"0123456789\"; content:\"abcdef\"; distance:1048576;", 0, 0);
+
+    // Bug #5162.
+    TEST_RUN("content:\"SMB\"; depth:8; content:\"|09 00|\"; distance:8; within:2;", 11, 18);
+    TEST_RUN("content:\"SMB\"; depth:8; content:\"|09 00|\"; distance:8; within:2; content:\"|05 "
+             "00 00|\"; distance:0;",
+            13, 0);
+    TEST_RUN("content:\"SMB\"; depth:8; content:\"|09 00|\"; distance:8; within:2; content:\"|05 "
+             "00 00|\"; distance:0; content:\"|0c 00|\"; distance:19; within:2;",
+            35, 0);
+    TEST_RUN("content:\"SMB\"; depth:8; content:\"|09 00|\"; distance:8; within:2; content:\"|05 "
+             "00 00|\"; distance:0; content:\"|0c 00|\"; distance:19; within:2; content:\"|15 00 "
+             "00 00|\"; distance:20; within:4;",
+            57, 0);
 
     TEST_DONE;
 }
@@ -758,7 +937,7 @@ static int g_file_data_buffer_id = 0;
 static int g_dce_stub_data_buffer_id = 0;
 
 /**
- * \test DetectCotentParseTest01 this is a test to make sure we can deal with escaped colons
+ * \test DetectContentParseTest01 this is a test to make sure we can deal with escaped colons
  */
 static int DetectContentParseTest01 (void)
 {
@@ -767,7 +946,7 @@ static int DetectContentParseTest01 (void)
     const char *teststring = "abc\\:def";
     const char *teststringparsed = "abc:def";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -789,7 +968,7 @@ static int DetectContentParseTest01 (void)
 }
 
 /**
- * \test DetectCotentParseTest02 this is a test to make sure we can deal with escaped semi-colons
+ * \test DetectContentParseTest02 this is a test to make sure we can deal with escaped semi-colons
  */
 static int DetectContentParseTest02 (void)
 {
@@ -798,7 +977,7 @@ static int DetectContentParseTest02 (void)
     const char *teststring = "abc\\;def";
     const char *teststringparsed = "abc;def";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -820,7 +999,7 @@ static int DetectContentParseTest02 (void)
 }
 
 /**
- * \test DetectCotentParseTest03 this is a test to make sure we can deal with escaped double-quotes
+ * \test DetectContentParseTest03 this is a test to make sure we can deal with escaped double-quotes
  */
 static int DetectContentParseTest03 (void)
 {
@@ -829,7 +1008,7 @@ static int DetectContentParseTest03 (void)
     const char *teststring = "abc\\\"def";
     const char *teststringparsed = "abc\"def";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -851,7 +1030,7 @@ static int DetectContentParseTest03 (void)
 }
 
 /**
- * \test DetectCotentParseTest04 this is a test to make sure we can deal with escaped backslashes
+ * \test DetectContentParseTest04 this is a test to make sure we can deal with escaped backslashes
  */
 static int DetectContentParseTest04 (void)
 {
@@ -860,7 +1039,7 @@ static int DetectContentParseTest04 (void)
     const char *teststring = "abc\\\\def";
     const char *teststringparsed = "abc\\def";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -883,7 +1062,7 @@ static int DetectContentParseTest04 (void)
 }
 
 /**
- * \test DetectCotentParseTest05 test illegal escape
+ * \test DetectContentParseTest05 test illegal escape
  */
 static int DetectContentParseTest05 (void)
 {
@@ -891,7 +1070,7 @@ static int DetectContentParseTest05 (void)
     DetectContentData *cd = NULL;
     const char *teststring = "abc\\def";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -908,7 +1087,7 @@ static int DetectContentParseTest05 (void)
 }
 
 /**
- * \test DetectCotentParseTest06 test a binary content
+ * \test DetectContentParseTest06 test a binary content
  */
 static int DetectContentParseTest06 (void)
 {
@@ -917,7 +1096,7 @@ static int DetectContentParseTest06 (void)
     const char *teststring = "a|42|c|44|e|46|";
     const char *teststringparsed = "abcdef";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -940,7 +1119,7 @@ static int DetectContentParseTest06 (void)
 }
 
 /**
- * \test DetectCotentParseTest07 test an empty content
+ * \test DetectContentParseTest07 test an empty content
  */
 static int DetectContentParseTest07 (void)
 {
@@ -948,7 +1127,7 @@ static int DetectContentParseTest07 (void)
     DetectContentData *cd = NULL;
     const char *teststring = "";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -963,7 +1142,7 @@ static int DetectContentParseTest07 (void)
 }
 
 /**
- * \test DetectCotentParseTest08 test an empty content
+ * \test DetectContentParseTest08 test an empty content
  */
 static int DetectContentParseTest08 (void)
 {
@@ -971,7 +1150,7 @@ static int DetectContentParseTest08 (void)
     DetectContentData *cd = NULL;
     const char *teststring = "";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -997,17 +1176,12 @@ static int DetectContentParseTest08 (void)
 static int DetectContentLongPatternMatchTest(uint8_t *raw_eth_pkt, uint16_t pktsize, const char *sig,
                       uint32_t sid)
 {
-    int result = 0;
-
-    Packet *p = SCMalloc(SIZE_OF_PACKET);
-    if (unlikely(p == NULL))
-        return 0;
+    Packet *p = PacketGetFromAlloc();
+    FAIL_IF_NULL(p);
     DecodeThreadVars dtv;
 
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
-
-    memset(p, 0, SIZE_OF_PACKET);
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(th_v));
 
@@ -1015,50 +1189,32 @@ static int DetectContentLongPatternMatchTest(uint8_t *raw_eth_pkt, uint16_t pkts
     DecodeEthernet(&th_v, &dtv, p, raw_eth_pkt, pktsize);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
-    de_ctx->sig_list = SigInit(de_ctx, sig);
-    if (de_ctx->sig_list == NULL) {
-        goto end;
-    }
-    de_ctx->sig_list->next = NULL;
+    Signature *s = DetectEngineAppendSig(de_ctx, sig);
+    FAIL_IF_NULL(s);
 
-    if (de_ctx->sig_list->sm_lists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_CONTENT) {
-        DetectContentData *co = (DetectContentData *)de_ctx->sig_list->sm_lists_tail[DETECT_SM_LIST_PMATCH]->ctx;
-        if (co->flags & DETECT_CONTENT_RELATIVE_NEXT) {
-            printf("relative next flag set on final match which is content: ");
-            goto end;
-        }
+    if (de_ctx->sig_list->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->type == DETECT_CONTENT) {
+        DetectContentData *co = (DetectContentData *)de_ctx->sig_list->init_data
+                                        ->smlists_tail[DETECT_SM_LIST_PMATCH]
+                                        ->ctx;
+        FAIL_IF(co->flags & DETECT_CONTENT_RELATIVE_NEXT);
     }
 
     SCLogDebug("---DetectContentLongPatternMatchTest---");
-    DetectContentPrintAll(de_ctx->sig_list->sm_lists[DETECT_SM_LIST_MATCH]);
+    DetectContentPrintAll(de_ctx->sig_list->init_data->smlists[DETECT_SM_LIST_MATCH]);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    if (PacketAlertCheck(p, sid) != 1) {
-        goto end;
-    }
+    int result = PacketAlertCheck(p, sid);
 
-    result = 1;
-end:
-    if (de_ctx != NULL)
-    {
-        SigGroupCleanup(de_ctx);
-        SigCleanSignatures(de_ctx);
-        if (det_ctx != NULL)
-            DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-        DetectEngineCtxFree(de_ctx);
-    }
-    PACKET_RECYCLE(p);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
+    PacketRecycle(p);
     FlowShutdown();
-
     SCFree(p);
     return result;
 }
@@ -1260,7 +1416,7 @@ static int DetectContentParseTest09(void)
     DetectContentData *cd = NULL;
     const char *teststring = "boo";
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -1272,7 +1428,7 @@ static int DetectContentParseTest09(void)
 }
 
 /**
- * \test Test cases where if within specified is < content lenggth we invalidate
+ * \test Test cases where if within specified is < content length we invalidate
  *       the sig.
  */
 static int DetectContentParseTest17(void)
@@ -1303,34 +1459,26 @@ end:
  */
 static int DetectContentParseTest18(void)
 {
-    Signature *s = SigAlloc();
-    int result = 1;
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        result = 0;
-        goto end;
-    }
+    FAIL_IF_NULL(de_ctx);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
-        goto end;
-
-    result &= (DetectContentSetup(de_ctx, s, "one") == 0);
-    result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
-
+    Signature *s = SigAlloc();
+    FAIL_IF_NULL(s);
+    FAIL_IF(SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
+    FAIL_IF_NOT(DetectContentSetup(de_ctx, s, "one") == 0);
+    FAIL_IF(DetectBufferIsPresent(s, g_dce_stub_data_buffer_id));
+    FAIL_IF_NOT(s->init_data->smlists[DETECT_SM_LIST_PMATCH] != NULL);
     SigFree(de_ctx, s);
 
     s = SigAlloc();
-    if (s == NULL)
-        return 0;
-
-    result &= (DetectContentSetup(de_ctx, s, "one") == 0);
-    result &= (s->sm_lists[g_dce_stub_data_buffer_id] == NULL && s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
-
- end:
+    FAIL_IF_NULL(s);
+    FAIL_IF_NOT(DetectContentSetup(de_ctx, s, "one") == 0);
+    FAIL_IF(DetectBufferIsPresent(s, g_dce_stub_data_buffer_id));
+    FAIL_IF_NOT(s->init_data->smlists[DETECT_SM_LIST_PMATCH] != NULL);
     SigFree(de_ctx, s);
-    DetectEngineCtxFree(de_ctx);
 
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 /**
@@ -1339,288 +1487,75 @@ static int DetectContentParseTest18(void)
 
 static int DetectContentParseTest19(void)
 {
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 1;
-    Signature *s = NULL;
-    DetectContentData *data = NULL;
 
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any "
-                               "(msg:\"Testing dce iface, stub_data with content\"; "
-                               "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                               "dce_stub_data; "
-                               "content:\"one\"; distance:0; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf ("failed dce iface, stub_data with content ");
-        result = 0;
-        goto end;
-    }
-    s = de_ctx->sig_list;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        !(data->flags & DETECT_CONTENT_DISTANCE) ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
 
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub_data with contents & distance, within\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; distance:0; content:\"two\"; within:10; sid:1;)");
-    if (s->next == NULL) {
-        printf("failed dce iface, stub_data with content & distance, within");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        !(data->flags & DETECT_CONTENT_WITHIN) ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->within == 10);
-/*
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub_data with contents & offset, depth\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; offset:5; depth:9; "
-                      "content:\"two\"; within:10; sid:1;)");
-    if (s->next == NULL) {
-        printf ("failed dce iface, stub_data with contents & offset, depth");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->offset == 5 && data->depth == 9);
-    data = (DetectContentData *)s->sm_lists[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        !(data->flags & DETECT_CONTENT_WITHIN) ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
+    Signature *s =
+            DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                          "(msg:\"Testing dce iface, stub_data with content\"; "
+                                          "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
+                                          "dce_stub_data; "
+                                          "content:\"one\"; distance:0; sid:1;)");
+    FAIL_IF_NULL(s);
 
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub with contents, distance\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; distance:0; "
-                      "content:\"two\"; distance:2; sid:1;)");
-    if (s->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        !(data->flags & DETECT_CONTENT_DISTANCE) ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->distance == 2);
-*/
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub with contents, distance, within\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; distance:0; "
-                      "content:\"two\"; within:10; distance:2; sid:1;)");
-    if (s->next == NULL) {
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        !(data->flags & DETECT_CONTENT_WITHIN) ||
-        !(data->flags & DETECT_CONTENT_DISTANCE) ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->within == 10 && data->distance == 2);
-/*
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub_data with content, offset\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; offset:10; sid:1;)");
-    if (s->next == NULL) {
-        printf ("Failed dce iface, stub_data with content, offset ");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->offset == 10);
+    SigMatch *sm = DetectBufferGetFirstSigMatch(s, g_dce_stub_data_buffer_id);
+    FAIL_IF_NULL(sm);
+    FAIL_IF_NOT(sm->type == DETECT_CONTENT);
+    FAIL_IF_NOT(s->init_data->smlists[DETECT_SM_LIST_PMATCH] == NULL);
 
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub_data with content, depth\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; depth:10; sid:1;)");
-    if (s->next == NULL) {
-        printf ("failed dce iface, stub_data with content, depth");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->depth == 10);
+    DetectContentData *data = (DetectContentData *)sm->ctx;
+    FAIL_IF_NOT(data->flags == (DETECT_CONTENT_DISTANCE | DETECT_CONTENT_MPM));
 
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing dce iface, stub_data with content, offset, depth\"; "
-                      "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
-                      "dce_stub_data; "
-                      "content:\"one\"; offset:10; depth:3; sid:1;)");
-    if (s->next == NULL) {
-        printf("failed dce iface, stub_data with content, offset, depth");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] == NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists_tail[g_dce_stub_data_buffer_id]->type == DETECT_CONTENT);
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] == NULL);
-    data = (DetectContentData *)s->sm_lists_tail[g_dce_stub_data_buffer_id]->ctx;
-    if (data->flags & DETECT_CONTENT_RAWBYTES ||
-        data->flags & DETECT_CONTENT_NOCASE ||
-        data->flags & DETECT_CONTENT_WITHIN ||
-        data->flags & DETECT_CONTENT_DISTANCE ||
-        data->flags & DETECT_CONTENT_FAST_PATTERN ||
-        data->flags & DETECT_CONTENT_NEGATED ||
-        result == 0) {
-        result = 0;
-        goto end;
-    }
-    result &= (data->offset == 10 && data->depth == 13);
-*/
-    s->next = SigInit(de_ctx, "alert tcp any any -> any any "
-                      "(msg:\"Testing content\"; "
-                      "content:\"one\"; sid:1;)");
-    if (s->next == NULL) {
-        printf ("failed testing content");
-        result = 0;
-        goto end;
-    }
-    s = s->next;
-    if (s->sm_lists_tail[g_dce_stub_data_buffer_id] != NULL) {
-        result = 0;
-        goto end;
-    }
-    result &= (s->sm_lists[DETECT_SM_LIST_PMATCH] != NULL);
+    s = DetectEngineAppendSig(de_ctx,
+            "alert tcp any any -> any any "
+            "(msg:\"Testing dce iface, stub_data with contents & distance, within\"; "
+            "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
+            "dce_stub_data; "
+            "content:\"one\"; distance:0; content:\"two\"; within:10; sid:2;)");
+    FAIL_IF_NULL(s);
+    sm = DetectBufferGetFirstSigMatch(s, g_dce_stub_data_buffer_id);
+    FAIL_IF_NULL(sm);
+    FAIL_IF_NOT(sm->type == DETECT_CONTENT);
+    FAIL_IF_NULL(sm->next);
+    sm = sm->next;
+    FAIL_IF_NOT(sm->type == DETECT_CONTENT);
+    FAIL_IF_NOT(s->init_data->smlists[DETECT_SM_LIST_PMATCH] == NULL);
 
- end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    data = (DetectContentData *)sm->ctx;
+    FAIL_IF_NOT(data->flags == DETECT_CONTENT_WITHIN);
+    FAIL_IF_NOT(data->within == 10);
+
+    s = DetectEngineAppendSig(de_ctx,
+            "alert tcp any any -> any any "
+            "(msg:\"Testing dce iface, stub with contents, distance, within\"; "
+            "dce_iface:3919286a-b10c-11d0-9ba8-00c04fd92ef5; "
+            "dce_stub_data; "
+            "content:\"one\"; distance:0; "
+            "content:\"two\"; within:10; distance:2; sid:3;)");
+    FAIL_IF_NULL(s);
+    sm = DetectBufferGetFirstSigMatch(s, g_dce_stub_data_buffer_id);
+    FAIL_IF_NULL(sm);
+    FAIL_IF_NOT(sm->type == DETECT_CONTENT);
+    FAIL_IF_NULL(sm->next);
+    sm = sm->next;
+    FAIL_IF_NOT(sm->type == DETECT_CONTENT);
+    data = (DetectContentData *)sm->ctx;
+    FAIL_IF_NOT(data->flags == (DETECT_CONTENT_WITHIN | DETECT_CONTENT_DISTANCE));
+    FAIL_IF_NOT(data->within == 10);
+    FAIL_IF_NOT(data->distance == 2);
+    FAIL_IF_NOT(s->init_data->smlists[DETECT_SM_LIST_PMATCH] == NULL);
+
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing content\"; "
+                                      "content:\"one\"; sid:4;)");
+    FAIL_IF_NULL(s);
+    FAIL_IF(DetectBufferIsPresent(s, g_dce_stub_data_buffer_id));
+    FAIL_IF(s->init_data->smlists[DETECT_SM_LIST_PMATCH] == NULL);
+
     DetectEngineCtxFree(de_ctx);
-
-    return result;
+    PASS;
 }
 
 /**
@@ -1763,13 +1698,14 @@ static int DetectContentParseTest24(void)
         goto end;
     }
 
-    if (s->sm_lists_tail[DETECT_SM_LIST_PMATCH] == NULL || s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->ctx == NULL) {
+    if (s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH] == NULL ||
+            s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->ctx == NULL) {
         printf("de_ctx->pmatch_tail == NULL || de_ctx->pmatch_tail->ctx == NULL: ");
         result = 0;
         goto end;
     }
 
-    cd = (DetectContentData *)s->sm_lists_tail[DETECT_SM_LIST_PMATCH]->ctx;
+    cd = (DetectContentData *)s->init_data->smlists_tail[DETECT_SM_LIST_PMATCH]->ctx;
     result = (strncmp("boo", (char *)cd->content, cd->content_len) == 0);
 
 end:
@@ -2099,126 +2035,6 @@ static int DetectContentParseTest35(void)
     return result;
 }
 
-/**
- * \test Parsing test: file_data
- */
-static int DetectContentParseTest36(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"test\"; file_data; content:\"abc\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH] != NULL) {
-        printf("content still in PMATCH list: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[g_file_data_buffer_id] == NULL) {
-        printf("content not in FILEDATA list: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
-}
-
-/**
- * \test Parsing test: file_data
- */
-static int DetectContentParseTest37(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"test\"; file_data; content:\"abc\"; content:\"def\"; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH] != NULL) {
-        printf("content still in PMATCH list: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[g_file_data_buffer_id] == NULL) {
-        printf("content not in FILEDATA list: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
-}
-
-/**
- * \test Parsing test: file_data
- */
-static int DetectContentParseTest38(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"test\"; file_data; content:\"abc\"; content:\"def\"; within:8; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH] != NULL) {
-        printf("content still in PMATCH list: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[g_file_data_buffer_id] == NULL) {
-        printf("content not in FILEDATA list: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
-}
-
 static int SigTestPositiveTestContent(const char *rule, uint8_t *buf)
 {
     uint16_t buflen = strlen((char *)buf);
@@ -2251,86 +2067,6 @@ static int SigTestPositiveTestContent(const char *rule, uint8_t *buf)
     PASS;
 }
 
-/**
- * \test Parsing test: file_data, within relative to file_data
- */
-static int DetectContentParseTest39(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"test\"; file_data; content:\"abc\"; within:8; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH] != NULL) {
-        printf("content still in PMATCH list: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[g_file_data_buffer_id] == NULL) {
-        printf("content not in FILEDATA list: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
-}
-
-/**
- * \test Parsing test: file_data, distance relative to file_data
- */
-static int DetectContentParseTest40(void)
-{
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 0;
-
-    de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL)
-        goto end;
-
-    de_ctx->flags |= DE_QUIET;
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"test\"; file_data; content:\"abc\"; distance:3; sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH] != NULL) {
-        printf("content still in PMATCH list: ");
-        goto end;
-    }
-
-    if (de_ctx->sig_list->sm_lists[g_file_data_buffer_id] == NULL) {
-        printf("content not in FILEDATA list: ");
-        goto end;
-    }
-
-    result = 1;
-end:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-    DetectEngineCtxFree(de_ctx);
-
-    return result;
-}
-
 static int DetectContentParseTest41(void)
 {
     int result = 1;
@@ -2345,7 +2081,7 @@ static int DetectContentParseTest41(void)
     }
     teststring[idx++] = '\0';
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -2378,7 +2114,7 @@ static int DetectContentParseTest42(void)
     }
     teststring[idx++] = '\0';
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -2412,7 +2148,7 @@ static int DetectContentParseTest43(void)
     }
     teststring[idx++] = '\0';
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -2449,7 +2185,7 @@ static int DetectContentParseTest44(void)
     }
     teststring[idx++] = '\0';
 
-    uint16_t spm_matcher = SinglePatternMatchDefaultMatcher();
+    uint8_t spm_matcher = SinglePatternMatchDefaultMatcher();
     SpmGlobalThreadCtx *spm_global_thread_ctx = SpmInitGlobalThreadCtx(spm_matcher);
     FAIL_IF(spm_global_thread_ctx == NULL);
 
@@ -2560,20 +2296,24 @@ static int SigTest41aTestNegatedContent(void)
  *       the negated content within the specified depth
  */
 static int SigTest42TestNegatedContent(void)
-{                                                                                                                                                        // 01   5    10   15   20  24
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:!\"twentythree\"; depth:22; offset:35; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+{
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:!\"eeeeeeeeeee\"; depth:22; offset:35; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
  * \test A negative test that checks that the content string doesn't contain
  *       the negated content within the specified depth, and also after the
- *       specified offset. Since the content is there, the match fails. 
+ *       specified offset. Since the content is there, the match fails.
  *
  *       Match is at offset:23, depth:34
  */
 static int SigTest43TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:!\"twentythree\"; depth:34; offset:23; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:!\"eeeeeeeeeee\"; depth:34; offset:23; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2583,7 +2323,9 @@ static int SigTest43TestNegatedContent(void)
  */
 static int SigTest44TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:!\"twentythree\"; offset:40; depth:35; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:!\"eeeeeeeeeee\"; offset:40; depth:35; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2592,7 +2334,9 @@ static int SigTest44TestNegatedContent(void)
  */
 static int SigTest45TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; depth:5; content:!\"twentythree\"; depth:23; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:5; "
+                                      "content:!\"eeeeeeeeeee\"; depth:23; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2601,7 +2345,9 @@ static int SigTest45TestNegatedContent(void)
  */
 static int SigTest46TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"onee\"; content:!\"twentythree\"; depth:23; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaaE\"; "
+                                      "content:!\"eeeeeeeeeee\"; depth:23; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2611,7 +2357,9 @@ static int SigTest46TestNegatedContent(void)
  */
 static int SigTest47TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; offset:5; content:!\"twentythree\"; depth:23; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; offset:5; "
+                                      "content:!\"eeeeeeeeeee\"; depth:23; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2620,7 +2368,10 @@ static int SigTest47TestNegatedContent(void)
  */
 static int SigTest48TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GET\"; content:!\"GES\"; within:26; sid:1;)", (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:\"GET\"; content:!\"GES\"; within:26; sid:1;)",
+            (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ "
+                       "HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
 }
 
 /**
@@ -2629,7 +2380,10 @@ static int SigTest48TestNegatedContent(void)
  */
 static int SigTest49TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GET\"; content:!\"Host\"; within:26; sid:1;)", (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:\"GET\"; content:!\"Host\"; within:26; sid:1;)",
+            (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ "
+                       "HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
 }
 
 /**
@@ -2638,7 +2392,10 @@ static int SigTest49TestNegatedContent(void)
  */
 static int SigTest50TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GET\"; content:!\"GES\"; distance:25; sid:1;)", (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:\"GET\"; content:!\"GES\"; distance:25; sid:1;)",
+            (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ "
+                       "HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
 }
 
 /**
@@ -2659,7 +2416,10 @@ static int SigTest51TestNegatedContent(void)
  */
 static int SigTest52TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"GES\"; content:!\"BOO\"; sid:1;)", (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:\"GES\"; content:!\"BOO\"; sid:1;)",
+            (uint8_t *)"GET /one/ HTTP/1.1\r\n Host: one.example.org\r\n\r\n\r\nGET /two/ "
+                       "HTTP/1.1\r\nHost: two.example.org\r\n\r\n\r\n");
 }
 
 /**
@@ -2668,7 +2428,9 @@ static int SigTest52TestNegatedContent(void)
  */
 static int SigTest53TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:!\"fourty\"; within:56; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:\"aaa\"; content:!\"Ggggg\"; within:56; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /**
@@ -2677,7 +2439,9 @@ static int SigTest53TestNegatedContent(void)
  */
 static int SigTest54TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:!\"fourty\"; within:20; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"gggggg\"; within:20; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff ggggggggg hhhhhhhh");
 }
 
 /**
@@ -2686,7 +2450,9 @@ static int SigTest54TestNegatedContent(void)
  */
 static int SigTest55TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:!\"one\"; depth:5; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:!\"aaa\"; depth:5; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff gggggggg hhhhhhhh");
 }
 
 /**
@@ -2695,7 +2461,9 @@ static int SigTest55TestNegatedContent(void)
  */
 static int SigTest56TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:\"fourty\"; within:56; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:\"aaa\"; content:\"Ggggg\"; within:56; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Gggggggg hhhhhhhh");
 }
 
 /**
@@ -2704,7 +2472,9 @@ static int SigTest56TestNegatedContent(void)
  */
 static int SigTest57TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:!\"fourty\"; within:56; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:\"aaa\"; content:!\"Ggggg\"; within:56; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /**
@@ -2713,7 +2483,9 @@ static int SigTest57TestNegatedContent(void)
  */
 static int SigTest58TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:!\"fourty\"; distance:57; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"Ggggg\"; distance:57; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /**
@@ -2722,92 +2494,124 @@ static int SigTest58TestNegatedContent(void)
  */
 static int SigTest59TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; content:!\"fourty\"; distance:30; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"Gggg\"; distance:30; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest60TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:!\"one\"; content:\"fourty\"; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:!\"aaa\"; content:\"Ggggg\"; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest61TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"fourty\"; within:30; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Ggggg\"; within:30; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /** \test Test negation in combination with within and depth
  *
- *  Match of "one" at offset:0, depth:3
- *  Match of "fourty" at offset:46, depth:52
+ *  Match of "aaa" at offset:0, depth:3
+ *  Match of "Gggggg" at offset:46, depth:52
  *
  *  This signature should not match for the test to pass.
  */
 static int SigTest62TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"fourty\"; within:49; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Gggggg\"; within:49; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest63TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; depth:10; content:!\"fourty\"; within:56; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Gggggg\"; within:56; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest64TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"fourty\"; within:30; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Gggggg\"; within:30; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /** \test Test negation in combination with within and depth
  *
- *  Match of "one" at offset:0, depth:3
- *  Match of "fourty" at offset:46, depth:52
+ *  Match of "aaa" at offset:0, depth:3
+ *  Match of "gggggg" at offset:46, depth:52
  *
  *  This signature should not match for the test to pass.
  */
 static int SigTest65TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"fourty\"; distance:0; within:49; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Gggggg\"; distance:0; within:49; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest66TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"fourty\"; within:30; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"Gggggg\"; within:30; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest67TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:!\"four\"; within:56; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:10; "
+                                      "content:!\"XXXX\"; within:56; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc XXXXdddd eeeeeeeeeee ffffffffff XXXXggggg hhhhhhhh");
 }
 
 static int SigTest68TestNegatedContent(void)
 {
-    return SigTestPositiveTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:\"nine\"; offset:8; content:!\"fourty\"; within:28; content:\"fiftysix\"; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestPositiveTestContent(
+            "alert tcp any any -> any any (content:\"aaa\"; depth:10; content:\"cccc\"; offset:8; "
+            "content:!\"Gggggg\"; within:28; content:\"hhhhhhhh\"; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest69TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; depth:10; content:\"nine\"; offset:8; content:!\"fourty\"; within:48; content:\"fiftysix\"; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent(
+            "alert tcp any any -> any any (content:\"aaa\"; depth:10; content:\"cccc\"; offset:8; "
+            "content:!\"Gggggg\"; within:48; content:\"hhhhhhhh\"; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest70TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; content:!\"fourty\"; within:52; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"Gggggg\"; within:52; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 /** \test within and distance */
 static int SigTest71TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; content:!\"fourty\"; within:40; distance:43; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"Gggggg\"; within:40; distance:43; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest72TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"one\"; content:!\"fourty\"; within:49; distance:43; sid:1;)", (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; "
+                                      "content:!\"Gggggg\"; within:49; distance:43; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff Ggggggggg hhhhhhhh");
 }
 
 static int SigTest73TestNegatedContent(void)
 {
-    return SigTestNegativeTestContent("alert tcp any any -> any any (msg:\"HTTP URI cap\"; content:\"one\"; depth:5; content:!\"twentythree\"; depth:35; sid:1;)",  (uint8_t *)"one four nine fourteen twentythree thirtyfive fourtysix fiftysix");
+    return SigTestNegativeTestContent("alert tcp any any -> any any (content:\"aaa\"; depth:5; "
+                                      "content:!\"eeeeeeeeeee\"; depth:35; sid:1;)",
+            (uint8_t *)"aaa bbbb cccc dddddddd eeeeeeeeeee ffffffffff ggggggggg hhhhhhhh");
 }
 
 static int SigTest74TestNegatedContent(void)
@@ -3006,6 +2810,25 @@ static int DetectLongContentTest3(void)
     return !DetectLongContentTestCommon(sig, 1);
 }
 
+static int DetectBadBinContent(void)
+{
+    DetectEngineCtx *de_ctx = NULL;
+    de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
+    de_ctx->flags |= DE_QUIET;
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (msg:\"test\"; content:\"|a|\"; sid:1;)"));
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (msg:\"test\"; content:\"|aa b|\"; sid:1;)"));
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (msg:\"test\"; content:\"|aa bz|\"; sid:1;)"));
+    /* https://redmine.openinfosecfoundation.org/issues/5201 */
+    FAIL_IF_NOT_NULL(DetectEngineAppendSig(
+            de_ctx, "alert tcp any any -> any any (msg:\"test\"; content:\"|22 2 22|\"; sid:1;)"));
+    DetectEngineCtxFree(de_ctx);
+    PASS;
+}
+
 /**
  * \brief this function registers unit tests for DetectContent
  */
@@ -3044,11 +2867,6 @@ static void DetectContentRegisterTests(void)
     UtRegisterTest("DetectContentParseTest33", DetectContentParseTest33);
     UtRegisterTest("DetectContentParseTest34", DetectContentParseTest34);
     UtRegisterTest("DetectContentParseTest35", DetectContentParseTest35);
-    UtRegisterTest("DetectContentParseTest36", DetectContentParseTest36);
-    UtRegisterTest("DetectContentParseTest37", DetectContentParseTest37);
-    UtRegisterTest("DetectContentParseTest38", DetectContentParseTest38);
-    UtRegisterTest("DetectContentParseTest39", DetectContentParseTest39);
-    UtRegisterTest("DetectContentParseTest40", DetectContentParseTest40);
     UtRegisterTest("DetectContentParseTest41", DetectContentParseTest41);
     UtRegisterTest("DetectContentParseTest42", DetectContentParseTest42);
     UtRegisterTest("DetectContentParseTest43", DetectContentParseTest43);
@@ -3124,5 +2942,7 @@ static void DetectContentRegisterTests(void)
     UtRegisterTest("DetectLongContentTest1", DetectLongContentTest1);
     UtRegisterTest("DetectLongContentTest2", DetectLongContentTest2);
     UtRegisterTest("DetectLongContentTest3", DetectLongContentTest3);
+
+    UtRegisterTest("DetectBadBinContent", DetectBadBinContent);
 }
 #endif /* UNITTESTS */

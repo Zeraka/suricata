@@ -34,7 +34,6 @@
 #include "detect-engine-state.h"
 #include "app-layer-parser.h"
 
-#include "debug.h"
 #include "decode.h"
 
 #include "flow.h"
@@ -73,6 +72,8 @@ void DetectTagRegister(void)
     sigmatch_table[DETECT_TAG].Match = DetectTagMatch;
     sigmatch_table[DETECT_TAG].Setup = DetectTagSetup;
     sigmatch_table[DETECT_TAG].Free  = DetectTagDataFree;
+    sigmatch_table[DETECT_TAG].desc = "tag of current and future packets for a flow or host";
+    sigmatch_table[DETECT_TAG].url = "/rules/tag.html#tag";
 #ifdef UNITTESTS
     sigmatch_table[DETECT_TAG].RegisterTests = DetectTagRegisterTests;
 #endif
@@ -107,7 +108,7 @@ static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
 
             tde.sid = s->id;
             tde.gid = s->gid;
-            tde.last_ts = tde.first_ts = p->ts.tv_sec;
+            tde.last_ts = tde.first_ts = p->ts;
             tde.metric = td->metric;
             tde.count = td->count;
             if (td->direction == DETECT_TAG_DIR_SRC)
@@ -124,12 +125,12 @@ static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
                 /* If it already exists it will be updated */
                 tde.sid = s->id;
                 tde.gid = s->gid;
-                tde.last_ts = tde.first_ts = p->ts.tv_sec;
+                tde.last_ts = tde.first_ts = p->ts;
                 tde.metric = td->metric;
                 tde.count = td->count;
 
-                SCLogDebug("Adding to or updating flow; first_ts %u count %u",
-                    tde.first_ts, tde.count);
+                SCLogDebug("Adding to or updating flow; first_ts %" PRIu64 " count %u",
+                        (uint64_t)SCTIME_SECS(tde.first_ts), tde.count);
                 TagFlowAdd(p, &tde);
             } else {
                 SCLogDebug("No flow to append the session tag");
@@ -157,19 +158,19 @@ static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
 static DetectTagData *DetectTagParse(const char *tagstr)
 {
     DetectTagData td;
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2_len;
     const char *str_ptr = NULL;
 
-    ret = DetectParsePcreExec(&parse_regex, tagstr, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, tagstr, 0, 0);
     if (ret < 1) {
-        SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 ", string %s", ret, tagstr);
+        SCLogError("parse error, ret %" PRId32 ", string %s", ret, tagstr);
         goto error;
     }
 
-    res = pcre_get_substring((char *)tagstr, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+    int res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
     if (res < 0 || str_ptr == NULL) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+        SCLogError("pcre2_substring_get_bynumber failed");
         goto error;
     }
 
@@ -179,10 +180,10 @@ static DetectTagData *DetectTagParse(const char *tagstr)
     } else if (strcasecmp("host", str_ptr) == 0) {
         td.type = DETECT_TAG_TYPE_HOST;
     } else {
-        SCLogError(SC_ERR_INVALID_VALUE, "Invalid argument type. Must be session or host (%s)", tagstr);
+        SCLogError("Invalid argument type. Must be session or host (%s)", tagstr);
         goto error;
     }
-    pcre_free_substring(str_ptr);
+    pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
     str_ptr = NULL;
 
     /* default tag is 256 packets from session or dst host */
@@ -191,25 +192,27 @@ static DetectTagData *DetectTagParse(const char *tagstr)
     td.direction = DETECT_TAG_DIR_DST;
 
     if (ret > 4) {
-        res = pcre_get_substring((char *)tagstr, ov, MAX_SUBSTRINGS, 3, &str_ptr);
+        res = pcre2_substring_get_bynumber(match, 3, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0 || str_ptr == NULL) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
 
         /* count */
         if (StringParseUint32(&td.count, 10, strlen(str_ptr),
                     str_ptr) <= 0) {
-            SCLogError(SC_ERR_INVALID_VALUE, "Invalid argument for count. Must be a value in the range of 0 to %"PRIu32" (%s)", UINT32_MAX, tagstr);
+            SCLogError("Invalid argument for count. Must be a value in the range of 0 to %" PRIu32
+                       " (%s)",
+                    UINT32_MAX, tagstr);
             goto error;
         }
 
-        pcre_free_substring(str_ptr);
+        pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
         str_ptr = NULL;
 
-        res = pcre_get_substring((char *)tagstr, ov, MAX_SUBSTRINGS, 4, &str_ptr);
+        res = pcre2_substring_get_bynumber(match, 4, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0 || str_ptr == NULL) {
-            SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+            SCLogError("pcre2_substring_get_bynumber failed");
             goto error;
         }
 
@@ -224,18 +227,21 @@ static DetectTagData *DetectTagParse(const char *tagstr)
         } else if (strcasecmp("bytes", str_ptr) == 0) {
             td.metric = DETECT_TAG_METRIC_BYTES;
         } else {
-            SCLogError(SC_ERR_INVALID_VALUE, "Invalid argument metric. Must be one of \"seconds\", \"packets\" or \"bytes\" (%s)", tagstr);
+            SCLogError(
+                    "Invalid argument metric. Must be one of \"seconds\", \"packets\" or \"bytes\" "
+                    "(%s)",
+                    tagstr);
             goto error;
         }
 
-        pcre_free_substring(str_ptr);
+        pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
         str_ptr = NULL;
 
         /* if specified, overwrite it */
         if (ret == 7) {
-            res = pcre_get_substring((char *)tagstr, ov, MAX_SUBSTRINGS, 6, &str_ptr);
+            res = pcre2_substring_get_bynumber(match, 6, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
             if (res < 0 || str_ptr == NULL) {
-                SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
+                SCLogError("pcre2_substring_get_bynumber failed");
                 goto error;
             }
 
@@ -245,31 +251,41 @@ static DetectTagData *DetectTagParse(const char *tagstr)
             } else if (strcasecmp("dst", str_ptr) == 0) {
                 td.direction = DETECT_TAG_DIR_DST;
             } else {
-                SCLogError(SC_ERR_INVALID_VALUE, "Invalid argument direction. Must be one of \"src\" or \"dst\" (only valid for tag host type, not sessions) (%s)", tagstr);
+                SCLogError(
+                        "Invalid argument direction. Must be one of \"src\" or \"dst\" (only valid "
+                        "for tag host type, not sessions) (%s)",
+                        tagstr);
                 goto error;
             }
 
             if (td.type != DETECT_TAG_TYPE_HOST) {
-                SCLogWarning(SC_ERR_INVALID_VALUE, "Argument direction doesn't make sense for type \"session\" (%s [%"PRIu8"])", tagstr, td.type);
+                SCLogWarning(
+                        "Argument direction doesn't make sense for type \"session\" (%s [%" PRIu8
+                        "])",
+                        tagstr, td.type);
             }
 
-            pcre_free_substring(str_ptr);
+            pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
             str_ptr = NULL;
         }
     }
 
     DetectTagData *real_td = SCMalloc(sizeof(DetectTagData));
     if (unlikely(real_td == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Error allocating memory");
+        SCLogError("Error allocating memory");
         goto error;
     }
 
     memcpy(real_td, &td, sizeof(DetectTagData));
+    pcre2_match_data_free(match);
     return real_td;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     if (str_ptr != NULL)
-        pcre_free_substring(str_ptr);
+        pcre2_substring_free((PCRE2_UCHAR *)str_ptr);
     return NULL;
 }
 
@@ -289,17 +305,12 @@ int DetectTagSetup(DetectEngineCtx *de_ctx, Signature *s, const char *tagstr)
     if (td == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    /* Append it to the list of tags */
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TAG, (SigMatchCtx *)td, DETECT_SM_LIST_TMATCH) ==
+            NULL) {
         DetectTagDataFree(de_ctx, td);
         return -1;
     }
-
-    sm->type = DETECT_TAG;
-    sm->ctx = (SigMatchCtx *)td;
-
-    /* Append it to the list of tags */
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_TMATCH);
     return 0;
 }
 

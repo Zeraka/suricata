@@ -21,25 +21,26 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_FLOWVAR_H__
-#define __DETECT_FLOWVAR_H__
+#ifndef SURICATA_DETECT_FLOWVAR_H
+#define SURICATA_DETECT_FLOWVAR_H
 
 typedef struct DetectFlowvarData_ {
     char *name;
     uint32_t idx;
     uint8_t *content;
-    uint8_t content_len;
-    uint8_t flags;
+    uint16_t content_len;
+    /** set to true if used in a post-match */
+    bool post_match;
+    uint32_t flags;
 } DetectFlowvarData;
 
 /* prototypes */
 void DetectFlowvarRegister (void);
 
 int DetectFlowvarPostMatchSetup(DetectEngineCtx *de_ctx, Signature *s, uint32_t idx);
-int DetectVarStoreMatch(DetectEngineThreadCtx *,
-        uint32_t, uint8_t *, uint16_t, int);
-int DetectVarStoreMatchKeyValue(DetectEngineThreadCtx *,
-        uint8_t *, uint16_t, uint8_t *, uint16_t, int);
+int DetectVarStoreMatch(DetectEngineThreadCtx *, uint32_t, uint8_t *, uint16_t, uint16_t);
+int DetectVarStoreMatchKeyValue(
+        DetectEngineThreadCtx *, uint8_t *, uint16_t, uint8_t *, uint16_t, uint16_t);
 
 /* For use only by DetectFlowvarProcessList() */
 void DetectVarProcessListInternal(DetectVarList *fs, Flow *f, Packet *p);
@@ -54,4 +55,4 @@ static inline void DetectVarProcessList(DetectEngineThreadCtx *det_ctx, Flow *f,
     }
 }
 
-#endif /* __DETECT_FLOWVAR_H__ */
+#endif /* SURICATA_DETECT_FLOWVAR_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2013-2020 Open Information Security Foundation
+/* Copyright (C) 2013-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,61 +25,48 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
+#include "packet.h"
 #include "detect.h"
 #include "flow.h"
 #include "conf.h"
 
-#include "threads.h"
-#include "tm-threads.h"
+#include "stream.h"
 #include "threadvars.h"
 #include "util-debug.h"
+#include "stream-tcp.h"
 
 #include "util-logopenfile.h"
 #include "util-misc.h"
-#include "util-unittest.h"
-#include "util-unittest-helper.h"
+#include "util-time.h"
 
-#include "detect-parse.h"
 #include "detect-engine.h"
-#include "detect-engine-mpm.h"
-#include "detect-reference.h"
 #include "detect-metadata.h"
 #include "app-layer-parser.h"
-#include "app-layer-dnp3.h"
-#include "app-layer-htp.h"
 #include "app-layer-htp-xff.h"
 #include "app-layer-ftp.h"
-#include "util-classification-config.h"
-#include "util-syslog.h"
-#include "util-logopenfile.h"
+#include "app-layer-frames.h"
+#include "log-pcap.h"
 
 #include "output.h"
 #include "output-json.h"
 #include "output-json-alert.h"
-#include "output-json-dnp3.h"
-#include "output-json-dns.h"
 #include "output-json-http.h"
-#include "output-json-tls.h"
-#include "output-json-ssh.h"
 #include "rust.h"
 #include "output-json-smtp.h"
 #include "output-json-email-common.h"
 #include "output-json-nfs.h"
 #include "output-json-smb.h"
 #include "output-json-flow.h"
-#include "output-json-sip.h"
-#include "output-json-rfb.h"
-#include "output-json-mqtt.h"
+#include "output-json-ike.h"
+#include "output-json-frame.h"
 
-#include "util-byte.h"
-#include "util-privs.h"
 #include "util-print.h"
-#include "util-proto-name.h"
 #include "util-optimize.h"
 #include "util-buffer.h"
-#include "util-crypt.h"
+#include "util-reference-config.h"
 #include "util-validate.h"
+
+#include "action-globals.h"
 
 #define MODULE_NAME "JsonAlertLog"
 
@@ -93,12 +80,19 @@
 #define LOG_JSON_HTTP_BODY_BASE64  BIT_U16(7)
 #define LOG_JSON_RULE_METADATA     BIT_U16(8)
 #define LOG_JSON_RULE              BIT_U16(9)
+#define LOG_JSON_VERDICT           BIT_U16(10)
+#define LOG_JSON_WEBSOCKET_PAYLOAD        BIT_U16(11)
+#define LOG_JSON_WEBSOCKET_PAYLOAD_BASE64 BIT_U16(12)
+#define LOG_JSON_PAYLOAD_LENGTH           BIT_U16(13)
+#define LOG_JSON_REFERENCE                BIT_U16(14)
 
 #define METADATA_DEFAULTS ( LOG_JSON_FLOW |                        \
             LOG_JSON_APP_LAYER  |                                  \
             LOG_JSON_RULE_METADATA)
 
-#define JSON_BODY_LOGGING  (LOG_JSON_HTTP_BODY | LOG_JSON_HTTP_BODY_BASE64)
+#define JSON_BODY_LOGGING                                                                          \
+    (LOG_JSON_HTTP_BODY | LOG_JSON_HTTP_BODY_BASE64 | LOG_JSON_WEBSOCKET_PAYLOAD |                 \
+            LOG_JSON_WEBSOCKET_PAYLOAD_BASE64)
 
 #define JSON_STREAM_BUFFER_SIZE 4096
 
@@ -108,171 +102,21 @@ typedef struct AlertJsonOutputCtx_ {
     uint32_t payload_buffer_size;
     HttpXFFCfg *xff_cfg;
     HttpXFFCfg *parent_xff_cfg;
-    OutputJsonCommonSettings cfg;
+    OutputJsonCtx *eve_ctx;
 } AlertJsonOutputCtx;
 
 typedef struct JsonAlertLogThread_ {
-    /** LogFileCtx has the pointer to the file and a mutex to allow multithreading */
-    LogFileCtx* file_ctx;
-    MemBuffer *json_buffer;
     MemBuffer *payload_buffer;
     AlertJsonOutputCtx* json_output_ctx;
+    OutputJsonThreadCtx *ctx;
 } JsonAlertLogThread;
 
-/* Callback function to pack payload contents from a stream into a buffer
- * so we can report them in JSON output. */
-static int AlertJsonDumpStreamSegmentCallback(const Packet *p, void *data, const uint8_t *buf, uint32_t buflen)
+static void AlertJsonSourceTarget(
+        const Packet *p, const PacketAlert *pa, SCJsonBuilder *js, JsonAddrInfo *addr)
 {
-    MemBuffer *payload = (MemBuffer *)data;
-    MemBufferWriteRaw(payload, buf, buflen);
-
-    return 1;
-}
-
-static void AlertJsonTls(const Flow *f, JsonBuilder *js)
-{
-    SSLState *ssl_state = (SSLState *)FlowGetAppState(f);
-    if (ssl_state) {
-        jb_open_object(js, "tls");
-
-        JsonTlsLogJSONBasic(js, ssl_state);
-        JsonTlsLogJSONExtended(js, ssl_state);
-
-        jb_close(js);
-    }
-
-    return;
-}
-
-static void AlertJsonSsh(const Flow *f, JsonBuilder *js)
-{
-    void *ssh_state = FlowGetAppState(f);
-    if (ssh_state) {
-        JsonBuilderMark mark = { 0, 0, 0 };
-        void *tx_ptr = rs_ssh_state_get_tx(ssh_state, 0);
-        jb_get_mark(js, &mark);
-        jb_open_object(js, "ssh");
-        if (rs_ssh_log_json(tx_ptr, js)) {
-            jb_close(js);
-        } else {
-            jb_restore_mark(js, &mark);
-        }
-    }
-
-    return;
-}
-
-static void AlertJsonHttp2(const Flow *f, const uint64_t tx_id, JsonBuilder *js)
-{
-    void *h2_state = FlowGetAppState(f);
-    if (h2_state) {
-        void *tx_ptr = rs_http2_state_get_tx(h2_state, tx_id);
-        JsonBuilderMark mark = { 0, 0, 0 };
-        jb_get_mark(js, &mark);
-        jb_open_object(js, "http");
-        if (rs_http2_log_json(tx_ptr, js)) {
-            jb_close(js);
-        } else {
-            jb_restore_mark(js, &mark);
-        }
-    }
-
-    return;
-}
-
-static void AlertJsonDnp3(const Flow *f, const uint64_t tx_id, JsonBuilder *js)
-{
-    DNP3State *dnp3_state = (DNP3State *)FlowGetAppState(f);
-    if (dnp3_state) {
-        DNP3Transaction *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_DNP3,
-            dnp3_state, tx_id);
-        if (tx) {
-            JsonBuilderMark mark = { 0, 0, 0 };
-            jb_get_mark(js, &mark);
-            bool logged = false;
-            jb_open_object(js, "dnp3");
-            if (tx->has_request && tx->request_done) {
-                jb_open_object(js, "request");
-                JsonDNP3LogRequest(js, tx);
-                jb_close(js);
-                logged = true;
-            }
-            if (tx->has_response && tx->response_done) {
-                jb_open_object(js, "response");
-                JsonDNP3LogResponse(js, tx);
-                jb_close(js);
-                logged = true;
-            }
-            if (logged) {
-                /* Close dnp3 object. */
-                jb_close(js);
-            } else {
-                jb_restore_mark(js, &mark);
-            }
-        }
-    }
-}
-
-static void AlertJsonDns(const Flow *f, const uint64_t tx_id, JsonBuilder *js)
-{
-    void *dns_state = (void *)FlowGetAppState(f);
-    if (dns_state) {
-        void *txptr = AppLayerParserGetTx(f->proto, ALPROTO_DNS,
-                                          dns_state, tx_id);
-        if (txptr) {
-            jb_open_object(js, "dns");
-            JsonBuilder *qjs = JsonDNSLogQuery(txptr, tx_id);
-            if (qjs != NULL) {
-                jb_set_object(js, "query", qjs);
-                jb_free(qjs);
-            }
-            JsonBuilder *ajs = JsonDNSLogAnswer(txptr, tx_id);
-            if (ajs != NULL) {
-                jb_set_object(js, "answer", ajs);
-                jb_free(ajs);
-            }
-            jb_close(js);
-        }
-    }
-    return;
-}
-
-static void AlertJsonSNMP(const Flow *f, const uint64_t tx_id, JsonBuilder *js)
-{
-    void *snmp_state = (void *)FlowGetAppState(f);
-    if (snmp_state != NULL) {
-        void *tx = AppLayerParserGetTx(f->proto, ALPROTO_SNMP, snmp_state,
-                tx_id);
-        if (tx != NULL) {
-            jb_open_object(js, "snmp");
-            rs_snmp_log_json_response(js, snmp_state, tx);
-            jb_close(js);
-        }
-    }
-}
-
-static void AlertJsonRDP(const Flow *f, const uint64_t tx_id, JsonBuilder *js)
-{
-    void *rdp_state = (void *)FlowGetAppState(f);
-    if (rdp_state != NULL) {
-        void *tx = AppLayerParserGetTx(f->proto, ALPROTO_RDP, rdp_state,
-                tx_id);
-        if (tx != NULL) {
-            JsonBuilderMark mark = { 0, 0, 0 };
-            jb_get_mark(js, &mark);
-            if (!rs_rdp_to_json(tx, js)) {
-                jb_restore_mark(js, &mark);
-            }
-        }
-    }
-}
-
-static void AlertJsonSourceTarget(const Packet *p, const PacketAlert *pa,
-                                  JsonBuilder *js, JsonAddrInfo *addr)
-{
-    jb_open_object(js, "source");
+    SCJbOpenObject(js, "source");
     if (pa->s->flags & SIG_FLAG_DEST_IS_TARGET) {
-        jb_set_string(js, "ip", addr->src_ip);
+        SCJbSetString(js, "ip", addr->src_ip);
         switch (p->proto) {
             case IPPROTO_ICMP:
             case IPPROTO_ICMPV6:
@@ -280,11 +124,11 @@ static void AlertJsonSourceTarget(const Packet *p, const PacketAlert *pa,
             case IPPROTO_UDP:
             case IPPROTO_TCP:
             case IPPROTO_SCTP:
-                jb_set_uint(js, "port", addr->sp);
+                SCJbSetUint(js, "port", addr->sp);
                 break;
         }
     } else if (pa->s->flags & SIG_FLAG_SRC_IS_TARGET) {
-        jb_set_string(js, "ip", addr->dst_ip);
+        SCJbSetString(js, "ip", addr->dst_ip);
         switch (p->proto) {
             case IPPROTO_ICMP:
             case IPPROTO_ICMPV6:
@@ -292,15 +136,15 @@ static void AlertJsonSourceTarget(const Packet *p, const PacketAlert *pa,
             case IPPROTO_UDP:
             case IPPROTO_TCP:
             case IPPROTO_SCTP:
-                jb_set_uint(js, "port", addr->dp);
+                SCJbSetUint(js, "port", addr->dp);
                 break;
         }
     }
-    jb_close(js);
+    SCJbClose(js);
 
-    jb_open_object(js, "target");
+    SCJbOpenObject(js, "target");
     if (pa->s->flags & SIG_FLAG_DEST_IS_TARGET) {
-        jb_set_string(js, "ip", addr->dst_ip);
+        SCJbSetString(js, "ip", addr->dst_ip);
         switch (p->proto) {
             case IPPROTO_ICMP:
             case IPPROTO_ICMPV6:
@@ -308,11 +152,11 @@ static void AlertJsonSourceTarget(const Packet *p, const PacketAlert *pa,
             case IPPROTO_UDP:
             case IPPROTO_TCP:
             case IPPROTO_SCTP:
-                jb_set_uint(js, "port", addr->dp);
+                SCJbSetUint(js, "port", addr->dp);
                 break;
         }
     } else if (pa->s->flags & SIG_FLAG_SRC_IS_TARGET) {
-        jb_set_string(js, "ip", addr->src_ip);
+        SCJbSetString(js, "ip", addr->src_ip);
         switch (p->proto) {
             case IPPROTO_ICMP:
             case IPPROTO_ICMPV6:
@@ -320,34 +164,52 @@ static void AlertJsonSourceTarget(const Packet *p, const PacketAlert *pa,
             case IPPROTO_UDP:
             case IPPROTO_TCP:
             case IPPROTO_SCTP:
-                jb_set_uint(js, "port", addr->sp);
+                SCJbSetUint(js, "port", addr->sp);
                 break;
         }
     }
-    jb_close(js);
+    SCJbClose(js);
 }
 
-static void AlertJsonMetadata(AlertJsonOutputCtx *json_output_ctx,
-        const PacketAlert *pa, JsonBuilder *js)
+static void AlertJsonReference(const PacketAlert *pa, SCJsonBuilder *jb)
+{
+    if (!pa->s->references) {
+        return;
+    }
+
+    const DetectReference *kv = pa->s->references;
+    SCJbOpenArray(jb, "references");
+    while (kv) {
+        /* Note that the key and reference sizes have been bound
+         * checked during parsing
+         */
+        const size_t size_needed = kv->key_len + kv->reference_len + 1;
+        char kv_store[size_needed];
+        snprintf(kv_store, size_needed, "%s%s", kv->key, kv->reference);
+        SCJbAppendString(jb, kv_store);
+        kv = kv->next;
+    }
+    SCJbClose(jb);
+}
+
+static void AlertJsonMetadata(const PacketAlert *pa, SCJsonBuilder *js)
 {
     if (pa->s->metadata && pa->s->metadata->json_str) {
-        jb_set_formatted(js, pa->s->metadata->json_str);
+        SCJbSetFormatted(js, pa->s->metadata->json_str);
     }
 }
 
-void AlertJsonHeader(void *ctx, const Packet *p, const PacketAlert *pa,
-        JsonBuilder *js, uint16_t flags, JsonAddrInfo *addr)
+void AlertJsonHeader(const Packet *p, const PacketAlert *pa, SCJsonBuilder *js, uint16_t flags,
+        JsonAddrInfo *addr, char *xff_buffer)
 {
-    AlertJsonOutputCtx *json_output_ctx = (AlertJsonOutputCtx *)ctx;
     const char *action = "allowed";
     /* use packet action if rate_filter modified the action */
-    if (unlikely(pa->flags & PACKET_ALERT_RATE_FILTER_MODIFIED)) {
-        if (PACKET_TEST_ACTION(p, (ACTION_DROP|ACTION_REJECT|
-                                   ACTION_REJECT_DST|ACTION_REJECT_BOTH))) {
+    if (unlikely(pa->flags & PACKET_ALERT_FLAG_RATE_FILTER_MODIFIED)) {
+        if (PacketCheckAction(p, ACTION_DROP_REJECT)) {
             action = "blocked";
         }
     } else {
-        if (pa->action & (ACTION_REJECT|ACTION_REJECT_DST|ACTION_REJECT_BOTH)) {
+        if (pa->action & ACTION_REJECT_ANY) {
             action = "blocked";
         } else if ((pa->action & ACTION_DROP) && EngineModeIsIPS()) {
             action = "blocked";
@@ -357,75 +219,98 @@ void AlertJsonHeader(void *ctx, const Packet *p, const PacketAlert *pa,
     /* Add tx_id to root element for correlation with other events. */
     /* json_object_del(js, "tx_id"); */
     if (pa->flags & PACKET_ALERT_FLAG_TX) {
-        jb_set_uint(js, "tx_id", pa->tx_id);
+        SCJbSetUint(js, "tx_id", pa->tx_id);
+    }
+    if (pa->flags & PACKET_ALERT_FLAG_TX_GUESSED) {
+        SCJbSetBool(js, "tx_guessed", true);
     }
 
-    jb_open_object(js, "alert");
+    SCJbOpenObject(js, "alert");
 
-    jb_set_string(js, "action", action);
-    jb_set_uint(js, "gid", pa->s->gid);
-    jb_set_uint(js, "signature_id", pa->s->id);
-    jb_set_uint(js, "rev", pa->s->rev);
-    /* TODO: JsonBuilder should handle unprintable characters like
+    SCJbSetString(js, "action", action);
+    SCJbSetUint(js, "gid", pa->s->gid);
+    SCJbSetUint(js, "signature_id", pa->s->id);
+    SCJbSetUint(js, "rev", pa->s->rev);
+    /* TODO: SCJsonBuilder should handle unprintable characters like
      * SCJsonString. */
-    jb_set_string(js, "signature", pa->s->msg ? pa->s->msg: "");
-    jb_set_string(js, "category", pa->s->class_msg ? pa->s->class_msg: "");
-    jb_set_uint(js, "severity", pa->s->prio);
+    SCJbSetString(js, "signature", pa->s->msg ? pa->s->msg : "");
+    SCJbSetString(js, "category", pa->s->class_msg ? pa->s->class_msg : "");
+    SCJbSetUint(js, "severity", pa->s->prio);
 
     if (p->tenant_id > 0) {
-        jb_set_uint(js, "tenant_id", p->tenant_id);
+        SCJbSetUint(js, "tenant_id", p->tenant_id);
     }
 
     if (addr && pa->s->flags & SIG_FLAG_HAS_TARGET) {
         AlertJsonSourceTarget(p, pa, js, addr);
     }
 
-    if ((json_output_ctx != NULL) && (flags & LOG_JSON_RULE_METADATA)) {
-        AlertJsonMetadata(json_output_ctx, pa, js);
+    if ((flags & LOG_JSON_REFERENCE)) {
+        AlertJsonReference(pa, js);
     }
 
+    if (flags & LOG_JSON_RULE_METADATA) {
+        AlertJsonMetadata(pa, js);
+    }
+
+    if (pa->json_info != NULL) {
+        SCJbOpenObject(js, "context");
+        const struct PacketContextData *json_info = pa->json_info;
+        while (json_info) {
+            SCLogDebug("JSON string '{%s}'", json_info->json_string);
+            /* The string is valid json as it is validated by JANSSON
+               during parsing and included later via a format string */
+            SCJbSetFormatted(js, json_info->json_string);
+            json_info = json_info->next;
+        }
+        SCJbClose(js);
+    }
     if (flags & LOG_JSON_RULE) {
-        jb_set_string(js, "rule", pa->s->sig_str);
+        SCJbSetString(js, "rule", pa->s->sig_str);
+    }
+    if (xff_buffer && xff_buffer[0]) {
+        SCJbSetString(js, "xff", xff_buffer);
     }
 
-    jb_close(js);
+    SCJbClose(js);
 }
 
-static void AlertJsonTunnel(const Packet *p, JsonBuilder *js)
+static void AlertJsonTunnel(const Packet *p, SCJsonBuilder *js)
 {
     if (p->root == NULL) {
         return;
     }
 
-    jb_open_object(js, "tunnel");
+    SCJbOpenObject(js, "tunnel");
 
-    /* get a lock to access root packet fields */
-    SCMutex *m = &p->root->tunnel_mutex;
-
+    enum PktSrcEnum pkt_src;
+    uint64_t pcap_cnt;
     JsonAddrInfo addr = json_addr_info_zero;
-    SCMutexLock(m);
     JsonAddrInfoInit(p->root, 0, &addr);
-    SCMutexUnlock(m);
+    pcap_cnt = p->root->pcap_cnt;
+    pkt_src = p->root->pkt_src;
 
-    jb_set_string(js, "src_ip", addr.src_ip);
-    jb_set_uint(js, "src_port", addr.sp);
-    jb_set_string(js, "dest_ip", addr.dst_ip);
-    jb_set_uint(js, "dest_port", addr.dp);
-    jb_set_string(js, "proto", addr.proto);
+    SCJbSetString(js, "src_ip", addr.src_ip);
+    SCJbSetUint(js, "src_port", addr.sp);
+    SCJbSetString(js, "dest_ip", addr.dst_ip);
+    SCJbSetUint(js, "dest_port", addr.dp);
+    SCJbSetString(js, "proto", addr.proto);
 
-    jb_set_uint(js, "depth", p->recursion_level);
-
-    jb_close(js);
+    SCJbSetUint(js, "depth", p->recursion_level);
+    if (pcap_cnt != 0) {
+        SCJbSetUint(js, "pcap_cnt", pcap_cnt);
+    }
+    SCJbSetString(js, "pkt_src", PktSrcToString(pkt_src));
+    SCJbClose(js);
 }
 
-static void AlertAddPayload(AlertJsonOutputCtx *json_output_ctx, JsonBuilder *js, const Packet *p)
+static void AlertAddPayload(AlertJsonOutputCtx *json_output_ctx, SCJsonBuilder *js, const Packet *p)
 {
     if (json_output_ctx->flags & LOG_JSON_PAYLOAD_BASE64) {
-        unsigned long len = p->payload_len * 2 + 1;
-        uint8_t encoded[len];
-        if (Base64Encode(p->payload, p->payload_len, encoded, &len) == SC_BASE64_OK) {
-            jb_set_string(js, "payload", (char *)encoded);
-        }
+        SCJbSetBase64(js, "payload", p->payload, p->payload_len);
+    }
+    if (json_output_ctx->flags & LOG_JSON_PAYLOAD_LENGTH) {
+        SCJbSetUint(js, "payload_length", p->payload_len);
     }
 
     if (json_output_ctx->flags & LOG_JSON_PAYLOAD) {
@@ -435,19 +320,69 @@ static void AlertAddPayload(AlertJsonOutputCtx *json_output_ctx, JsonBuilder *js
                 p->payload_len + 1,
                 p->payload, p->payload_len);
         printable_buf[p->payload_len] = '\0';
-        jb_set_string(js, "payload_printable", (char *)printable_buf);
+        SCJbSetString(js, "payload_printable", (char *)printable_buf);
     }
 }
 
-static void AlertAddAppLayer(const Packet *p, JsonBuilder *jb,
-        const uint64_t tx_id, const uint16_t option_flags)
+static void AlertAddAppLayer(
+        const Packet *p, SCJsonBuilder *jb, const uint64_t tx_id, const uint16_t option_flags)
 {
     const AppProto proto = FlowGetAppProtocol(p->flow);
-    JsonBuilderMark mark = { 0, 0, 0 };
+    EveJsonSimpleAppLayerLogger *al = SCEveJsonSimpleGetLogger(proto);
+    SCJsonBuilderMark mark = { 0, 0, 0 };
+    if (al && al->LogTx) {
+        void *state = FlowGetAppState(p->flow);
+        if (state) {
+            void *tx = AppLayerParserGetTx(p->flow->proto, proto, state, tx_id);
+            if (tx) {
+                const int ts =
+                        AppLayerParserGetStateProgress(p->flow->proto, proto, tx, STREAM_TOSERVER);
+                const int tc =
+                        AppLayerParserGetStateProgress(p->flow->proto, proto, tx, STREAM_TOCLIENT);
+                SCJbSetString(jb, "ts_progress",
+                        AppLayerParserGetStateNameById(p->flow->proto, proto, ts, STREAM_TOSERVER));
+                SCJbSetString(jb, "tc_progress",
+                        AppLayerParserGetStateNameById(p->flow->proto, proto, tc, STREAM_TOCLIENT));
+                SCJbGetMark(jb, &mark);
+                switch (proto) {
+                    // first check some protocols need special options for alerts logging
+                    case ALPROTO_WEBSOCKET:
+                        if (option_flags &
+                                (LOG_JSON_WEBSOCKET_PAYLOAD | LOG_JSON_WEBSOCKET_PAYLOAD_BASE64)) {
+                            bool pp = (option_flags & LOG_JSON_WEBSOCKET_PAYLOAD) != 0;
+                            bool pb64 = (option_flags & LOG_JSON_WEBSOCKET_PAYLOAD_BASE64) != 0;
+                            if (!SCWebSocketLogDetails(tx, jb, pp, pb64)) {
+                                SCJbRestoreMark(jb, &mark);
+                            }
+                            // nothing more to log or do
+                            return;
+                        }
+                }
+                if (!al->LogTx(tx, jb)) {
+                    SCJbRestoreMark(jb, &mark);
+                }
+            }
+        }
+        return;
+    }
+    void *state = FlowGetAppState(p->flow);
+    if (state) {
+        void *tx = AppLayerParserGetTx(p->flow->proto, proto, state, tx_id);
+        if (tx) {
+            const int ts =
+                    AppLayerParserGetStateProgress(p->flow->proto, proto, tx, STREAM_TOSERVER);
+            const int tc =
+                    AppLayerParserGetStateProgress(p->flow->proto, proto, tx, STREAM_TOCLIENT);
+            SCJbSetString(jb, "ts_progress",
+                    AppLayerParserGetStateNameById(p->flow->proto, proto, ts, STREAM_TOSERVER));
+            SCJbSetString(jb, "tc_progress",
+                    AppLayerParserGetStateNameById(p->flow->proto, proto, tc, STREAM_TOCLIENT));
+        }
+    }
     switch (proto) {
-        case ALPROTO_HTTP:
+        case ALPROTO_HTTP1:
             // TODO: Could result in an empty http object being logged.
-            jb_open_object(jb, "http");
+            SCJbOpenObject(jb, "http");
             if (EveHttpAddMetadata(p->flow, tx_id, jb)) {
                 if (option_flags & LOG_JSON_HTTP_BODY) {
                     EveHttpLogJSONBodyPrintable(jb, p->flow, tx_id);
@@ -456,123 +391,265 @@ static void AlertAddAppLayer(const Packet *p, JsonBuilder *jb,
                     EveHttpLogJSONBodyBase64(jb, p->flow, tx_id);
                 }
             }
-            jb_close(jb);
-            break;
-        case ALPROTO_TLS:
-            AlertJsonTls(p->flow, jb);
-            break;
-        case ALPROTO_SSH:
-            AlertJsonSsh(p->flow, jb);
+            SCJbClose(jb);
             break;
         case ALPROTO_SMTP:
-            jb_get_mark(jb, &mark);
-            jb_open_object(jb, "smtp");
+            SCJbGetMark(jb, &mark);
+            SCJbOpenObject(jb, "smtp");
             if (EveSMTPAddMetadata(p->flow, tx_id, jb)) {
-                jb_close(jb);
+                SCJbClose(jb);
             } else {
-                jb_restore_mark(jb, &mark);
+                SCJbRestoreMark(jb, &mark);
             }
-            jb_get_mark(jb, &mark);
-            jb_open_object(jb, "email");
+            SCJbGetMark(jb, &mark);
+            SCJbOpenObject(jb, "email");
             if (EveEmailAddMetadata(p->flow, tx_id, jb)) {
-                jb_close(jb);
+                SCJbClose(jb);
             } else {
-                jb_restore_mark(jb, &mark);
+                SCJbRestoreMark(jb, &mark);
             }
             break;
         case ALPROTO_NFS:
             /* rpc */
-            jb_get_mark(jb, &mark);
-            jb_open_object(jb, "rpc");
+            SCJbGetMark(jb, &mark);
+            SCJbOpenObject(jb, "rpc");
             if (EveNFSAddMetadataRPC(p->flow, tx_id, jb)) {
-                jb_close(jb);
+                SCJbClose(jb);
             } else {
-                jb_restore_mark(jb, &mark);
+                SCJbRestoreMark(jb, &mark);
             }
             /* nfs */
-            jb_get_mark(jb, &mark);
-            jb_open_object(jb, "nfs");
+            SCJbGetMark(jb, &mark);
+            SCJbOpenObject(jb, "nfs");
             if (EveNFSAddMetadata(p->flow, tx_id, jb)) {
-                jb_close(jb);
+                SCJbClose(jb);
             } else {
-                jb_restore_mark(jb, &mark);
+                SCJbRestoreMark(jb, &mark);
             }
             break;
         case ALPROTO_SMB:
-            jb_get_mark(jb, &mark);
-            jb_open_object(jb, "smb");
+            SCJbGetMark(jb, &mark);
+            SCJbOpenObject(jb, "smb");
             if (EveSMBAddMetadata(p->flow, tx_id, jb)) {
-                jb_close(jb);
+                SCJbClose(jb);
             } else {
-                jb_restore_mark(jb, &mark);
+                SCJbRestoreMark(jb, &mark);
             }
             break;
-        case ALPROTO_SIP:
-            JsonSIPAddMetadata(jb, p->flow, tx_id);
-            break;
-        case ALPROTO_RFB:
-            jb_get_mark(jb, &mark);
-            if (!JsonRFBAddMetadata(p->flow, tx_id, jb)) {
-                jb_restore_mark(jb, &mark);
+        case ALPROTO_IKE:
+            SCJbGetMark(jb, &mark);
+            if (!EveIKEAddMetadata(p->flow, tx_id, jb)) {
+                SCJbRestoreMark(jb, &mark);
             }
             break;
-        case ALPROTO_FTPDATA:
-            EveFTPDataAddMetadata(p->flow, jb);
-            break;
-        case ALPROTO_DNP3:
-            AlertJsonDnp3(p->flow, tx_id, jb);
-            break;
-        case ALPROTO_HTTP2:
-            AlertJsonHttp2(p->flow, tx_id, jb);
-            break;
-        case ALPROTO_DNS:
-            AlertJsonDns(p->flow, tx_id, jb);
-            break;
-        case ALPROTO_MQTT:
-            jb_get_mark(jb, &mark);
-            if (!JsonMQTTAddMetadata(p->flow, tx_id, jb)) {
-                jb_restore_mark(jb, &mark);
+        case ALPROTO_DCERPC: {
+            if (state) {
+                void *tx = AppLayerParserGetTx(p->flow->proto, proto, state, tx_id);
+                if (tx) {
+                    SCJbGetMark(jb, &mark);
+                    SCJbOpenObject(jb, "dcerpc");
+                    if (p->proto == IPPROTO_TCP) {
+                        if (!SCDcerpcLogJsonRecordTcp(state, tx, jb)) {
+                            SCJbRestoreMark(jb, &mark);
+                        }
+                    } else {
+                        if (!SCDcerpcLogJsonRecordUdp(state, tx, jb)) {
+                            SCJbRestoreMark(jb, &mark);
+                        }
+                    }
+                    SCJbClose(jb);
+                }
             }
             break;
-        case ALPROTO_SNMP:
-            AlertJsonSNMP(p->flow, tx_id, jb);
-            break;
-        case ALPROTO_RDP:
-            AlertJsonRDP(p->flow, tx_id, jb);
-            break;
+        }
         default:
             break;
     }
 }
 
-static void AlertAddFiles(const Packet *p, JsonBuilder *jb, const uint64_t tx_id)
+static void AlertAddFiles(const Packet *p, SCJsonBuilder *jb, const uint64_t tx_id)
 {
-    FileContainer *ffc = AppLayerParserGetFiles(p->flow,
-            p->flowflags & FLOW_PKT_TOSERVER ? STREAM_TOSERVER:STREAM_TOCLIENT);
+    const uint8_t direction =
+            (p->flowflags & FLOW_PKT_TOSERVER) ? STREAM_TOSERVER : STREAM_TOCLIENT;
+    FileContainer *ffc = NULL;
+    if (p->flow->alstate != NULL) {
+        void *tx = AppLayerParserGetTx(p->flow->proto, p->flow->alproto, p->flow->alstate, tx_id);
+        if (tx) {
+            AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, direction);
+            ffc = files.fc;
+        }
+    }
     if (ffc != NULL) {
         File *file = ffc->head;
         bool isopen = false;
         while (file) {
-            if (tx_id == file->txid) {
-                if (!isopen) {
-                    isopen = true;
-                    jb_open_array(jb, "fileinfo");
-                }
-                jb_start_object(jb);
-                EveFileInfo(jb, file, file->flags & FILE_STORED);
-                jb_close(jb);
+            if (!isopen) {
+                isopen = true;
+                SCJbOpenArray(jb, "files");
             }
+            SCJbStartObject(jb);
+            EveFileInfo(jb, file, tx_id, file->flags);
+            SCJbClose(jb);
             file = file->next;
         }
         if (isopen) {
-            jb_close(jb);
+            SCJbClose(jb);
         }
     }
 }
 
+static void AlertAddFrame(
+        const Packet *p, const int64_t frame_id, SCJsonBuilder *jb, MemBuffer *buffer)
+{
+    if (p->flow == NULL || (p->proto == IPPROTO_TCP && p->flow->protoctx == NULL))
+        return;
+
+    FramesContainer *frames_container = AppLayerFramesGetContainer(p->flow);
+    if (frames_container == NULL)
+        return;
+
+    Frames *frames = NULL;
+    TcpStream *stream = NULL;
+    if (p->proto == IPPROTO_TCP) {
+        TcpSession *ssn = p->flow->protoctx;
+        if (PKT_IS_TOSERVER(p)) {
+            stream = &ssn->client;
+            frames = &frames_container->toserver;
+        } else {
+            stream = &ssn->server;
+            frames = &frames_container->toclient;
+        }
+        Frame *frame = FrameGetById(frames, frame_id);
+        if (frame != NULL) {
+            FrameJsonLogOneFrame(IPPROTO_TCP, frame, p->flow, stream, p, jb, buffer);
+        }
+    } else if (p->proto == IPPROTO_UDP) {
+        if (PKT_IS_TOSERVER(p)) {
+            frames = &frames_container->toserver;
+        } else {
+            frames = &frames_container->toclient;
+        }
+        Frame *frame = FrameGetById(frames, frame_id);
+        if (frame != NULL) {
+            FrameJsonLogOneFrame(IPPROTO_UDP, frame, p->flow, NULL, p, jb, buffer);
+        }
+    }
+}
+
+/**
+ * \brief    Build verdict object
+ *
+ * \param p  Pointer to Packet current being logged
+ *
+ */
+void EveAddVerdict(SCJsonBuilder *jb, const Packet *p)
+{
+    SCJbOpenObject(jb, "verdict");
+
+    /* add verdict info */
+    if (PacketCheckAction(p, ACTION_REJECT_ANY)) {
+        // check rule to define type of reject packet sent
+        if (EngineModeIsIPS()) {
+            JB_SET_STRING(jb, "action", "drop");
+        } else {
+            JB_SET_STRING(jb, "action", "alert");
+        }
+        if (PacketCheckAction(p, ACTION_REJECT)) {
+            JB_SET_STRING(jb, "reject-target", "to_client");
+        } else if (PacketCheckAction(p, ACTION_REJECT_DST)) {
+            JB_SET_STRING(jb, "reject-target", "to_server");
+        } else if (PacketCheckAction(p, ACTION_REJECT_BOTH)) {
+            JB_SET_STRING(jb, "reject-target", "both");
+        }
+        SCJbOpenArray(jb, "reject");
+        switch (p->proto) {
+            case IPPROTO_UDP:
+            case IPPROTO_ICMP:
+            case IPPROTO_ICMPV6:
+                SCJbAppendString(jb, "icmp-prohib");
+                break;
+            case IPPROTO_TCP:
+                SCJbAppendString(jb, "tcp-reset");
+                break;
+        }
+        SCJbClose(jb);
+
+    } else if (PacketCheckAction(p, ACTION_DROP) && EngineModeIsIPS()) {
+        JB_SET_STRING(jb, "action", "drop");
+    } else if (PacketCheckAction(p, ACTION_ACCEPT)) {
+        JB_SET_STRING(jb, "action", "accept");
+    } else if (p->alerts.alerts[p->alerts.cnt].action & ACTION_PASS) {
+        JB_SET_STRING(jb, "action", "pass");
+    } else {
+        // TODO make sure we don't have a situation where this wouldn't work
+        JB_SET_STRING(jb, "action", "alert");
+    }
+
+    /* Close verdict */
+    SCJbClose(jb);
+}
+
+struct AlertJsonStreamDataCallbackData {
+    MemBuffer *payload;
+    uint64_t last_re;
+};
+
+static int AlertJsonStreamDataCallback(
+        void *cb_data, const uint8_t *input, const uint32_t input_len, const uint64_t input_offset)
+{
+    struct AlertJsonStreamDataCallbackData *cbd = cb_data;
+    if (input_offset > cbd->last_re) {
+        MemBufferWriteString(
+                cbd->payload, "[%" PRIu64 " bytes missing]", input_offset - cbd->last_re);
+    }
+
+    int done = 0;
+    uint32_t written = MemBufferWriteRaw(cbd->payload, input, input_len);
+    if (written < input_len)
+        done = 1;
+    cbd->last_re = input_offset + input_len;
+    return done;
+}
+
+/** \internal
+ *  \brief try to log stream data into payload/payload_printable
+ *  \retval true stream data logged
+ *  \retval false stream data not logged
+ */
+static bool AlertJsonStreamData(const AlertJsonOutputCtx *json_output_ctx, JsonAlertLogThread *aft,
+        Flow *f, const Packet *p, SCJsonBuilder *jb)
+{
+    TcpSession *ssn = f->protoctx;
+    TcpStream *stream = (PKT_IS_TOSERVER(p)) ? &ssn->client : &ssn->server;
+
+    MemBufferReset(aft->payload_buffer);
+    struct AlertJsonStreamDataCallbackData cbd = { .payload = aft->payload_buffer,
+        .last_re = STREAM_BASE_OFFSET(stream) };
+    uint64_t unused = 0;
+    StreamReassembleLog(ssn, stream, AlertJsonStreamDataCallback, &cbd, STREAM_BASE_OFFSET(stream),
+            &unused, false);
+    if (cbd.payload->offset) {
+        if (json_output_ctx->flags & LOG_JSON_PAYLOAD_BASE64) {
+            SCJbSetBase64(jb, "payload", cbd.payload->buffer, cbd.payload->offset);
+        }
+        if (json_output_ctx->flags & LOG_JSON_PAYLOAD_LENGTH) {
+            SCJbSetUint(jb, "payload_length", cbd.payload->offset);
+        }
+
+        if (json_output_ctx->flags & LOG_JSON_PAYLOAD) {
+            uint8_t printable_buf[cbd.payload->offset + 1];
+            uint32_t offset = 0;
+            PrintStringsToBuffer(printable_buf, &offset, cbd.payload->offset + 1,
+                    cbd.payload->buffer, cbd.payload->offset);
+            SCJbSetString(jb, "payload_printable", (char *)printable_buf);
+        }
+        return true;
+    }
+    return false;
+}
+
 static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
 {
-    MemBuffer *payload = aft->payload_buffer;
     AlertJsonOutputCtx *json_output_ctx = aft->json_output_ctx;
 
     if (p->alerts.cnt == 0 && !(p->flags & PKT_HAS_TAG))
@@ -589,12 +666,13 @@ static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
         JsonAddrInfoInit(p, LOG_DIR_PACKET, &addr);
 
         /* Check for XFF, overwriting address info if needed. */
-        HttpXFFCfg *xff_cfg = json_output_ctx->xff_cfg != NULL ?
-            json_output_ctx->xff_cfg : json_output_ctx->parent_xff_cfg;;
+        HttpXFFCfg *xff_cfg = json_output_ctx->xff_cfg != NULL ? json_output_ctx->xff_cfg
+                                                               : json_output_ctx->parent_xff_cfg;
         int have_xff_ip = 0;
         char xff_buffer[XFF_MAXLEN];
+        xff_buffer[0] = 0;
         if ((xff_cfg != NULL) && !(xff_cfg->flags & XFF_DISABLED) && p->flow != NULL) {
-            if (FlowGetAppProtocol(p->flow) == ALPROTO_HTTP) {
+            if (FlowGetAppProtocol(p->flow) == ALPROTO_HTTP1) {
                 if (pa->flags & PACKET_ALERT_FLAG_TX) {
                     have_xff_ip = HttpXFFGetIPFromTx(p->flow, pa->tx_id, xff_cfg,
                             xff_buffer, XFF_MAXLEN);
@@ -614,78 +692,80 @@ static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
                  * logged below. */
                 have_xff_ip = false;
             }
+            if (have_xff_ip && !(xff_cfg->flags & XFF_EXTRADATA)) {
+                // reset xff_buffer so as not to log it
+                xff_buffer[0] = 0;
+            }
         }
 
-        JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_PACKET, "alert", &addr);
+        SCJsonBuilder *jb =
+                CreateEveHeader(p, LOG_DIR_PACKET, "alert", &addr, json_output_ctx->eve_ctx);
         if (unlikely(jb == NULL))
             return TM_ECODE_OK;
-        EveAddCommonOptions(&json_output_ctx->cfg, p, p->flow, jb);
 
-        MemBufferReset(aft->json_buffer);
 
         /* alert */
-        AlertJsonHeader(json_output_ctx, p, pa, jb, json_output_ctx->flags,
-                &addr);
+        AlertJsonHeader(p, pa, jb, json_output_ctx->flags, &addr, xff_buffer);
 
-        if (IS_TUNNEL_PKT(p)) {
+        if (PacketIsTunnel(p)) {
             AlertJsonTunnel(p, jb);
         }
 
         if (p->flow != NULL) {
-            if (json_output_ctx->flags & LOG_JSON_APP_LAYER) {
-                AlertAddAppLayer(p, jb, pa->tx_id, json_output_ctx->flags);
-            }
-            /* including fileinfo data is configured by the metadata setting */
-            if (json_output_ctx->flags & LOG_JSON_RULE_METADATA) {
-                AlertAddFiles(p, jb, pa->tx_id);
+            if (pa->flags & PACKET_ALERT_FLAG_TX) {
+                if (json_output_ctx->flags & LOG_JSON_APP_LAYER) {
+                    AlertAddAppLayer(p, jb, pa->tx_id, json_output_ctx->flags);
+                }
+                /* including fileinfo data is configured by the metadata setting */
+                if (json_output_ctx->flags & LOG_JSON_RULE_METADATA) {
+                    AlertAddFiles(p, jb, pa->tx_id);
+                }
             }
 
             EveAddAppProto(p->flow, jb);
+
+            if (p->flowflags & FLOW_PKT_TOSERVER) {
+                SCJbSetString(jb, "direction", "to_server");
+            } else {
+                SCJbSetString(jb, "direction", "to_client");
+            }
+
             if (json_output_ctx->flags & LOG_JSON_FLOW) {
-                jb_open_object(jb, "flow");
+                SCJbOpenObject(jb, "flow");
                 EveAddFlow(p->flow, jb);
-                jb_close(jb);
+                if (p->flowflags & FLOW_PKT_TOCLIENT) {
+                    SCJbSetString(jb, "src_ip", addr.dst_ip);
+                    SCJbSetString(jb, "dest_ip", addr.src_ip);
+                    if (addr.sp > 0) {
+                        SCJbSetUint(jb, "src_port", addr.dp);
+                        SCJbSetUint(jb, "dest_port", addr.sp);
+                    }
+                } else {
+                    SCJbSetString(jb, "src_ip", addr.src_ip);
+                    SCJbSetString(jb, "dest_ip", addr.dst_ip);
+                    if (addr.sp > 0) {
+                        SCJbSetUint(jb, "src_port", addr.sp);
+                        SCJbSetUint(jb, "dest_port", addr.dp);
+                    }
+                }
+                SCJbClose(jb);
             }
         }
 
         /* payload */
-        if (json_output_ctx->flags & (LOG_JSON_PAYLOAD | LOG_JSON_PAYLOAD_BASE64)) {
+        if (json_output_ctx->flags &
+                (LOG_JSON_PAYLOAD | LOG_JSON_PAYLOAD_BASE64 | LOG_JSON_PAYLOAD_LENGTH)) {
             int stream = (p->proto == IPPROTO_TCP) ?
                          (pa->flags & (PACKET_ALERT_FLAG_STATE_MATCH | PACKET_ALERT_FLAG_STREAM_MATCH) ?
                          1 : 0) : 0;
+            // should be impossible, as stream implies flow
+            DEBUG_VALIDATE_BUG_ON(stream && p->flow == NULL);
 
             /* Is this a stream?  If so, pack part of it into the payload field */
-            if (stream) {
-                uint8_t flag;
-
-                MemBufferReset(payload);
-
-                if (p->flowflags & FLOW_PKT_TOSERVER) {
-                    flag = FLOW_PKT_TOCLIENT;
-                } else {
-                    flag = FLOW_PKT_TOSERVER;
-                }
-
-                StreamSegmentForEach((const Packet *)p, flag,
-                                    AlertJsonDumpStreamSegmentCallback,
-                                    (void *)payload);
-                if (payload->offset) {
-                    if (json_output_ctx->flags & LOG_JSON_PAYLOAD_BASE64) {
-                        unsigned long len = json_output_ctx->payload_buffer_size * 2;
-                        uint8_t encoded[len];
-                        Base64Encode(payload->buffer, payload->offset, encoded, &len);
-                        jb_set_string(jb, "payload", (char *)encoded);
-                    }
-
-                    if (json_output_ctx->flags & LOG_JSON_PAYLOAD) {
-                        uint8_t printable_buf[payload->offset + 1];
-                        uint32_t offset = 0;
-                        PrintStringsToBuffer(printable_buf, &offset,
-                                sizeof(printable_buf),
-                                payload->buffer, payload->offset);
-                        jb_set_string(jb, "payload_printable", (char *)printable_buf);
-                    }
-                } else if (p->payload_len) {
+            if (stream && p->flow != NULL) {
+                const bool stream_data_logged =
+                        AlertJsonStreamData(json_output_ctx, aft, p->flow, p, jb);
+                if (!stream_data_logged && p->payload_len) {
                     /* Fallback on packet payload */
                     AlertAddPayload(json_output_ctx, jb, p);
                 }
@@ -694,7 +774,11 @@ static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
                 AlertAddPayload(json_output_ctx, jb, p);
             }
 
-            jb_set_uint(jb, "stream", stream);
+            SCJbSetUint(jb, "stream", stream);
+        }
+
+        if (pa->flags & PACKET_ALERT_FLAG_FRAME) {
+            AlertAddFrame(p, pa->frame_id, jb, aft->payload_buffer);
         }
 
         /* base64-encoded full packet */
@@ -702,22 +786,27 @@ static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
             EvePacket(p, jb, 0);
         }
 
-        if (have_xff_ip && xff_cfg->flags & XFF_EXTRADATA) {
-            jb_set_string(jb, "xff", xff_buffer);
+        char *pcap_filename = PcapLogGetFilename();
+        if (pcap_filename != NULL) {
+            SCJbSetString(jb, "capture_file", pcap_filename);
         }
 
-        OutputJsonBuilderBuffer(jb, aft->file_ctx, &aft->json_buffer);
-        jb_free(jb);
+        if (json_output_ctx->flags & LOG_JSON_VERDICT) {
+            EveAddVerdict(jb, p);
+        }
+
+        OutputJsonBuilderBuffer(tv, p, p->flow, jb, aft->ctx);
+        SCJbFree(jb);
     }
 
     if ((p->flags & PKT_HAS_TAG) && (json_output_ctx->flags &
             LOG_JSON_TAGGED_PACKETS)) {
-        MemBufferReset(aft->json_buffer);
-        JsonBuilder *packetjs = CreateEveHeader(p, LOG_DIR_PACKET, "packet", NULL);
+        SCJsonBuilder *packetjs =
+                CreateEveHeader(p, LOG_DIR_PACKET, "packet", NULL, json_output_ctx->eve_ctx);
         if (unlikely(packetjs != NULL)) {
             EvePacket(p, packetjs, 0);
-            OutputJsonBuilderBuffer(packetjs, aft->file_ctx, &aft->json_buffer);
-            jb_free(packetjs);
+            OutputJsonBuilderBuffer(tv, p, p->flow, packetjs, aft->ctx);
+            SCJbFree(packetjs);
         }
     }
 
@@ -727,43 +816,61 @@ static int AlertJson(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
 static int AlertJsonDecoderEvent(ThreadVars *tv, JsonAlertLogThread *aft, const Packet *p)
 {
     AlertJsonOutputCtx *json_output_ctx = aft->json_output_ctx;
-    char timebuf[64];
 
     if (p->alerts.cnt == 0)
         return TM_ECODE_OK;
 
-    CreateIsoTimeString(&p->ts, timebuf, sizeof(timebuf));
-
     for (int i = 0; i < p->alerts.cnt; i++) {
-        MemBufferReset(aft->json_buffer);
-
         const PacketAlert *pa = &p->alerts.alerts[i];
         if (unlikely(pa->s == NULL)) {
             continue;
         }
 
-        JsonBuilder *jb = jb_new_object();
-        if (unlikely(jb == NULL)) {
+        SCJsonBuilder *jb =
+                CreateEveHeader(p, LOG_DIR_PACKET, "alert", NULL, json_output_ctx->eve_ctx);
+        if (unlikely(jb == NULL))
             return TM_ECODE_OK;
+
+        AlertJsonHeader(p, pa, jb, json_output_ctx->flags, NULL, NULL);
+
+        if (PacketIsTunnel(p)) {
+            AlertJsonTunnel(p, jb);
         }
 
-        /* just the timestamp, no tuple */
-        jb_set_string(jb, "timestamp", timebuf);
+        /* base64-encoded full packet */
+        if (json_output_ctx->flags & LOG_JSON_PACKET) {
+            EvePacket(p, jb, 0);
+        }
 
-        AlertJsonHeader(json_output_ctx, p, pa, jb, json_output_ctx->flags, NULL);
+        char *pcap_filename = PcapLogGetFilename();
+        if (pcap_filename != NULL) {
+            SCJbSetString(jb, "capture_file", pcap_filename);
+        }
 
-        OutputJsonBuilderBuffer(jb, aft->file_ctx, &aft->json_buffer);
-        jb_free(jb);
+        if (json_output_ctx->flags & LOG_JSON_VERDICT) {
+            EveAddVerdict(jb, p);
+        }
+
+        OutputJsonBuilderBuffer(tv, p, p->flow, jb, aft->ctx);
+        SCJbFree(jb);
     }
 
     return TM_ECODE_OK;
+}
+
+static int JsonAlertFlush(ThreadVars *tv, void *thread_data, const Packet *p)
+{
+    JsonAlertLogThread *aft = thread_data;
+    SCLogDebug("%s flushing %s", tv->name, ((LogFileCtx *)(aft->ctx->file_ctx))->filename);
+    OutputJsonFlush(aft->ctx);
+    return 0;
 }
 
 static int JsonAlertLogger(ThreadVars *tv, void *thread_data, const Packet *p)
 {
     JsonAlertLogThread *aft = thread_data;
 
-    if (PKT_IS_IPV4(p) || PKT_IS_IPV6(p)) {
+    if (PacketIsIPv4(p) || PacketIsIPv6(p)) {
         return AlertJson(tv, aft, p);
     } else if (p->alerts.cnt > 0) {
         return AlertJsonDecoderEvent(tv, aft, p);
@@ -771,12 +878,9 @@ static int JsonAlertLogger(ThreadVars *tv, void *thread_data, const Packet *p)
     return 0;
 }
 
-static int JsonAlertLogCondition(ThreadVars *tv, const Packet *p)
+static bool JsonAlertLogCondition(ThreadVars *tv, void *thread_data, const Packet *p)
 {
-    if (p->alerts.cnt || (p->flags & PKT_HAS_TAG)) {
-        return TRUE;
-    }
-    return FALSE;
+    return (p->alerts.cnt || (p->flags & PKT_HAS_TAG));
 }
 
 static TmEcode JsonAlertLogThreadInit(ThreadVars *t, const void *initdata, void **data)
@@ -791,11 +895,6 @@ static TmEcode JsonAlertLogThreadInit(ThreadVars *t, const void *initdata, void 
         goto error_exit;
     }
 
-    aft->json_buffer = MemBufferCreateNew(JSON_OUTPUT_BUFFER_SIZE);
-    if (aft->json_buffer == NULL) {
-        goto error_exit;
-    }
-
     /** Use the Output Context (file pointer and mutex) */
     AlertJsonOutputCtx *json_output_ctx = ((OutputCtx *)initdata)->data;
 
@@ -803,8 +902,8 @@ static TmEcode JsonAlertLogThreadInit(ThreadVars *t, const void *initdata, void 
     if (aft->payload_buffer == NULL) {
         goto error_exit;
     }
-    aft->file_ctx = LogFileEnsureExists(json_output_ctx->file_ctx, t->id);
-    if (!aft->file_ctx) {
+    aft->ctx = CreateEveThreadCtx(t, json_output_ctx->eve_ctx);
+    if (!aft->ctx) {
         goto error_exit;
     }
 
@@ -814,9 +913,6 @@ static TmEcode JsonAlertLogThreadInit(ThreadVars *t, const void *initdata, void 
     return TM_ECODE_OK;
 
 error_exit:
-    if (aft->json_buffer != NULL) {
-        MemBufferFree(aft->json_buffer);
-    }
     if (aft->payload_buffer != NULL) {
         MemBufferFree(aft->payload_buffer);
     }
@@ -831,28 +927,14 @@ static TmEcode JsonAlertLogThreadDeinit(ThreadVars *t, void *data)
         return TM_ECODE_OK;
     }
 
-    MemBufferFree(aft->json_buffer);
     MemBufferFree(aft->payload_buffer);
+    FreeEveThreadCtx(aft->ctx);
 
     /* clear memory */
     memset(aft, 0, sizeof(JsonAlertLogThread));
 
     SCFree(aft);
     return TM_ECODE_OK;
-}
-
-static void JsonAlertLogDeInitCtx(OutputCtx *output_ctx)
-{
-    AlertJsonOutputCtx *json_output_ctx = (AlertJsonOutputCtx *) output_ctx->data;
-    if (json_output_ctx != NULL) {
-        HttpXFFCfg *xff_cfg = json_output_ctx->xff_cfg;
-        if (xff_cfg != NULL) {
-            SCFree(xff_cfg);
-        }
-        LogFileFreeCtx(json_output_ctx->file_ctx);
-        SCFree(json_output_ctx);
-    }
-    SCFree(output_ctx);
 }
 
 static void JsonAlertLogDeInitCtxSub(OutputCtx *output_ctx)
@@ -871,12 +953,12 @@ static void JsonAlertLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static void SetFlag(const ConfNode *conf, const char *name, uint16_t flag, uint16_t *out_flags)
+static void SetFlag(const SCConfNode *conf, const char *name, uint16_t flag, uint16_t *out_flags)
 {
     DEBUG_VALIDATE_BUG_ON(conf == NULL);
-    const char *setting = ConfNodeLookupChildValue(conf, name);
+    const char *setting = SCConfNodeLookupChildValue(conf, name);
     if (setting != NULL) {
-        if (ConfValIsTrue(setting)) {
+        if (SCConfValIsTrue(setting)) {
             *out_flags |= flag;
         } else {
             *out_flags &= ~flag;
@@ -884,10 +966,7 @@ static void SetFlag(const ConfNode *conf, const char *name, uint16_t flag, uint1
     }
 }
 
-#define DEFAULT_LOG_FILENAME "alert.json"
-
-static void JsonAlertLogSetupMetadata(AlertJsonOutputCtx *json_output_ctx,
-        ConfNode *conf)
+static void JsonAlertLogSetupMetadata(AlertJsonOutputCtx *json_output_ctx, SCConfNode *conf)
 {
     static bool warn_no_meta = false;
     uint32_t payload_buffer_size = JSON_STREAM_BUFFER_SIZE;
@@ -895,16 +974,17 @@ static void JsonAlertLogSetupMetadata(AlertJsonOutputCtx *json_output_ctx,
 
     if (conf != NULL) {
         /* Check for metadata to enable/disable. */
-        ConfNode *metadata = ConfNodeLookupChild(conf, "metadata");
+        SCConfNode *metadata = SCConfNodeLookupChild(conf, "metadata");
         if (metadata != NULL) {
-            if (metadata->val != NULL && ConfValIsFalse(metadata->val)) {
+            if (metadata->val != NULL && SCConfValIsFalse(metadata->val)) {
                 flags &= ~METADATA_DEFAULTS;
-            } else if (ConfNodeHasChildren(metadata)) {
-                ConfNode *rule_metadata = ConfNodeLookupChild(metadata, "rule");
+            } else if (SCConfNodeHasChildren(metadata)) {
+                SCConfNode *rule_metadata = SCConfNodeLookupChild(metadata, "rule");
                 if (rule_metadata) {
                     SetFlag(rule_metadata, "raw", LOG_JSON_RULE, &flags);
                     SetFlag(rule_metadata, "metadata", LOG_JSON_RULE_METADATA,
                             &flags);
+                    SetFlag(rule_metadata, "reference", LOG_JSON_REFERENCE, &flags);
                 }
                 SetFlag(metadata, "flow", LOG_JSON_FLOW, &flags);
                 SetFlag(metadata, "app-layer", LOG_JSON_APP_LAYER, &flags);
@@ -918,30 +998,33 @@ static void JsonAlertLogSetupMetadata(AlertJsonOutputCtx *json_output_ctx,
         SetFlag(conf, "payload-printable", LOG_JSON_PAYLOAD, &flags);
         SetFlag(conf, "http-body-printable", LOG_JSON_HTTP_BODY, &flags);
         SetFlag(conf, "http-body", LOG_JSON_HTTP_BODY_BASE64, &flags);
+        SetFlag(conf, "websocket-payload-printable", LOG_JSON_WEBSOCKET_PAYLOAD, &flags);
+        SetFlag(conf, "websocket-payload", LOG_JSON_WEBSOCKET_PAYLOAD_BASE64, &flags);
+        SetFlag(conf, "verdict", LOG_JSON_VERDICT, &flags);
+        SetFlag(conf, "payload-length", LOG_JSON_PAYLOAD_LENGTH, &flags);
 
-        /* Check for obsolete configuration flags to enable specific
-         * protocols. These are now just aliases for enabling
-         * app-layer logging. */
-        SetFlag(conf, "http", LOG_JSON_APP_LAYER, &flags);
-        SetFlag(conf, "tls",  LOG_JSON_APP_LAYER,  &flags);
-        SetFlag(conf, "ssh",  LOG_JSON_APP_LAYER,  &flags);
-        SetFlag(conf, "smtp", LOG_JSON_APP_LAYER, &flags);
-        SetFlag(conf, "dnp3", LOG_JSON_APP_LAYER, &flags);
+        /* Check for obsolete flags and warn that they have no effect. */
+        static const char *deprecated_flags[] = { "http", "tls", "ssh", "smtp", "dnp3", "app-layer",
+            "flow", NULL };
+        for (int i = 0; deprecated_flags[i] != NULL; i++) {
+            if (SCConfNodeLookupChildValue(conf, deprecated_flags[i]) != NULL) {
+                SCLogWarning("Found deprecated eve-log.alert flag \"%s\", this flag has no effect",
+                        deprecated_flags[i]);
+            }
+        }
 
-        /* And check for obsolete configuration flags for enabling
-         * app-layer and flow as these have been moved under the
-         * metadata key. */
-        SetFlag(conf, "app-layer", LOG_JSON_APP_LAYER, &flags);
-        SetFlag(conf, "flow", LOG_JSON_FLOW, &flags);
-
-        const char *payload_buffer_value = ConfNodeLookupChildValue(conf, "payload-buffer-size");
+        const char *payload_buffer_value = SCConfNodeLookupChildValue(conf, "payload-buffer-size");
 
         if (payload_buffer_value != NULL) {
             uint32_t value;
             if (ParseSizeStringU32(payload_buffer_value, &value) < 0) {
-                SCLogError(SC_ERR_ALERT_PAYLOAD_BUFFER, "Error parsing "
+                SCLogError("Error parsing "
                            "payload-buffer-size - %s. Killing engine",
-                           payload_buffer_value);
+                        payload_buffer_value);
+                exit(EXIT_FAILURE);
+            } else if (value == 0) {
+                // you should not ask for payload if you want 0 of it
+                SCLogError("Error payload-buffer-size should not be 0");
                 exit(EXIT_FAILURE);
             } else {
                 payload_buffer_size = value;
@@ -950,27 +1033,27 @@ static void JsonAlertLogSetupMetadata(AlertJsonOutputCtx *json_output_ctx,
 
         if (!warn_no_meta && flags & JSON_BODY_LOGGING) {
             if (((flags & LOG_JSON_APP_LAYER) == 0)) {
-                SCLogWarning(SC_WARN_ALERT_CONFIG, "HTTP body logging has been configured, however, "
-                             "metadata logging has not been enabled. HTTP body logging will be disabled.");
+                SCLogWarning("HTTP body logging has been configured, however, "
+                             "metadata logging has not been enabled. HTTP body logging will be "
+                             "disabled.");
                 flags &= ~JSON_BODY_LOGGING;
                 warn_no_meta = true;
             }
         }
-
-        json_output_ctx->payload_buffer_size = payload_buffer_size;
     }
 
     if (flags & LOG_JSON_RULE_METADATA) {
         DetectEngineSetParseMetadata();
     }
 
+    json_output_ctx->payload_buffer_size = payload_buffer_size;
     json_output_ctx->flags |= flags;
 }
 
-static HttpXFFCfg *JsonAlertLogGetXffCfg(ConfNode *conf)
+static HttpXFFCfg *JsonAlertLogGetXffCfg(SCConfNode *conf)
 {
     HttpXFFCfg *xff_cfg = NULL;
-    if (conf != NULL && ConfNodeLookupChild(conf, "xff") != NULL) {
+    if (conf != NULL && SCConfNodeLookupChild(conf, "xff") != NULL) {
         xff_cfg = SCCalloc(1, sizeof(HttpXFFCfg));
         if (likely(xff_cfg != NULL)) {
             HttpXFFGetCfg(conf, xff_cfg);
@@ -984,54 +1067,7 @@ static HttpXFFCfg *JsonAlertLogGetXffCfg(ConfNode *conf)
  * \param conf The configuration node for this output.
  * \return A LogFileCtx pointer on success, NULL on failure.
  */
-static OutputInitResult JsonAlertLogInitCtx(ConfNode *conf)
-{
-    OutputInitResult result = { NULL, false };
-    AlertJsonOutputCtx *json_output_ctx = NULL;
-    LogFileCtx *logfile_ctx = LogFileNewCtx();
-    if (logfile_ctx == NULL) {
-        SCLogDebug("AlertFastLogInitCtx2: Could not create new LogFileCtx");
-        return result;
-    }
-
-    if (SCConfLogOpenGeneric(conf, logfile_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
-        LogFileFreeCtx(logfile_ctx);
-        return result;
-    }
-
-    OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
-    if (unlikely(output_ctx == NULL)) {
-        LogFileFreeCtx(logfile_ctx);
-        return result;
-    }
-
-    json_output_ctx = SCMalloc(sizeof(AlertJsonOutputCtx));
-    if (unlikely(json_output_ctx == NULL)) {
-        LogFileFreeCtx(logfile_ctx);
-        SCFree(output_ctx);
-        return result;
-    }
-    memset(json_output_ctx, 0, sizeof(AlertJsonOutputCtx));
-
-    json_output_ctx->file_ctx = logfile_ctx;
-
-    JsonAlertLogSetupMetadata(json_output_ctx, conf);
-    json_output_ctx->xff_cfg = JsonAlertLogGetXffCfg(conf);
-
-    output_ctx->data = json_output_ctx;
-    output_ctx->DeInit = JsonAlertLogDeInitCtx;
-
-    result.ctx = output_ctx;
-    result.ok = true;
-    return result;
-}
-
-/**
- * \brief Create a new LogFileCtx for "fast" output style.
- * \param conf The configuration node for this output.
- * \return A LogFileCtx pointer on success, NULL on failure.
- */
-static OutputInitResult JsonAlertLogInitCtxSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult JsonAlertLogInitCtxSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ajt = parent_ctx->data;
@@ -1041,14 +1077,13 @@ static OutputInitResult JsonAlertLogInitCtxSub(ConfNode *conf, OutputCtx *parent
     if (unlikely(output_ctx == NULL))
         return result;
 
-    json_output_ctx = SCMalloc(sizeof(AlertJsonOutputCtx));
+    json_output_ctx = SCCalloc(1, sizeof(AlertJsonOutputCtx));
     if (unlikely(json_output_ctx == NULL)) {
         goto error;
     }
-    memset(json_output_ctx, 0, sizeof(AlertJsonOutputCtx));
 
     json_output_ctx->file_ctx = ajt->file_ctx;
-    json_output_ctx->cfg = ajt->cfg;
+    json_output_ctx->eve_ctx = ajt;
 
     JsonAlertLogSetupMetadata(json_output_ctx, conf);
     json_output_ctx->xff_cfg = JsonAlertLogGetXffCfg(conf);
@@ -1076,11 +1111,15 @@ error:
 
 void JsonAlertLogRegister (void)
 {
-    OutputRegisterPacketModule(LOGGER_JSON_ALERT, MODULE_NAME, "alert-json-log",
-        JsonAlertLogInitCtx, JsonAlertLogger, JsonAlertLogCondition,
-        JsonAlertLogThreadInit, JsonAlertLogThreadDeinit, NULL);
-    OutputRegisterPacketSubModule(LOGGER_JSON_ALERT, "eve-log", MODULE_NAME,
-        "eve-log.alert", JsonAlertLogInitCtxSub, JsonAlertLogger,
-        JsonAlertLogCondition, JsonAlertLogThreadInit, JsonAlertLogThreadDeinit,
-        NULL);
+    OutputPacketLoggerFunctions output_logger_functions = {
+        .LogFunc = JsonAlertLogger,
+        .FlushFunc = JsonAlertFlush,
+        .ConditionFunc = JsonAlertLogCondition,
+        .ThreadInitFunc = JsonAlertLogThreadInit,
+        .ThreadDeinitFunc = JsonAlertLogThreadDeinit,
+        .ThreadExitPrintStatsFunc = NULL,
+    };
+
+    OutputRegisterPacketSubModule(LOGGER_JSON_ALERT, "eve-log", MODULE_NAME, "eve-log.alert",
+            JsonAlertLogInitCtxSub, &output_logger_functions);
 }

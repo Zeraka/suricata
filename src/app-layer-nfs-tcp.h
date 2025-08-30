@@ -21,12 +21,9 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __APP_LAYER_NFS_TCP_H__
-#define __APP_LAYER_NFS_TCP_H__
-
-#include "app-layer-events.h"
+#ifndef SURICATA_APP_LAYER_NFS_TCP_H
+#define SURICATA_APP_LAYER_NFS_TCP_H
 
 void RegisterNFSTCPParsers(void);
-void NFSTCPParserRegisterTests(void);
 
-#endif /* __APP_LAYER_NFS_TCP_H__ */
+#endif /* SURICATA_APP_LAYER_NFS_TCP_H */

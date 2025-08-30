@@ -19,7 +19,7 @@
  *
  * \author Giuseppe Longo <giuseppe@glongo.it>
  *
- * \brief Decompress files transfered via HTTP corresponding to file_data
+ * \brief Decompress files transferred via HTTP corresponding to file_data
  * keyword.
  *
  */
@@ -60,13 +60,13 @@ int FileIsSwfFile(const uint8_t *buffer, uint32_t buffer_len)
  * \param buffer compressed buffer
  * \param buffer_len compressed buffer length
  * \param decompressed_buffer buffer that store decompressed data
- * \param decompressed_buffer_len decompressesd data length
+ * \param decompressed_buffer_len decompressed data length
  * \param swf_type decompression algorithm to use
  * \param decompress_depth how much decompressed data we want to store
  * \param compress_depth how much compressed data we want to decompress
  *
  * \retval 1 if decompression works
- * \retval 0 an error occured, and event set
+ * \retval 0 an error occurred, and event set
  */
 int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
                          DetectEngineThreadCtx *det_ctx,
@@ -97,12 +97,10 @@ int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
     }
 
     uint32_t compressed_data_len = 0;
-    if (buffer_len > offset && compress_depth == 0) {
-        compressed_data_len = buffer_len - offset;
-    } else if (compress_depth > 0 && compress_depth <= buffer_len) {
+    if (compress_depth > 0 && compress_depth <= buffer_len - offset) {
         compressed_data_len = compress_depth;
-    } else if (compress_depth > 0 && compress_depth > buffer_len) {
-        compressed_data_len = buffer_len;
+    } else {
+        compressed_data_len = buffer_len - offset;
     }
 
     /* get swf version */
@@ -131,7 +129,7 @@ int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
     decompressed_data_len += 8;
 
     /* make sure the inspection buffer has enough space */
-    InspectionBufferCheckAndExpand(out_buffer, decompressed_data_len);
+    SCInspectionBufferCheckAndExpand(out_buffer, decompressed_data_len);
     if (out_buffer->size < decompressed_data_len) {
         DetectEngineSetEvent(det_ctx, FILE_DECODER_EVENT_NO_MEM);
         return 0;

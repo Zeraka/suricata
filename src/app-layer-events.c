@@ -1,4 +1,4 @@
-/* Copyright (C) 2014 Open Information Security Foundation
+/* Copyright (C) 2014-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,12 +22,24 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#include "suricata-common.h"
-#include "decode.h"
-#include "flow.h"
 #include "app-layer-events.h"
-#include "app-layer-parser.h"
 #include "util-enum.h"
+
+int SCAppLayerGetEventIdByName(const char *event_name, SCEnumCharMap *table, uint8_t *event_id)
+{
+    int value = SCMapEnumNameToValue(event_name, table);
+    if (value == -1) {
+        SCLogError("event \"%s\" not present in enum table.", event_name);
+        /* this should be treated as fatal */
+        return -1;
+    } else if (value < -1 || value > UINT8_MAX) {
+        SCLogError("event \"%s\" has out of range value", event_name);
+        /* this should be treated as fatal */
+        return -1;
+    }
+    *event_id = (uint8_t)value;
+    return 0;
+}
 
 /* events raised during protocol detection are stored in the
  * packets storage, not in the flow. */
@@ -48,13 +60,14 @@ SCEnumCharMap app_layer_event_pkt_table[ ] = {
       -1 },
 };
 
-int AppLayerGetEventInfoById(int event_id, const char **event_name,
-                                     AppLayerEventType *event_type)
+int AppLayerGetEventInfoById(
+        uint8_t event_id, const char **event_name, AppLayerEventType *event_type)
 {
     *event_name = SCMapEnumValueToName(event_id, app_layer_event_pkt_table);
     if (*event_name == NULL) {
-        SCLogError(SC_ERR_INVALID_ENUM_MAP, "event \"%d\" not present in "
-                   "app-layer-event's enum map table.",  event_id);
+        SCLogError("event \"%d\" not present in "
+                   "app-layer-event's enum map table.",
+                event_id);
         /* yes this is fatal */
         return -1;
     }
@@ -64,17 +77,9 @@ int AppLayerGetEventInfoById(int event_id, const char **event_name,
     return 0;
 }
 
-int AppLayerGetPktEventInfo(const char *event_name, int *event_id)
+int AppLayerGetPktEventInfo(const char *event_name, uint8_t *event_id)
 {
-    *event_id = SCMapEnumNameToValue(event_name, app_layer_event_pkt_table);
-    if (*event_id == -1) {
-        SCLogError(SC_ERR_INVALID_ENUM_MAP, "event \"%s\" not present in "
-                   "app-layer-event's packet event table.",  event_name);
-        /* this should be treated as fatal */
-        return -1;
-    }
-
-    return 0;
+    return SCAppLayerGetEventIdByName(event_name, app_layer_event_pkt_table, event_id);
 }
 
 #define DECODER_EVENTS_BUFFER_STEPS 8
@@ -89,11 +94,10 @@ int AppLayerGetPktEventInfo(const char *event_name, int *event_id)
 void AppLayerDecoderEventsSetEventRaw(AppLayerDecoderEvents **sevents, uint8_t event)
 {
     if (*sevents == NULL) {
-        AppLayerDecoderEvents *new_devents = SCMalloc(sizeof(AppLayerDecoderEvents));
+        AppLayerDecoderEvents *new_devents = SCCalloc(1, sizeof(AppLayerDecoderEvents));
         if (new_devents == NULL)
             return;
 
-        memset(new_devents, 0, sizeof(AppLayerDecoderEvents));
         *sevents = new_devents;
 
     }
@@ -120,28 +124,12 @@ void AppLayerDecoderEventsSetEventRaw(AppLayerDecoderEvents **sevents, uint8_t e
     (*sevents)->events[(*sevents)->cnt++] = event;
 }
 
-/**
- * \brief Set an app layer decoder event.
- *
- * \param f            Pointer to a flow containing DecoderEvents pointer head.  If
- *                     the head points to a DecoderEvents instance, a
- *                     new instance would be created and the pointer head would
- *                     would be updated with this new instance
- * \param event        The event to be stored.
- */
-void AppLayerDecoderEventsSetEvent(Flow *f, uint8_t event)
-{
-    AppLayerDecoderEvents *events = AppLayerParserGetDecoderEvents(f->alparser);
-    AppLayerDecoderEvents *new = events;
-    AppLayerDecoderEventsSetEventRaw(&events, event);
-    if (events != new)
-        AppLayerParserSetDecoderEvents(f->alparser, events);
-}
-
 void AppLayerDecoderEventsResetEvents(AppLayerDecoderEvents *events)
 {
-    if (events != NULL)
+    if (events != NULL) {
         events->cnt = 0;
+        events->event_last_logged = 0;
+    }
 }
 
 
@@ -155,3 +143,37 @@ void AppLayerDecoderEventsFreeEvents(AppLayerDecoderEvents **events)
     }
 }
 
+SCEnumCharMap det_ctx_event_table[] = {
+    { "NO_MEMORY", FILE_DECODER_EVENT_NO_MEM },
+    { "INVALID_SWF_LENGTH", FILE_DECODER_EVENT_INVALID_SWF_LENGTH },
+    { "INVALID_SWF_VERSION", FILE_DECODER_EVENT_INVALID_SWF_VERSION },
+    { "Z_DATA_ERROR", FILE_DECODER_EVENT_Z_DATA_ERROR },
+    { "Z_STREAM_ERROR", FILE_DECODER_EVENT_Z_STREAM_ERROR },
+    { "Z_BUF_ERROR", FILE_DECODER_EVENT_Z_BUF_ERROR },
+    { "Z_UNKNOWN_ERROR", FILE_DECODER_EVENT_Z_UNKNOWN_ERROR },
+    { "LZMA_IO_ERROR", FILE_DECODER_EVENT_LZMA_IO_ERROR },
+    { "LZMA_HEADER_TOO_SHORT_ERROR", FILE_DECODER_EVENT_LZMA_HEADER_TOO_SHORT_ERROR },
+    { "LZMA_DECODER_ERROR", FILE_DECODER_EVENT_LZMA_DECODER_ERROR },
+    { "LZMA_MEMLIMIT_ERROR", FILE_DECODER_EVENT_LZMA_MEMLIMIT_ERROR },
+    { "LZMA_XZ_ERROR", FILE_DECODER_EVENT_LZMA_XZ_ERROR },
+    { "LZMA_UNKNOWN_ERROR", FILE_DECODER_EVENT_LZMA_UNKNOWN_ERROR },
+    {
+            "TOO_MANY_BUFFERS",
+            DETECT_EVENT_TOO_MANY_BUFFERS,
+    },
+    {
+            "POST_MATCH_QUEUE_FAILED",
+            DETECT_EVENT_POST_MATCH_QUEUE_FAILED,
+    },
+    { NULL, -1 },
+};
+
+int DetectEngineGetEventInfo(
+        const char *event_name, uint8_t *event_id, AppLayerEventType *event_type)
+{
+    if (SCAppLayerGetEventIdByName(event_name, det_ctx_event_table, event_id) == 0) {
+        *event_type = APP_LAYER_EVENT_TYPE_TRANSACTION;
+        return 0;
+    }
+    return -1;
+}

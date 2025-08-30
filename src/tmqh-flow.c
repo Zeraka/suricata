@@ -23,7 +23,7 @@
  *
  * Simple output queue handler that makes sure all packets of the same flow
  * are sent to the same queue. We support different kind of q handlers.  Have
- * a look at "autofp-scheduler" conf to further undertsand the various q
+ * a look at "autofp-scheduler" conf to further understand the various q
  * handlers we provide.
  */
 
@@ -33,6 +33,7 @@
 #include "threads.h"
 #include "threadvars.h"
 #include "tmqh-flow.h"
+#include "flow-hash.h"
 
 #include "tm-queuehandlers.h"
 
@@ -42,6 +43,7 @@
 Packet *TmqhInputFlow(ThreadVars *t);
 void TmqhOutputFlowHash(ThreadVars *t, Packet *p);
 void TmqhOutputFlowIPPair(ThreadVars *t, Packet *p);
+static void TmqhOutputFlowFTPHash(ThreadVars *t, Packet *p);
 void *TmqhOutputFlowSetupCtx(const char *queue_str);
 void TmqhOutputFlowFreeCtx(void *ctx);
 void TmqhFlowRegisterTests(void);
@@ -55,7 +57,7 @@ void TmqhFlowRegister(void)
     tmqh_table[TMQH_FLOW].RegisterTests = TmqhFlowRegisterTests;
 
     const char *scheduler = NULL;
-    if (ConfGet("autofp-scheduler", &scheduler) == 1) {
+    if (SCConfGet("autofp-scheduler", &scheduler) == 1) {
         if (strcasecmp(scheduler, "round-robin") == 0) {
             SCLogNotice("using flow hash instead of round robin");
             tmqh_table[TMQH_FLOW].OutHandler = TmqhOutputFlowHash;
@@ -66,17 +68,17 @@ void TmqhFlowRegister(void)
             tmqh_table[TMQH_FLOW].OutHandler = TmqhOutputFlowHash;
         } else if (strcasecmp(scheduler, "ippair") == 0) {
             tmqh_table[TMQH_FLOW].OutHandler = TmqhOutputFlowIPPair;
+        } else if (strcasecmp(scheduler, "ftp-hash") == 0) {
+            tmqh_table[TMQH_FLOW].OutHandler = TmqhOutputFlowFTPHash;
         } else {
-            SCLogError(SC_ERR_INVALID_YAML_CONF_ENTRY, "Invalid entry \"%s\" "
+            SCLogError("Invalid entry \"%s\" "
                        "for autofp-scheduler in conf.  Killing engine.",
-                       scheduler);
+                    scheduler);
             exit(EXIT_FAILURE);
         }
     } else {
         tmqh_table[TMQH_FLOW].OutHandler = TmqhOutputFlowHash;
     }
-
-    return;
 }
 
 void TmqhFlowPrintAutofpHandler(void)
@@ -87,6 +89,7 @@ void TmqhFlowPrintAutofpHandler(void)
 
     PRINT_IF_FUNC(TmqhOutputFlowHash, "Hash");
     PRINT_IF_FUNC(TmqhOutputFlowIPPair, "IPPair");
+    PRINT_IF_FUNC(TmqhOutputFlowFTPHash, "FTPHash");
 
 #undef PRINT_IF_FUNC
 }
@@ -128,11 +131,10 @@ static int StoreQueueId(TmqhFlowCtx *ctx, char *name)
 
     if (ctx->queues == NULL) {
         ctx->size = 1;
-        ctx->queues = SCMalloc(ctx->size * sizeof(TmqhFlowMode));
+        ctx->queues = SCCalloc(1, ctx->size * sizeof(TmqhFlowMode));
         if (ctx->queues == NULL) {
             return -1;
         }
-        memset(ctx->queues, 0, ctx->size * sizeof(TmqhFlowMode));
     } else {
         ctx->size++;
         ptmp = SCRealloc(ctx->queues, ctx->size * sizeof(TmqhFlowMode));
@@ -167,10 +169,9 @@ void *TmqhOutputFlowSetupCtx(const char *queue_str)
 
     SCLogDebug("queue_str %s", queue_str);
 
-    TmqhFlowCtx *ctx = SCMalloc(sizeof(TmqhFlowCtx));
+    TmqhFlowCtx *ctx = SCCalloc(1, sizeof(TmqhFlowCtx));
     if (unlikely(ctx == NULL))
         return NULL;
-    memset(ctx,0x00,sizeof(TmqhFlowCtx));
 
     char *str = SCStrdup(queue_str);
     if (unlikely(str == NULL)) {
@@ -214,8 +215,6 @@ void TmqhOutputFlowFreeCtx(void *ctx)
               fctx->size);
     SCFree(fctx->queues);
     SCFree(fctx);
-
-    return;
 }
 
 void TmqhOutputFlowHash(ThreadVars *tv, Packet *p)
@@ -238,8 +237,6 @@ void TmqhOutputFlowHash(ThreadVars *tv, Packet *p)
     PacketEnqueue(q, p);
     SCCondSignal(&q->cond_q);
     SCMutexUnlock(&q->mutex_q);
-
-    return;
 }
 
 /**
@@ -268,8 +265,32 @@ void TmqhOutputFlowIPPair(ThreadVars *tv, Packet *p)
     PacketEnqueue(q, p);
     SCCondSignal(&q->cond_q);
     SCMutexUnlock(&q->mutex_q);
+}
 
-    return;
+static void TmqhOutputFlowFTPHash(ThreadVars *tv, Packet *p)
+{
+    uint32_t qid;
+    TmqhFlowCtx *ctx = (TmqhFlowCtx *)tv->outctx;
+
+    if (p->flags & PKT_WANTS_FLOW) {
+        uint32_t hash = p->flow_hash;
+        if (PacketIsTCP(p) && ((p->sp >= 1024 && p->dp >= 1024) || p->dp == 21 || p->sp == 21 ||
+                                      p->dp == 20 || p->sp == 20)) {
+            hash = FlowGetIpPairProtoHash(p);
+        }
+        qid = hash % ctx->size;
+    } else {
+        qid = ctx->last++;
+
+        if (ctx->last == ctx->size)
+            ctx->last = 0;
+    }
+
+    PacketQueue *q = ctx->queues[qid].q;
+    SCMutexLock(&q->mutex_q);
+    PacketEnqueue(q, p);
+    SCCondSignal(&q->cond_q);
+    SCMutexUnlock(&q->mutex_q);
 }
 
 #ifdef UNITTESTS
@@ -382,6 +403,4 @@ void TmqhFlowRegisterTests(void)
     UtRegisterTest("TmqhOutputFlowSetupCtxTest03",
                    TmqhOutputFlowSetupCtxTest03);
 #endif
-
-    return;
 }

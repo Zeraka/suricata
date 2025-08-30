@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2019 Open Information Security Foundation
+/* Copyright (C) 2018-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -30,7 +30,6 @@
  *
  */
 
-#define PCAP_DONT_INCLUDE_PCAP_BPF_H 1
 #define SC_PCAP_DONT_INCLUDE_PCAP_H 1
 
 #include "suricata-common.h"
@@ -42,8 +41,9 @@
 #include <sys/resource.h>
 
 #include "util-ebpf.h"
+#include "util-affinity.h"
 #include "util-cpu.h"
-#include "util-device.h"
+#include "util-device-private.h"
 
 #include "device-storage.h"
 #include "flow-storage.h"
@@ -60,8 +60,8 @@
 
 #define BYPASSED_FLOW_TIMEOUT   60
 
-static int g_livedev_storage_id = -1;
-static int g_flow_storage_id = -1;
+static LiveDevStorageId g_livedev_storage_id = { .id = -1 };
+static FlowStorageId g_flow_storage_id = { .id = -1 };
 
 struct bpf_map_item {
     char iface[IFNAMSIZ];
@@ -97,15 +97,11 @@ static void BpfMapsInfoFree(void *bpf)
                     ret = unlink(pinnedpath);
                     if (ret == -1) {
                         int error = errno;
-                        SCLogWarning(SC_ERR_SYSCALL,
-                                     "Unable to remove %s: %s (%d)",
-                                     pinnedpath,
-                                     strerror(error),
-                                     error);
+                        SCLogWarning(
+                                "Unable to remove %s: %s (%d)", pinnedpath, strerror(error), error);
                     }
                 } else {
-                    SCLogWarning(SC_ERR_SPRINTF, "Unable to remove map %s",
-                                 bpfinfo->array[i].name);
+                    SCLogWarning("Unable to remove map %s", bpfinfo->array[i].name);
                 }
             }
             SCFree(bpfinfo->array[i].name);
@@ -129,10 +125,7 @@ void EBPFDeleteKey(int fd, void *key)
 {
     int ret = bpf_map_delete_elem(fd, key);
     if (ret < 0) {
-        SCLogWarning(SC_ERR_SYSCALL,
-                     "Unable to delete entry: %s (%d)",
-                     strerror(errno),
-                     errno);
+        SCLogWarning("Unable to delete entry: %s (%d)", strerror(errno), errno);
     }
 }
 
@@ -209,15 +202,14 @@ static int EBPFLoadPinnedMaps(LiveDevice *livedev, struct ebpf_timeout_config *c
         /* Get flow v6 table */
         fd_v6 = EBPFLoadPinnedMapsFile(livedev, "flow_table_v6");
         if (fd_v6 < 0) {
-            SCLogWarning(SC_ERR_INVALID_ARGUMENT,
-                    "Found a flow_table_v4 map but no flow_table_v6 map");
+            SCLogWarning("Found a flow_table_v4 map but no flow_table_v6 map");
             return fd_v6;
         }
     }
 
     struct bpf_maps_info *bpf_map_data = SCCalloc(1, sizeof(*bpf_map_data));
     if (bpf_map_data == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Can't allocate bpf map array");
+        SCLogError("Can't allocate bpf map array");
         return -1;
     }
 
@@ -287,7 +279,7 @@ alloc_error:
         SCFree(bpf_map_data->array[i].name);
     }
     bpf_map_data->last = 0;
-    SCLogError(SC_ERR_MEM_ALLOC, "Can't allocate bpf map name");
+    SCLogError("Can't allocate bpf map name");
     return -1;
 }
 
@@ -327,7 +319,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
     }
 
     if (! path) {
-        SCLogError(SC_ERR_INVALID_VALUE, "No file defined to load eBPF from");
+        SCLogError("No file defined to load eBPF from");
         return -1;
     }
 
@@ -335,8 +327,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
      * locked memory so we set it to unlimited to avoid a ENOPERM error */
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
     if (setrlimit(RLIMIT_MEMLOCK, &r) != 0) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Unable to lock memory: %s (%d)",
-                   strerror(errno), errno);
+        SCLogError("Unable to lock memory: %s (%d)", strerror(errno), errno);
         return -1;
     }
 
@@ -347,9 +338,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
         char err_buf[128];
         libbpf_strerror(error, err_buf,
                         sizeof(err_buf));
-        SCLogError(SC_ERR_INVALID_VALUE,
-                   "Unable to load eBPF objects in '%s': %s",
-                   path, err_buf);
+        SCLogError("Unable to load eBPF objects in '%s': %s", path, err_buf);
         return -1;
     }
 
@@ -365,39 +354,46 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
 
     /* Let's check that our section is here */
     bpf_object__for_each_program(bpfprog, bpfobj) {
+#ifdef HAVE_BPF_PROGRAM__SECTION_NAME
+        const char *title = bpf_program__section_name(bpfprog);
+#else
         const char *title = bpf_program__title(bpfprog, 0);
+#endif
         if (!strcmp(title, section)) {
             if (config->flags & EBPF_SOCKET_FILTER) {
+#ifdef HAVE_BPF_PROGRAM__SET_TYPE
+                bpf_program__set_type(bpfprog, BPF_PROG_TYPE_SOCKET_FILTER);
+#else
+                /* Fall back to legacy API */
                 bpf_program__set_socket_filter(bpfprog);
+#endif
             } else {
+#ifdef HAVE_BPF_PROGRAM__SET_TYPE
+                bpf_program__set_type(bpfprog, BPF_PROG_TYPE_XDP);
+#else
+                /* Fall back to legacy API */
                 bpf_program__set_xdp(bpfprog);
+#endif
             }
             found = true;
             break;
         }
     }
 
-    if (found == false) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                   "No section '%s' in '%s' file. Will not be able to use the file",
-                   section,
-                   path);
+    if (!found) {
+        SCLogError("No section '%s' in '%s' file. Will not be able to use the file", section, path);
         return -1;
     }
 
     err = bpf_object__load(bpfobj);
     if (err < 0) {
         if (err == -EPERM) {
-            SCLogError(SC_ERR_SYSCALL,
-                    "Permission issue when loading eBPF object"
-                    " (check libbpf error on stdout)");
+            SCLogError("Permission issue when loading eBPF object"
+                       " (check libbpf error on stdout)");
         } else {
             char buf[129];
             libbpf_strerror(err, buf, sizeof(buf));
-            SCLogError(SC_ERR_INVALID_VALUE,
-                    "Unable to load eBPF object: %s (%d)",
-                    buf,
-                    err);
+            SCLogError("Unable to load eBPF object: %s (%d)", buf, err);
         }
         return -1;
     }
@@ -407,14 +403,14 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
      * that we use bpf_maps_info:: */
     struct bpf_maps_info *bpf_map_data = SCCalloc(1, sizeof(*bpf_map_data));
     if (bpf_map_data == NULL) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Can't allocate bpf map array");
+        SCLogError("Can't allocate bpf map array");
         return -1;
     }
 
     /* Store the maps in bpf_maps_info:: */
     bpf_map__for_each(map, bpfobj) {
         if (bpf_map_data->last == BPF_MAP_MAX_COUNT) {
-            SCLogError(SC_ERR_NOT_SUPPORTED, "Too many BPF maps in eBPF files");
+            SCLogError("Too many BPF maps in eBPF files");
             break;
         }
         SCLogDebug("Got a map '%s' with fd '%d'", bpf_map__name(map), bpf_map__fd(map));
@@ -423,7 +419,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
         snprintf(bpf_map_data->array[bpf_map_data->last].iface, IFNAMSIZ,
                  "%s", iface);
         if (!bpf_map_data->array[bpf_map_data->last].name) {
-            SCLogError(SC_ERR_MEM_ALLOC, "Unable to duplicate map name");
+            SCLogError("Unable to duplicate map name");
             BpfMapsInfoFree(bpf_map_data);
             return -1;
         }
@@ -436,7 +432,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
                     bpf_map_data->array[bpf_map_data->last].name);
             int ret = bpf_obj_pin(bpf_map_data->array[bpf_map_data->last].fd, buf);
             if (ret != 0) {
-                SCLogWarning(SC_ERR_AFP_CREATE, "Can not pin: %s", strerror(errno));
+                SCLogWarning("Can not pin: %s", strerror(errno));
             }
             /* Don't unlink pinned maps in XDP mode to avoid a state reset */
             if (config->flags & EBPF_XDP_CODE) {
@@ -457,8 +453,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
      * (XDP case). */
     pfd = bpf_program__fd(bpfprog);
     if (pfd == -1) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                   "Unable to find %s section", section);
+        SCLogError("Unable to find %s section", section);
         return -1;
     }
 
@@ -480,16 +475,19 @@ int EBPFSetupXDP(const char *iface, int fd, uint8_t flags)
 #ifdef HAVE_PACKET_XDP
     unsigned int ifindex = if_nametoindex(iface);
     if (ifindex == 0) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                "Unknown interface '%s'", iface);
+        SCLogError("Unknown interface '%s'", iface);
         return -1;
     }
+#ifdef HAVE_BPF_XDP_ATTACH
+    int err = bpf_xdp_attach(ifindex, fd, flags, NULL);
+#else
+    /* Fall back to legacy API */
     int err = bpf_set_link_xdp_fd(ifindex, fd, flags);
+#endif
     if (err != 0) {
         char buf[129];
         libbpf_strerror(err, buf, sizeof(buf));
-        SCLogError(SC_ERR_INVALID_VALUE, "Unable to set XDP on '%s': %s (%d)",
-                iface, buf, err);
+        SCLogError("Unable to set XDP on '%s': %s (%d)", iface, buf, err);
         return -1;
     }
 #endif
@@ -514,7 +512,7 @@ static bool EBPFCreateFlowForKey(struct flows_stats *flowstats, LiveDevice *dev,
         return false;
 
     /* set accounting, we can't know the direction, so let's just start to
-     * server then if we already have something in to server to client. We need
+     * serve them if we already have something from server to client. We need
      * these numbers as we will use it to see if we have new traffic coming
      * on the flow */
     FlowBypassInfo *fc = FlowGetStorageById(f, GetFlowBypassInfoID());
@@ -588,7 +586,6 @@ void EBPFBypassFree(void *data)
         SCFree(eb->key[1]);
     }
     SCFree(eb);
-    return;
 }
 
 /**
@@ -657,13 +654,13 @@ bool EBPFBypassUpdate(Flow *f, void *data, time_t tsec)
     bool activity = EBPFBypassCheckHalfFlow(f, fc, eb, eb->key[0], 0);
     activity |= EBPFBypassCheckHalfFlow(f, fc, eb, eb->key[1], 1);
     if (!activity) {
-        SCLogDebug("Delete entry: %u (%ld)", FLOW_IS_IPV6(f), FlowGetId(f));
+        SCLogDebug("Delete entry: %u (%" PRIu64 ")", FLOW_IS_IPV6(f), FlowGetId(f));
         /* delete the entries if no time update */
         EBPFDeleteKey(eb->mapfd, eb->key[0]);
         EBPFDeleteKey(eb->mapfd, eb->key[1]);
         SCLogDebug("Done delete entry: %u", FLOW_IS_IPV6(f));
     } else {
-        f->lastts.tv_sec = tsec;
+        f->lastts = SCTIME_FROM_SECS(tsec);
         return true;
     }
     return false;
@@ -675,10 +672,10 @@ typedef bool (*OpFlowForKey)(struct flows_stats * flowstats, LiveDevice*dev, voi
                             int mapfd, int cpus_count);
 
 /**
- * Bypassed flows cleaning for IPv4
+ * Bypassed flows iterator for IPv4
  *
  * This function iterates on all the flows of the IPv4 table
- * looking for timeouted flow to delete from the flow table.
+ * running a callback function on each flow.
  */
 static int EBPFForEachFlowV4Table(ThreadVars *th_v, LiveDevice *dev, const char *name,
                                   struct timespec *ctime,
@@ -752,12 +749,14 @@ static int EBPFForEachFlowV4Table(ThreadVars *th_v, LiveDevice *dev, const char 
         flow_key.dst.addr_data32[3] = 0;
         flow_key.vlan_id[0] = next_key.vlan0;
         flow_key.vlan_id[1] = next_key.vlan1;
+        flow_key.vlan_id[2] = next_key.vlan2;
         if (next_key.ip_proto == 1) {
             flow_key.proto = IPPROTO_TCP;
         } else {
             flow_key.proto = IPPROTO_UDP;
         }
         flow_key.recursion_level = 0;
+        flow_key.livedev_id = dev->id;
         dead_flow = EBPFOpFlowForKey(&flowstats, dev, &next_key, sizeof(next_key), &flow_key,
                                      ctime, pkts_cnt, bytes_cnt,
                                      mapfd, tcfg->cpus_count);
@@ -784,10 +783,10 @@ static int EBPFForEachFlowV4Table(ThreadVars *th_v, LiveDevice *dev, const char 
 }
 
 /**
- * Bypassed flows cleaning for IPv6
+ * Bypassed flows iterator for IPv6
  *
  * This function iterates on all the flows of the IPv4 table
- * looking for timeouted flow to delete from the flow table.
+ * running a callback function on each flow.
  */
 static int EBPFForEachFlowV6Table(ThreadVars *th_v,
                                   LiveDevice *dev, const char *name,
@@ -807,7 +806,7 @@ static int EBPFForEachFlowV6Table(ThreadVars *th_v,
     uint64_t hash_cnt = 0;
 
     if (tcfg->cpus_count == 0) {
-        SCLogWarning(SC_ERR_INVALID_VALUE, "CPU count should not be 0");
+        SCLogWarning("CPU count should not be 0");
         return 0;
     }
 
@@ -869,12 +868,14 @@ static int EBPFForEachFlowV6Table(ThreadVars *th_v,
         }
         flow_key.vlan_id[0] = next_key.vlan0;
         flow_key.vlan_id[1] = next_key.vlan1;
+        flow_key.vlan_id[2] = next_key.vlan2;
         if (next_key.ip_proto == 1) {
             flow_key.proto = IPPROTO_TCP;
         } else {
             flow_key.proto = IPPROTO_UDP;
         }
         flow_key.recursion_level = 0;
+        flow_key.livedev_id = dev->id;
         pkts_cnt = EBPFOpFlowForKey(&flowstats, dev, &next_key, sizeof(next_key), &flow_key,
                                     ctime, pkts_cnt, bytes_cnt,
                                     mapfd, tcfg->cpus_count);
@@ -934,23 +935,23 @@ static int EBPFAddCPUToMap(const char *iface, uint32_t i)
     int ret;
 
     if (cpumap < 0) {
-        SCLogError(SC_ERR_AFP_CREATE, "Can't find cpu_map");
+        SCLogError("Can't find cpu_map");
         return -1;
     }
     ret = bpf_map_update_elem(cpumap, &i, &queue_size, 0);
     if (ret) {
-        SCLogError(SC_ERR_AFP_CREATE, "Create CPU entry failed (err:%d)", ret);
+        SCLogError("Create CPU entry failed (err:%d)", ret);
         return -1;
     }
     int cpus_available = EBPFGetMapFDByName(iface, "cpus_available");
     if (cpus_available < 0) {
-        SCLogError(SC_ERR_AFP_CREATE, "Can't find cpus_available map");
+        SCLogError("Can't find cpus_available map");
         return -1;
     }
 
     ret = bpf_map_update_elem(cpus_available, &g_redirect_iface_cpu_counter, &i, 0);
     if (ret) {
-        SCLogError(SC_ERR_AFP_CREATE, "Create CPU entry failed (err:%d)", ret);
+        SCLogError("Create CPU entry failed (err:%d)", ret);
         return -1;
     }
     return 0;
@@ -959,20 +960,18 @@ static int EBPFAddCPUToMap(const char *iface, uint32_t i)
 static void EBPFRedirectMapAddCPU(int i, void *data)
 {
     if (EBPFAddCPUToMap(data, i) < 0) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                "Unable to add CPU %d to set", i);
+        SCLogError("Unable to add CPU %d to set", i);
     } else {
         g_redirect_iface_cpu_counter++;
     }
 }
 
-void EBPFBuildCPUSet(ConfNode *node, char *iface)
+void EBPFBuildCPUSet(SCConfNode *node, char *iface)
 {
     uint32_t key0 = 0;
     int mapfd = EBPFGetMapFDByName(iface, "cpus_count");
     if (mapfd < 0) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                "Unable to find 'cpus_count' map");
+        SCLogError("Unable to find 'cpus_count' map");
         return;
     }
     g_redirect_iface_cpu_counter = 0;
@@ -981,9 +980,10 @@ void EBPFBuildCPUSet(ConfNode *node, char *iface)
                         BPF_ANY);
         return;
     }
-    BuildCpusetWithCallback("xdp-cpu-redirect", node,
-            EBPFRedirectMapAddCPU,
-            iface);
+    if (BuildCpusetWithCallback("xdp-cpu-redirect", node, EBPFRedirectMapAddCPU, iface) < 0) {
+        SCLogWarning("Failed to parse XDP CPU redirect configuration");
+        return;
+    }
     bpf_map_update_elem(mapfd, &key0, &g_redirect_iface_cpu_counter,
                         BPF_ANY);
 }
@@ -1004,31 +1004,29 @@ int EBPFSetPeerIface(const char *iface, const char *out_iface)
 {
     int mapfd = EBPFGetMapFDByName(iface, "tx_peer");
     if (mapfd < 0) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                   "Unable to find 'tx_peer' map");
+        SCLogError("Unable to find 'tx_peer' map");
         return -1;
     }
     int intmapfd = EBPFGetMapFDByName(iface, "tx_peer_int");
     if (intmapfd < 0) {
-        SCLogError(SC_ERR_INVALID_VALUE,
-                   "Unable to find 'tx_peer_int' map");
+        SCLogError("Unable to find 'tx_peer_int' map");
         return -1;
     }
 
     int key0 = 0;
     unsigned int peer_index = if_nametoindex(out_iface);
     if (peer_index == 0) {
-        SCLogError(SC_ERR_INVALID_VALUE, "No iface '%s'", out_iface);
+        SCLogError("No iface '%s'", out_iface);
         return -1;
     }
     int ret = bpf_map_update_elem(mapfd, &key0, &peer_index, BPF_ANY);
     if (ret) {
-        SCLogError(SC_ERR_AFP_CREATE, "Create peer entry failed (err:%d)", ret);
+        SCLogError("Create peer entry failed (err:%d)", ret);
         return -1;
     }
     ret = bpf_map_update_elem(intmapfd, &key0, &peer_index, BPF_ANY);
     if (ret) {
-        SCLogError(SC_ERR_AFP_CREATE, "Create peer entry failed (err:%d)", ret);
+        SCLogError("Create peer entry failed (err:%d)", ret);
         return -1;
     }
     return 0;

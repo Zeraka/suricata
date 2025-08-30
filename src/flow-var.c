@@ -47,11 +47,17 @@ static void FlowVarUpdateInt(FlowVar *fv, uint32_t value)
     fv->data.fv_int.value = value;
 }
 
+/* puts a new value into a flowvar */
+static void FlowVarUpdateFloat(FlowVar *fv, double value)
+{
+    fv->data.fv_float.value = value;
+}
+
 /** \brief get the flowvar with index 'idx' from the flow
  *  \note flow is not locked by this function, caller is
  *        responsible
  */
-FlowVar *FlowVarGetByKey(Flow *f, const uint8_t *key, uint16_t keylen)
+FlowVar *FlowVarGetByKey(Flow *f, const uint8_t *key, FlowVarKeyLenType keylen)
 {
     if (f == NULL)
         return NULL;
@@ -91,7 +97,8 @@ FlowVar *FlowVarGet(Flow *f, uint32_t idx)
 }
 
 /* add a flowvar to the flow, or update it */
-void FlowVarAddKeyValue(Flow *f, uint8_t *key, uint16_t keysize, uint8_t *value, uint16_t size)
+void FlowVarAddKeyValue(
+        Flow *f, uint8_t *key, FlowVarKeyLenType keylen, uint8_t *value, uint16_t size)
 {
     FlowVar *fv = SCCalloc(1, sizeof(FlowVar));
     if (unlikely(fv == NULL))
@@ -103,7 +110,7 @@ void FlowVarAddKeyValue(Flow *f, uint8_t *key, uint16_t keysize, uint8_t *value,
     fv->data.fv_str.value = value;
     fv->data.fv_str.value_len = size;
     fv->key = key;
-    fv->keylen = keysize;
+    fv->keylen = keylen;
     fv->next = NULL;
 
     GenericVarAppend(&f->flowvar, (GenericVar *)fv);
@@ -131,6 +138,26 @@ void FlowVarAddIdValue(Flow *f, uint32_t idx, uint8_t *value, uint16_t size)
     }
 }
 
+/* add a flowvar to the flow, or update it */
+void FlowVarAddFloat(Flow *f, uint32_t idx, double value)
+{
+    FlowVar *fv = FlowVarGet(f, idx);
+    if (fv == NULL) {
+        fv = SCMalloc(sizeof(FlowVar));
+        if (unlikely(fv == NULL))
+            return;
+
+        fv->type = DETECT_FLOWVAR;
+        fv->datatype = FLOWVAR_TYPE_FLOAT;
+        fv->idx = idx;
+        fv->data.fv_float.value = value;
+        fv->next = NULL;
+
+        GenericVarAppend(&f->flowvar, (GenericVar *)fv);
+    } else {
+        FlowVarUpdateFloat(fv, value);
+    }
+}
 /* add a flowvar to the flow, or update it */
 void FlowVarAddIntNoLock(Flow *f, uint32_t idx, uint32_t value)
 {
@@ -166,6 +193,7 @@ void FlowVarFree(FlowVar *fv)
     if (fv->datatype == FLOWVAR_TYPE_STR) {
         if (fv->data.fv_str.value != NULL)
             SCFree(fv->data.fv_str.value);
+        SCFree(fv->key);
     }
     SCFree(fv);
 }

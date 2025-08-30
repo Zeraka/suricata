@@ -21,11 +21,13 @@
  * \author Jeff Lucovsky <jeff@lucovsky.org>
  */
 
-#ifndef __FEATURE_H__
-#define __FEATURE_H__
+#ifndef SURICATA_FEATURE_H
+#define SURICATA_FEATURE_H
 
 /* Provided feature names */
 #define FEATURE_OUTPUT_FILESTORE    "output::file-store"
+#define FEATURE_JA3                 "ja3"
+#define FEATURE_JA4                 "ja4"
 
 void ProvidesFeature(const char *);
 bool RequiresFeature(const char *);
@@ -35,4 +37,4 @@ void FeatureDump(void);
 void FeatureTrackingRelease(void);
 void FeatureTrackingRegister(void);
 
-#endif /* __FEATURE_H__ */
+#endif /* SURICATA_FEATURE_H */

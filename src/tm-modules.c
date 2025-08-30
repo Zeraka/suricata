@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,22 +23,15 @@
  * Thread Module functions
  */
 
-#include "suricata-common.h"
-#include "packet-queue.h"
-#include "tm-threads.h"
+#include "tm-modules.h"
 #include "util-debug.h"
-#include "threads.h"
-#include "util-logopenfile.h"
 
 TmModule tmm_modules[TMM_SIZE];
 
 void TmModuleDebugList(void)
 {
-    TmModule *t;
-    uint16_t i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -52,11 +45,8 @@ void TmModuleDebugList(void)
  *  \retval ptr to the module or NULL */
 TmModule *TmModuleGetByName(const char *name)
 {
-    TmModule *t;
-    uint16_t i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -66,17 +56,6 @@ TmModule *TmModuleGetByName(const char *name)
     }
 
     return NULL;
-}
-
-/** \brief get the id of a module from it's name
- *  \param name registered name of the module
- *  \retval id the id or -1 in case of error */
-int TmModuleGetIdByName(const char *name)
-{
-    TmModule *tm = TmModuleGetByName(name);
-    if (tm == NULL)
-        return -1;;
-    return TmModuleGetIDForTM(tm);
 }
 
 /**
@@ -89,10 +68,10 @@ int TmModuleGetIdByName(const char *name)
  */
 TmModule *TmModuleGetById(int id)
 {
-
     if (id < 0 || id >= TMM_SIZE) {
-        SCLogError(SC_ERR_TM_MODULES_ERROR, "Threading module with the id "
-                   "\"%d\" doesn't exist", id);
+        SCLogError("Threading module with the id "
+                   "\"%d\" doesn't exist",
+                id);
         return NULL;
     }
 
@@ -108,11 +87,8 @@ TmModule *TmModuleGetById(int id)
  */
 int TmModuleGetIDForTM(TmModule *tm)
 {
-    TmModule *t;
-    int i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -127,11 +103,8 @@ int TmModuleGetIDForTM(TmModule *tm)
 
 void TmModuleRunInit(void)
 {
-    TmModule *t;
-    uint16_t i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -145,11 +118,8 @@ void TmModuleRunInit(void)
 
 void TmModuleRunDeInit(void)
 {
-    TmModule *t;
-    uint16_t i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -165,11 +135,8 @@ void TmModuleRunDeInit(void)
 void TmModuleRegisterTests(void)
 {
 #ifdef UNITTESTS
-    TmModule *t;
-    uint16_t i;
-
-    for (i = 0; i < TMM_SIZE; i++) {
-        t = &tmm_modules[i];
+    for (uint16_t i = 0; i < TMM_SIZE; i++) {
+        TmModule *t = &tmm_modules[i];
 
         if (t->name == NULL)
             continue;
@@ -179,8 +146,9 @@ void TmModuleRegisterTests(void)
 
         if (t->RegisterTests == NULL) {
             if (coverage_unittests)
-                SCLogWarning(SC_WARN_NO_UNITTESTS, "threading module %s has no unittest "
-                        "registration function.", t->name);
+                SCLogWarning("threading module %s has no unittest "
+                             "registration function.",
+                        t->name);
         } else {
             t->RegisterTests();
             g_ut_covered++;
@@ -189,6 +157,7 @@ void TmModuleRegisterTests(void)
 #endif /* UNITTESTS */
 }
 
+#ifdef PROFILING
 #define CASE_CODE(E)  case E: return #E
 
 /**
@@ -210,9 +179,10 @@ const char * TmModuleTmmIdToString(TmmId id)
         CASE_CODE (TMM_RECEIVEPCAP);
         CASE_CODE (TMM_RECEIVEPCAPFILE);
         CASE_CODE (TMM_DECODEPCAP);
-        CASE_CODE (TMM_DECODEPCAPFILE);
-        CASE_CODE (TMM_RECEIVEPFRING);
-        CASE_CODE (TMM_DECODEPFRING);
+        CASE_CODE(TMM_DECODEPCAPFILE);
+        CASE_CODE(TMM_RECEIVEDPDK);
+        CASE_CODE(TMM_DECODEDPDK);
+        CASE_CODE(TMM_DECODELIB);
         CASE_CODE (TMM_RECEIVEPLUGIN);
         CASE_CODE (TMM_DECODEPLUGIN);
         CASE_CODE (TMM_RESPONDREJECT);
@@ -222,12 +192,12 @@ const char * TmModuleTmmIdToString(TmmId id)
         CASE_CODE (TMM_RECEIVEERFFILE);
         CASE_CODE (TMM_DECODEERFFILE);
         CASE_CODE (TMM_RECEIVEERFDAG);
-        CASE_CODE (TMM_DECODEERFDAG);
-        CASE_CODE (TMM_RECEIVENAPATECH);
-        CASE_CODE (TMM_DECODENAPATECH);
+        CASE_CODE(TMM_DECODEERFDAG);
         CASE_CODE (TMM_RECEIVEAFP);
+        CASE_CODE(TMM_RECEIVEAFXDP);
         CASE_CODE (TMM_ALERTPCAPINFO);
         CASE_CODE (TMM_DECODEAFP);
+        CASE_CODE(TMM_DECODEAFXDP);
         CASE_CODE (TMM_STATSLOGGER);
         CASE_CODE (TMM_FLOWMANAGER);
         CASE_CODE (TMM_FLOWRECYCLER);
@@ -244,3 +214,4 @@ const char * TmModuleTmmIdToString(TmmId id)
     }
     return "<unknown>";
 }
+#endif

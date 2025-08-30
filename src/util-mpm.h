@@ -21,9 +21,10 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __UTIL_MPM_H__
-#define __UTIL_MPM_H__
+#ifndef SURICATA_UTIL_MPM_H
+#define SURICATA_UTIL_MPM_H
 
+#include "app-layer-protos.h"
 #include "util-prefilter.h"
 
 #define MPM_INIT_HASH_SIZE 65536
@@ -33,7 +34,6 @@ enum {
 
     /* aho-corasick */
     MPM_AC,
-    MPM_AC_BS,
     MPM_AC_KS,
     MPM_HS,
     /* table size */
@@ -54,7 +54,7 @@ typedef struct MpmThreadCtx_ {
 typedef struct MpmPattern_ {
     /* length of the pattern */
     uint16_t len;
-    /* flags decribing the pattern */
+    /* flags describing the pattern */
     uint8_t flags;
 
     /* offset into the buffer where match may start */
@@ -67,7 +67,7 @@ typedef struct MpmPattern_ {
     uint8_t *original_pat;
     /* case sensitive */
     uint8_t *cs;
-    /* case INsensitive */
+    /* case insensitive */
     uint8_t *ci;
     /* pattern id */
     uint32_t id;
@@ -84,6 +84,11 @@ typedef struct MpmPattern_ {
  * one per sgh. */
 #define MPMCTX_FLAGS_GLOBAL     BIT_U8(0)
 #define MPMCTX_FLAGS_NODEPTH    BIT_U8(1)
+#define MPMCTX_FLAGS_CACHE_TO_DISK BIT_U8(2)
+
+typedef struct MpmConfig_ {
+    const char *cache_dir_path;
+} MpmConfig;
 
 typedef struct MpmCtx_ {
     void *ctx;
@@ -112,31 +117,35 @@ typedef struct MpmCtx_ {
  * we should supply this as the key */
 #define MPM_CTX_FACTORY_UNIQUE_CONTEXT -1
 
-typedef struct MpmCtxFactoryItem_ {
+typedef struct MpmCtxFactoryItem {
     const char *name;
     MpmCtx *mpm_ctx_ts;
     MpmCtx *mpm_ctx_tc;
     int32_t id;
+    int32_t sm_list;
+    AppProto alproto; /**< ALPROTO_UNKNOWN is not an app item */
+    struct MpmCtxFactoryItem *next;
 } MpmCtxFactoryItem;
 
 typedef struct MpmCtxFactoryContainer_ {
     MpmCtxFactoryItem *items;
-    int32_t no_of_items;
+    int32_t max_id;
 } MpmCtxFactoryContainer;
 
 /** pattern is case insensitive */
-#define MPM_PATTERN_FLAG_NOCASE     0x01
-/** pattern is negated */
-#define MPM_PATTERN_FLAG_NEGATED    0x02
+#define MPM_PATTERN_FLAG_NOCASE 0x01
 /** pattern has a depth setting */
 #define MPM_PATTERN_FLAG_DEPTH      0x04
 /** pattern has an offset setting */
-#define MPM_PATTERN_FLAG_OFFSET     0x08
-/** one byte pattern (used in b2g) */
-#define MPM_PATTERN_ONE_BYTE        0x10
+#define MPM_PATTERN_FLAG_OFFSET 0x08
 /** the ctx uses it's own internal id instead of
  *  what is passed through the API */
 #define MPM_PATTERN_CTX_OWNS_ID     0x20
+#define MPM_PATTERN_FLAG_ENDSWITH   0x40
+
+#define MPM_FEATURE_FLAG_DEPTH    BIT_U8(0)
+#define MPM_FEATURE_FLAG_OFFSET   BIT_U8(1)
+#define MPM_FEATURE_FLAG_ENDSWITH BIT_U8(2)
 
 typedef struct MpmTableElmt_ {
     const char *name;
@@ -144,6 +153,10 @@ typedef struct MpmTableElmt_ {
     void (*InitThreadCtx)(struct MpmCtx_ *, struct MpmThreadCtx_ *);
     void (*DestroyCtx)(struct MpmCtx_ *);
     void (*DestroyThreadCtx)(struct MpmCtx_ *, struct MpmThreadCtx_ *);
+
+    MpmConfig *(*ConfigInit)(void);
+    void (*ConfigDeinit)(MpmConfig **);
+    void (*ConfigCacheDirSet)(MpmConfig *, const char *dir_path);
 
     /** function pointers for adding patterns to the mpm ctx.
      *
@@ -157,48 +170,48 @@ typedef struct MpmTableElmt_ {
      *  \param flags pattern flags
      */
     int  (*AddPattern)(struct MpmCtx_ *, uint8_t *, uint16_t, uint16_t, uint16_t, uint32_t, SigIntId, uint8_t);
-    int  (*AddPatternNocase)(struct MpmCtx_ *, uint8_t *, uint16_t, uint16_t, uint16_t, uint32_t, SigIntId, uint8_t);
-    int  (*Prepare)(struct MpmCtx_ *);
+    int (*AddPatternNocase)(struct MpmCtx_ *, const uint8_t *, uint16_t, uint16_t, uint16_t,
+            uint32_t, SigIntId, uint8_t);
+    int (*Prepare)(MpmConfig *, struct MpmCtx_ *);
+    int (*CacheRuleset)(MpmConfig *);
+    /** \retval cnt number of patterns that matches: once per pattern max. */
     uint32_t (*Search)(const struct MpmCtx_ *, struct MpmThreadCtx_ *, PrefilterRuleStore *, const uint8_t *, uint32_t);
     void (*PrintCtx)(struct MpmCtx_ *);
     void (*PrintThreadCtx)(struct MpmThreadCtx_ *);
+#ifdef UNITTESTS
     void (*RegisterUnittests)(void);
-    uint8_t flags;
+#endif
+    uint8_t feature_flags;
 } MpmTableElmt;
 
 extern MpmTableElmt mpm_table[MPM_TABLE_SIZE];
-extern int mpm_default_matcher;
+extern uint8_t mpm_default_matcher;
 
 struct DetectEngineCtx_;
 
-int32_t MpmFactoryRegisterMpmCtxProfile(struct DetectEngineCtx_ *, const char *);
+int32_t MpmFactoryRegisterMpmCtxProfile(
+        struct DetectEngineCtx_ *, const char *, const int, const AppProto);
 void MpmFactoryReClaimMpmCtx(const struct DetectEngineCtx_ *, MpmCtx *);
 MpmCtx *MpmFactoryGetMpmCtxForProfile(const struct DetectEngineCtx_ *, int32_t, int);
 void MpmFactoryDeRegisterAllMpmCtxProfiles(struct DetectEngineCtx_ *);
 int32_t MpmFactoryIsMpmCtxAvailable(const struct DetectEngineCtx_ *, const MpmCtx *);
 
-int PmqSetup(PrefilterRuleStore *);
-void PmqReset(PrefilterRuleStore *);
-void PmqCleanup(PrefilterRuleStore *);
-void PmqFree(PrefilterRuleStore *);
-
 void MpmTableSetup(void);
 void MpmRegisterTests(void);
 
-void MpmInitCtx(MpmCtx *mpm_ctx, uint16_t matcher);
+void MpmInitCtx(MpmCtx *mpm_ctx, uint8_t matcher);
 void MpmInitThreadCtx(MpmThreadCtx *mpm_thread_ctx, uint16_t);
+void MpmDestroyThreadCtx(MpmThreadCtx *mpm_thread_ctx, const uint16_t matcher);
 
 int MpmAddPatternCS(struct MpmCtx_ *mpm_ctx, uint8_t *pat, uint16_t patlen,
                     uint16_t offset, uint16_t depth,
                     uint32_t pid, SigIntId sid, uint8_t flags);
-int MpmAddPatternCI(struct MpmCtx_ *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                    uint16_t offset, uint16_t depth,
-                    uint32_t pid, SigIntId sid, uint8_t flags);
+int MpmAddPatternCI(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags);
 
 void MpmFreePattern(MpmCtx *mpm_ctx, MpmPattern *p);
 
-int MpmAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                            uint16_t offset, uint16_t depth, uint32_t pid,
-                            SigIntId sid, uint8_t flags);
+int MpmAddPattern(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags);
 
-#endif /* __UTIL_MPM_H__ */
+#endif /* SURICATA_UTIL_MPM_H */

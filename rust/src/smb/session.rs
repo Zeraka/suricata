@@ -15,13 +15,12 @@
  * 02110-1301, USA.
  */
 
-use crate::log::*;
 use crate::kerberos::*;
 use crate::smb::smb::*;
 use crate::smb::smb1_session::*;
 use crate::smb::auth::*;
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SMBTransactionSessionSetup {
     pub request_host: Option<SessionSetupRequest>,
     pub response_host: Option<SessionSetupResponse>,
@@ -30,13 +29,8 @@ pub struct SMBTransactionSessionSetup {
 }
 
 impl SMBTransactionSessionSetup {
-    pub fn new() -> SMBTransactionSessionSetup {
-        return SMBTransactionSessionSetup {
-            request_host: None,
-            response_host: None,
-            ntlmssp: None,
-            krb_ticket: None,
-        }
+    pub fn new() -> Self {
+        return Default::default()
     }
 }
 
@@ -53,8 +47,8 @@ impl SMBState {
         tx.response_done = self.tc_trunc; // no response expected if tc is truncated
 
         SCLogDebug!("SMB: TX SESSIONSETUP created: ID {}", tx.id);
-        self.transactions.push(tx);
-        let tx_ref = self.transactions.last_mut();
+        self.transactions.push_back(tx);
+        let tx_ref = self.transactions.back_mut();
         return tx_ref.unwrap();
     }
 
@@ -67,6 +61,8 @@ impl SMBState {
                 _ => { false },
             };
             if hit {
+                tx.tx_data.updated_tc = true;
+                tx.tx_data.updated_ts = true;
                 return Some(tx);
             }
         }

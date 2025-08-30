@@ -30,9 +30,10 @@
 #include "stream-tcp.h"
 #include "flow-util.h"
 
-/** \brief Run callback for all segments
+/** \brief Run callback for all segments in a single direction.
  *
  * Must be called under flow lock.
+ * \var flag determines the direction to run callback on (either to server or to client).
  *
  * \return -1 in case of error, the number of segment in case of success
  */
@@ -44,10 +45,35 @@ int StreamSegmentForEach(const Packet *p, uint8_t flag, StreamSegmentCallback Ca
             break;
 #ifdef DEBUG
         case IPPROTO_UDP:
-            SCLogWarning(SC_ERR_UNKNOWN_PROTOCOL, "UDP is currently unsupported");
+            SCLogWarning("UDP is currently unsupported");
             break;
         default:
-            SCLogWarning(SC_ERR_UNKNOWN_PROTOCOL, "This protocol is currently unsupported");
+            SCLogWarning("This protocol is currently unsupported");
+            break;
+#endif
+    }
+    return 0;
+}
+
+/** \brief Run callback for all segments on both directions of the session
+ *
+ * Must be called under flow lock.
+ *
+ * \return -1 in case of error, the number of segments in case of success.
+ */
+int StreamSegmentForSession(
+        const Packet *p, uint8_t flag, StreamSegmentCallback CallbackFunc, void *data)
+{
+    switch (p->proto) {
+        case IPPROTO_TCP:
+            return StreamTcpSegmentForSession(p, flag, CallbackFunc, data);
+            break;
+#ifdef DEBUG
+        case IPPROTO_UDP:
+            SCLogWarning("UDP is currently unsupported");
+            break;
+        default:
+            SCLogWarning("This protocol is currently unsupported");
             break;
 #endif
     }

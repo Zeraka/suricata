@@ -69,31 +69,39 @@ void DetectClasstypeRegister(void)
  */
 static int DetectClasstypeParseRawString(const char *rawstr, char *out, size_t outsize)
 {
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2len;
 
     const size_t esize = CLASSTYPE_NAME_MAX_LEN + 8;
     char e[esize];
+    pcre2_match_data *match = NULL;
 
-    int ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, &match, rawstr, 0, 0);
     if (ret < 0) {
-        SCLogError(SC_ERR_PCRE_MATCH, "Invalid Classtype in Signature");
-        return -1;
+        SCLogError("Invalid Classtype in Signature");
+        goto error;
     }
 
-    ret = pcre_copy_substring((char *)rawstr, ov, 30, 1, e, esize);
+    pcre2len = esize;
+    ret = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)e, &pcre2len);
     if (ret < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
-        return -1;
+        SCLogError("pcre2_substring_copy_bynumber failed");
+        goto error;
     }
 
     if (strlen(e) >= CLASSTYPE_NAME_MAX_LEN) {
-        SCLogError(SC_ERR_INVALID_VALUE, "classtype '%s' is too big: max %d",
-                rawstr, CLASSTYPE_NAME_MAX_LEN - 1);
-        return -1;
+        SCLogError("classtype '%s' is too big: max %d", rawstr, CLASSTYPE_NAME_MAX_LEN - 1);
+        goto error;
     }
     (void)strlcpy(out, e, outsize);
 
+    pcre2_match_data_free(match);
     return 0;
+
+error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
+    return -1;
 }
 
 /**
@@ -113,18 +121,19 @@ static int DetectClasstypeSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
 
     if ((s->class_id > 0) || (s->class_msg != NULL)) {
         if (SigMatchStrictEnabled(DETECT_CLASSTYPE)) {
-            SCLogError(SC_ERR_CONFLICTING_RULE_KEYWORDS, "duplicated 'classtype' "
-                    "keyword detected.");
+            SCLogError("duplicated 'classtype' "
+                       "keyword detected.");
             return -1;
         } else {
-            SCLogWarning(SC_ERR_CONFLICTING_RULE_KEYWORDS, "duplicated 'classtype' "
-                    "keyword detected. Using instance with highest priority");
+            SCLogWarning("duplicated 'classtype' "
+                         "keyword detected. Using instance with highest priority");
         }
     }
 
     if (DetectClasstypeParseRawString(rawstr, parsed_ct_name, sizeof(parsed_ct_name)) < 0) {
-        SCLogError(SC_ERR_PCRE_PARSE, "invalid value for classtype keyword: "
-                "\"%s\"", rawstr);
+        SCLogError("invalid value for classtype keyword: "
+                   "\"%s\"",
+                rawstr);
         return -1;
     }
 
@@ -132,26 +141,24 @@ static int DetectClasstypeSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
     SCClassConfClasstype *ct = SCClassConfGetClasstype(parsed_ct_name, de_ctx);
     if (ct == NULL) {
         if (SigMatchStrictEnabled(DETECT_CLASSTYPE)) {
-            SCLogError(SC_ERR_UNKNOWN_VALUE, "unknown classtype '%s'",
-                    parsed_ct_name);
+            SCLogError("unknown classtype '%s'", parsed_ct_name);
             return -1;
         }
 
         if (s->id > 0) {
-            SCLogWarning(SC_ERR_UNKNOWN_VALUE, "signature sid:%u uses "
-                    "unknown classtype: \"%s\", using default priority %d. "
-                    "This message won't be shown again for this classtype",
+            SCLogWarning("signature sid:%u uses "
+                         "unknown classtype: \"%s\", using default priority %d. "
+                         "This message won't be shown again for this classtype",
                     s->id, parsed_ct_name, DETECT_DEFAULT_PRIO);
         } else if (de_ctx->rule_file != NULL) {
-            SCLogWarning(SC_ERR_UNKNOWN_VALUE, "signature at %s:%u uses "
-                    "unknown classtype: \"%s\", using default priority %d. "
-                    "This message won't be shown again for this classtype",
-                    de_ctx->rule_file, de_ctx->rule_line,
-                    parsed_ct_name, DETECT_DEFAULT_PRIO);
+            SCLogWarning("signature at %s:%u uses "
+                         "unknown classtype: \"%s\", using default priority %d. "
+                         "This message won't be shown again for this classtype",
+                    de_ctx->rule_file, de_ctx->rule_line, parsed_ct_name, DETECT_DEFAULT_PRIO);
         } else {
-            SCLogWarning(SC_ERR_UNKNOWN_VALUE, "unknown classtype: \"%s\", "
-                    "using default priority %d. "
-                    "This message won't be shown again for this classtype",
+            SCLogWarning("unknown classtype: \"%s\", "
+                         "using default priority %d. "
+                         "This message won't be shown again for this classtype",
                     parsed_ct_name, DETECT_DEFAULT_PRIO);
         }
 
@@ -174,7 +181,7 @@ static int DetectClasstypeSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
      */
 
     bool update_ct = false;
-    if ((s->init_data->init_flags & SIG_FLAG_INIT_PRIO_EXPLICT) != 0) {
+    if ((s->init_data->init_flags & SIG_FLAG_INIT_PRIO_EXPLICIT) != 0) {
         /* don't touch Signature::prio */
         update_ct = true;
     } else if (s->prio == -1) {
@@ -206,7 +213,7 @@ static int DetectClasstypeTest01(void)
 
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     FAIL_IF_NULL(fd);
-    SCClassConfLoadClassficationConfigFile(de_ctx, fd);
+    SCClassConfLoadClassificationConfigFile(de_ctx, fd);
     Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
                                "(msg:\"Classtype test\"; "
                                "Classtype:not_available; sid:1;)");
@@ -229,7 +236,7 @@ static int DetectClasstypeTest02(void)
 
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     FAIL_IF_NULL(fd);
-    SCClassConfLoadClassficationConfigFile(de_ctx, fd);
+    SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
     Signature *sig = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
                   "(Classtype:bad-unknown; sid:1;)");
@@ -273,7 +280,7 @@ static int DetectClasstypeTest03(void)
 
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     FAIL_IF_NULL(fd);
-    SCClassConfLoadClassficationConfigFile(de_ctx, fd);
+    SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
     Signature *sig = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
                   "(msg:\"Classtype test\"; Classtype:bad-unknown; priority:1; sid:1;)");

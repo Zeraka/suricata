@@ -33,15 +33,11 @@
 #define SC_CAP_NET_BIND_SERVICE 0x40
 #define SC_CAP_NET_BROADCAST    0x80
 
-#ifndef HAVE_LIBCAP_NG
-#define SCDropCaps(...)
-#define SCDropMainThreadCaps(...)
-#else
-#include "threadvars.h"
-#include "util-debug.h"
+#ifdef HAVE_LIBCAP_NG
 #include <cap-ng.h>
+#include "threadvars.h"
 
-/**Drop the previliges of the given thread tv, based on the thread cap_flags
+/**Drop the privileges of the given thread tv, based on the thread cap_flags
  * which implies the capability requirement of the given thread. Initially all
  * caps are dropped and later, the required caps are set for the given thread
  */
@@ -89,10 +85,13 @@ void SCDropCaps(ThreadVars *tv);
 */
 void SCDropMainThreadCaps(uint32_t , uint32_t );
 
+#else
+#define SCDropCaps(...)
+#define SCDropMainThreadCaps(...)
 #endif /* HAVE_LIBCAP_NG */
 
-int SCGetUserID(const char *, const char *, uint32_t *, uint32_t *);
-int SCGetGroupID(const char *, uint32_t *);
+void SCGetUserID(const char *, const char *, uint32_t *, uint32_t *);
+void SCGetGroupID(const char *, uint32_t *);
 
 #ifdef __OpenBSD__
 int SCPledge(void);

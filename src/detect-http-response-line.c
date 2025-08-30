@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2016 Open Information Security Foundation
+/* Copyright (C) 2007-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -37,6 +37,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -70,29 +71,54 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         void *txv, const int list_id);
 static int g_http_response_line_id = 0;
 
+static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t _flow_flags, void *txv,
+        const int list_id)
+{
+    SCEnter();
+
+    InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
+    if (buffer->inspect == NULL) {
+        uint32_t b_len = 0;
+        const uint8_t *b = NULL;
+
+        if (SCHttp2TxGetResponseLine(txv, &b, &b_len) != 1)
+            return NULL;
+        if (b == NULL || b_len == 0)
+            return NULL;
+
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
+    }
+
+    return buffer;
+}
+
 /**
  * \brief Registers the keyword handlers for the "http_response_line" keyword.
  */
 void DetectHttpResponseLineRegister(void)
 {
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].name = "http.response_line";
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].alias = "http_response_line";
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].desc = "content modifier to match only on the HTTP response line";
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].url = "/rules/http-keywords.html#http-response-line";
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].Setup = DetectHttpResponseLineSetup;
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].name = "http.response_line";
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].alias = "http_response_line";
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].desc =
+            "content modifier to match only on the HTTP response line";
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].url = "/rules/http-keywords.html#http-response-line";
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].Setup = DetectHttpResponseLineSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].RegisterTests = DetectHttpResponseLineRegisterTests;
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].RegisterTests = DetectHttpResponseLineRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_RESPONSE_LINE].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_HTTP_RESPONSE_LINE].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("http_response_line",
-            ALPROTO_HTTP, SIG_FLAG_TOCLIENT, HTP_RESPONSE_LINE,
-            DetectEngineInspectBufferGeneric,
-            GetData);
+    DetectAppLayerInspectEngineRegister("http_response_line", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+            HTP_RESPONSE_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
 
-    DetectAppLayerMpmRegister2("http_response_line", SIG_FLAG_TOCLIENT, 2,
-            PrefilterGenericMpmRegister, GetData,
-            ALPROTO_HTTP, HTP_RESPONSE_LINE);
+    DetectAppLayerMpmRegister("http_response_line", SIG_FLAG_TOCLIENT, 2,
+            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP1, HTP_RESPONSE_PROGRESS_LINE);
+
+    DetectAppLayerInspectEngineRegister("http_response_line", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetData2);
+    DetectAppLayerMpmRegister("http_response_line", SIG_FLAG_TOCLIENT, 2,
+            PrefilterGenericMpmRegister, GetData2, ALPROTO_HTTP2, HTTP2StateDataServer);
 
     DetectBufferTypeSetDescriptionByName("http_response_line",
             "http response line");
@@ -115,10 +141,10 @@ void DetectHttpResponseLineRegister(void)
  */
 static int DetectHttpResponseLineSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(s, g_http_response_line_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_response_line_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
 
     return 0;
@@ -132,14 +158,14 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
-        if (unlikely(tx->response_line == NULL)) {
+        if (unlikely(htp_tx_response_line(tx) == NULL)) {
             return NULL;
         }
-        const uint32_t data_len = bstr_len(tx->response_line);
-        const uint8_t *data = bstr_ptr(tx->response_line);
+        const uint32_t data_len = (uint32_t)bstr_len(htp_tx_response_line(tx));
+        const uint8_t *data = bstr_ptr(htp_tx_response_line(tx));
 
-        InspectionBufferSetup(buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
     return buffer;
 }
@@ -151,7 +177,7 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 #include "stream-tcp-reassemble.h"
 
 /**
- * \test Test that a signature containting a http_response_line is correctly parsed
+ * \test Test that a signature containing a http_response_line is correctly parsed
  *       and the keyword is registered.
  */
 static int DetectHttpResponseLineTest01(void)
@@ -168,101 +194,9 @@ static int DetectHttpResponseLineTest01(void)
     PASS;
 }
 
-
-/**
- *\test Test that the http_response_line content matches against a http request
- *      which holds the content.
- */
-static int DetectHttpResponseLineTest02(void)
-{
-    TcpSession ssn;
-    Packet *p = NULL;
-    ThreadVars th_v;
-    DetectEngineCtx *de_ctx = NULL;
-    DetectEngineThreadCtx *det_ctx = NULL;
-    HtpState *http_state = NULL;
-    Flow f;
-    uint8_t http_buf[] =
-        "GET /index.html HTTP/1.0\r\n"
-        "Host: www.openinfosecfoundation.org\r\n"
-        "User-Agent: This is dummy message body\r\n"
-        "Content-Type: text/html\r\n"
-        "\r\n";
-    uint32_t http_len = sizeof(http_buf) - 1;
-    uint8_t http_buf2[] =
-        "HTTP/1.0 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: 7\r\n"
-        "\r\n"
-        "message";
-    uint32_t http_len2 = sizeof(http_buf2) - 1;
-
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
-    FAIL_IF_NULL(alp_tctx);
-
-    memset(&th_v, 0, sizeof(th_v));
-    memset(&f, 0, sizeof(f));
-    memset(&ssn, 0, sizeof(ssn));
-
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-    FAIL_IF_NULL(p);
-
-    FLOW_INITIALIZE(&f);
-    f.protoctx = (void *)&ssn;
-    f.proto = IPPROTO_TCP;
-    f.flags |= FLOW_IPV4;
-
-    p->flow = &f;
-    p->flowflags |= (FLOW_PKT_TOSERVER|FLOW_PKT_ESTABLISHED);
-    p->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
-    f.alproto = ALPROTO_HTTP;
-
-    StreamTcpInitConfig(TRUE);
-
-    de_ctx = DetectEngineCtxInit();
-    FAIL_IF_NULL(de_ctx);
-
-    de_ctx->flags |= DE_QUIET;
-
-    de_ctx->sig_list = SigInit(de_ctx,"alert http any any -> any any "
-                               "(http_response_line; content:\"HTTP/1.0 200 OK\"; "
-                               "sid:1;)");
-    FAIL_IF_NULL(de_ctx->sig_list);
-
-    SigGroupBuild(de_ctx);
-    DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
-
-    int r = AppLayerParserParse(&th_v, alp_tctx, &f, ALPROTO_HTTP, STREAM_TOSERVER, http_buf, http_len);
-    FAIL_IF(r != 0);
-
-    http_state = f.alstate;
-    FAIL_IF_NULL(http_state);
-
-    r = AppLayerParserParse(&th_v, alp_tctx, &f, ALPROTO_HTTP, STREAM_TOCLIENT, http_buf2, http_len2);
-    FAIL_IF(r != 0);
-
-    /* do detect */
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    FAIL_IF(PacketAlertCheck(p, 1));
-
-    p->flowflags = (FLOW_PKT_TOCLIENT|FLOW_PKT_ESTABLISHED);
-
-    SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-    FAIL_IF(!(PacketAlertCheck(p, 1)));
-
-    AppLayerParserThreadCtxFree(alp_tctx);
-    DetectEngineCtxFree(de_ctx);
-
-    StreamTcpFreeConfig(TRUE);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
-    PASS;
-}
-
 void DetectHttpResponseLineRegisterTests(void)
 {
     UtRegisterTest("DetectHttpResponseLineTest01", DetectHttpResponseLineTest01);
-    UtRegisterTest("DetectHttpResponseLineTest02", DetectHttpResponseLineTest02);
 }
 #endif /* UNITTESTS */
 /**

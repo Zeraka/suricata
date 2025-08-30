@@ -7,24 +7,32 @@ Example:
 
 ::
 
-
   {
-      "timestamp": "2009-11-24T21:27:09.534255",
-      "event_type": "alert",
-      "src_ip": "192.168.2.7",
-      "src_port": 1041,
-      "dest_ip": "x.x.250.50",
-      "dest_port": 80,
-      "proto": "TCP",
-      "alert": {
-          "action": "allowed",
-          "gid": 1,
-          "signature_id" :2001999,
-          "rev": 9,
-          "signature": "ET MALWARE BTGrab.com Spyware Downloading Ads",
-          "category": "A Network Trojan was detected",
-          "severity": 1
-      }
+    "timestamp": "2017-04-07T22:24:37.251547+0100",
+    "flow_id": 586497171462735,
+    "pcap_cnt": 53381,
+    "event_type": "alert",
+    "src_ip": "192.168.2.14",
+    "src_port": 50096,
+    "dest_ip": "209.53.113.5",
+    "dest_port": 80,
+    "proto": "TCP",
+    "metadata": {
+      "flowbits": [
+        "http.dottedquadhost"
+      ]
+    },
+    "tx_id": 4,
+    "alert": {
+      "action": "allowed",
+      "gid": 1,
+      "signature_id": 2018358,
+      "rev": 10,
+      "signature": "ET HUNTING GENERIC SUSPICIOUS POST to Dotted Quad with Fake Browser 1",
+      "category": "Potentially Bad Traffic",
+      "severity": 2
+    },
+    "app_proto": "http"
   }
 
 Common Section
@@ -35,7 +43,313 @@ All the JSON log types share a common structure:
 ::
 
 
-  {"timestamp":"2009-11-24T21:27:09.534255","event_type":"TYPE", ...tuple... ,"TYPE":{ ... type specific content ... }}
+  {"timestamp":"2009-11-24T21:27:09.534255","flow_id":ID_NUMBER, "event_type":"TYPE", ...tuple... ,"TYPE":{ ... type specific content ... }}
+
+Field: flow_id
+~~~~~~~~~~~~~~
+
+Correlates the network protocol,  flow logs EVE data and any evidence that
+Suricata has logged to an ``alert`` event and that alert's metadata, as well as
+to ``fileinfo``/file transaction and anomaly logs, if available. The same correlation
+and logs are produced regardless if there is an alert, for any session/flow.
+
+The ability to correlate EVE logs belonging to a specific session/flow was
+introduced in 2014 (see `commit f1185d051c21 <https://github.com/OISF/suricata/
+commit/f1185d051c210ca0daacdddbe865a51af24f4ea3>`_).
+
+Further below, you can see several examples of events logged by Suricata: an
+:ref:`alert<eve-format-alert>` for an ``HTTP`` rule, ``fileinfo``, :ref:`http<eve-format-http>`,
+:ref:`anomaly<eve-format-anomaly>`, and :ref:`flow<eve-format-flow>` events, all
+easily correlated using the ``flow_id`` EVE field::
+
+    $ jq 'select(.flow_id==1676750115612680)' eve.json
+
+Event type: ``alert``::
+
+    {
+      "timestamp": "2023-09-18T06:13:41.532140+0000",
+      "flow_id": 1676750115612680,
+      "pcap_cnt": 130,
+      "event_type": "alert",
+      "src_ip": "142.11.240.191",
+      "src_port": 35361,
+      "dest_ip": "192.168.100.237",
+      "dest_port": 49175,
+      "proto": "TCP",
+      "pkt_src": "wire/pcap",
+      "ether": {
+        "src_mac": "52:54:00:36:3e:ff",
+        "dest_mac": "12:a9:86:6c:77:de"
+      },
+      "tx_id": 1,
+      "alert": {
+        "action": "allowed",
+        "gid": 1,
+        "signature_id": 2045001,
+        "rev": 1,
+        "signature": "ET ATTACK_RESPONSE Win32/LeftHook Stealer Browser Extension Config Inbound",
+        "category": "A Network Trojan was detected",
+        "severity": 1,
+        "metadata": {
+          "affected_product": [
+            "Windows_XP_Vista_7_8_10_Server_32_64_Bit"
+          ],
+          "attack_target": [
+            "Client_Endpoint"
+          ],
+          "created_at": [
+            "2023_04_17"
+          ],
+          "deployment": [
+            "Perimeter"
+          ],
+          "former_category": [
+            "ATTACK_RESPONSE"
+          ],
+          "signature_severity": [
+            "Major"
+          ],
+          "updated_at": [
+            "2023_04_18"
+          ]
+        }
+      },
+      "http": {
+        "hostname": "142.11.240.191",
+        "http_port": 35361,
+        "url": "/",
+        "http_content_type": "text/xml",
+        "http_method": "POST",
+        "protocol": "HTTP/1.1",
+        "status": 200,
+        "length": 5362
+      },
+      "files": [
+        {
+          "filename": "/",
+          "gaps": false,
+          "state": "CLOSED",
+          "stored": false,
+          "size": 5362,
+          "tx_id": 1
+        }
+      ],
+      "app_proto": "http",
+      "direction": "to_client",
+      "flow": {
+        "pkts_toserver": 13,
+        "pkts_toclient": 12,
+        "bytes_toserver": 1616,
+        "bytes_toclient": 8044,
+        "start": "2023-09-18T06:13:33.324862+0000",
+        "src_ip": "192.168.100.237",
+        "dest_ip": "142.11.240.191",
+        "src_port": 49175,
+        "dest_port": 35361
+      }
+    }
+
+Event type: ``fileinfo``::
+
+    {
+      "timestamp": "2023-09-18T06:13:33.903924+0000",
+      "flow_id": 1676750115612680,
+      "pcap_cnt": 70,
+      "event_type": "fileinfo",
+      "src_ip": "192.168.100.237",
+      "src_port": 49175,
+      "dest_ip": "142.11.240.191",
+      "dest_port": 35361,
+      "proto": "TCP",
+      "pkt_src": "wire/pcap",
+      "ether": {
+        "src_mac": "12:a9:86:6c:77:de",
+        "dest_mac": "52:54:00:36:3e:ff"
+      },
+      "http": {
+        "hostname": "142.11.240.191",
+        "http_port": 35361,
+        "url": "/",
+        "http_content_type": "text/xml",
+        "http_method": "POST",
+        "protocol": "HTTP/1.1",
+        "status": 200,
+        "length": 212
+      },
+      "app_proto": "http",
+      "fileinfo": {
+        "filename": "/",
+        "gaps": false,
+        "state": "CLOSED",
+        "stored": false,
+        "size": 137,
+        "tx_id": 0
+      }
+    }
+
+Event type: ``HTTP``::
+
+    {
+      "timestamp": "2023-09-18T06:13:33.903924+0000",
+      "flow_id": 1676750115612680,
+      "pcap_cnt": 70,
+      "event_type": "http",
+      "src_ip": "192.168.100.237",
+      "src_port": 49175,
+      "dest_ip": "142.11.240.191",
+      "dest_port": 35361,
+      "proto": "TCP",
+      "pkt_src": "wire/pcap",
+      "ether": {
+        "src_mac": "12:a9:86:6c:77:de",
+        "dest_mac": "52:54:00:36:3e:ff"
+      },
+      "tx_id": 0,
+      "http": {
+        "hostname": "142.11.240.191",
+        "http_port": 35361,
+        "url": "/",
+        "http_content_type": "text/xml",
+        "http_method": "POST",
+        "protocol": "HTTP/1.1",
+        "status": 200,
+        "length": 212,
+        "request_headers": [
+          {
+            "name": "Content-Type",
+            "value": "text/xml; charset=utf-8"
+          },
+          {
+            "name": "SOAPAction",
+            "value": "\"http://tempuri.org/Endpoint/CheckConnect\""
+          },
+          {
+            "name": "Host",
+            "value": "142.11.240.191:35361"
+          },
+          {
+            "name": "Content-Length",
+            "value": "137"
+          },
+          {
+            "name": "Expect",
+            "value": "100-continue"
+          },
+          {
+            "name": "Accept-Encoding",
+            "value": "gzip, deflate"
+          },
+          {
+            "name": "Connection",
+            "value": "Keep-Alive"
+          }
+        ],
+        "response_headers": [
+          {
+            "name": "Content-Length",
+            "value": "212"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/xml; charset=utf-8"
+          },
+          {
+            "name": "Server",
+            "value": "Microsoft-HTTPAPI/2.0"
+          },
+          {
+            "name": "Date",
+            "value": "Mon, 18 Sep 2023 06:13:33 GMT"
+          }
+        ]
+      }
+    }
+
+Event type: ``anomaly``::
+
+    {
+      "timestamp": "2023-09-18T06:13:58.882971+0000",
+      "flow_id": 1676750115612680,
+      "pcap_cnt": 2878,
+      "event_type": "anomaly",
+      "src_ip": "192.168.100.237",
+      "src_port": 49175,
+      "dest_ip": "142.11.240.191",
+      "dest_port": 35361,
+      "proto": "TCP",
+      "pkt_src": "wire/pcap",
+      "ether": {
+        "src_mac": "12:a9:86:6c:77:de",
+        "dest_mac": "52:54:00:36:3e:ff"
+      },
+      "tx_id": 3,
+      "anomaly": {
+        "app_proto": "http",
+        "type": "applayer",
+        "event": "UNABLE_TO_MATCH_RESPONSE_TO_REQUEST",
+        "layer": "proto_parser"
+      }
+    }
+
+
+Event type: ``flow``::
+
+    {
+      "timestamp": "2023-09-18T06:13:21.216460+0000",
+      "flow_id": 1676750115612680,
+      "event_type": "flow",
+      "src_ip": "192.168.100.237",
+      "src_port": 49175,
+      "dest_ip": "142.11.240.191",
+      "dest_port": 35361,
+      "proto": "TCP",
+      "app_proto": "http",
+      "flow": {
+        "pkts_toserver": 3869,
+        "pkts_toclient": 1523,
+        "bytes_toserver": 3536402,
+        "bytes_toclient": 94102,
+        "start": "2023-09-18T06:13:33.324862+0000",
+        "end": "2023-09-18T06:14:13.752399+0000",
+        "age": 40,
+        "state": "closed",
+        "reason": "shutdown",
+        "alerted": true,
+        "exception_policy": [
+          {
+            "target": "stream_midstream",
+            "policy": "ignore"
+          }
+        ]
+      },
+      "ether": {
+        "dest_macs": [
+          "52:54:00:36:3e:ff"
+        ],
+        "src_macs": [
+          "12:a9:86:6c:77:de"
+        ]
+      },
+      "tcp": {
+        "tcp_flags": "1e",
+        "tcp_flags_ts": "1e",
+        "tcp_flags_tc": "1a",
+        "syn": true,
+        "rst": true,
+        "psh": true,
+        "ack": true,
+        "state": "closed",
+        "ts_max_regions": 1,
+        "tc_max_regions": 1
+      }
+    }
+
+.. note::
+   It is possible to have even more detailed alert records, by enabling for
+   instance logging http-body, or alert metadata (:ref:`alert output<eve-output-alert>`).
+
+Examples come from pcap found at https://app.any.run/tasks/ce7ca983-9e4b-4251-a7c3-fefa3da02ebe/.
+
 
 Event types
 ~~~~~~~~~~~
@@ -46,6 +360,14 @@ The common part has a field "event_type" to indicate the log type.
 
 
   "event_type":"TYPE"
+
+When an application layer protocol event is detected, the common section will
+have an ``app_proto`` field.
+
+::
+
+    "app_proto": "http"
+
 
 PCAP fields
 ~~~~~~~~~~~
@@ -70,44 +392,114 @@ generated the event.
           omitted from internal "pseudo" packets such as flow timeout
           packets.
 
+.. _eve-format-alert:
+
 Event type: Alert
 -----------------
 
-Field action
+This field contains data about a signature that matched, such as
+``signature_id`` (``sid`` in the rule) and the ``signature`` (``msg`` in the
+rule).
+
+It can also contain information about Source and Target of the attack in the
+``alert.source`` and ``alert.target`` field if target keyword is used in
+the signature.
+
+This event will also have the ``pcap_cnt`` field, when running in pcap mode, to
+indicate which packet triggered the signature.
+
+::
+
+  "alert": {
+    "action": "allowed",
+    "gid": 1,
+    "signature_id": 2024056,
+    "rev": 4,
+    "signature": "ET MALWARE Win32/CryptFile2 / Revenge Ransomware Checkin M3",
+    "category": "Malware Command and Control Activity Detected",
+    "severity": 1,
+    "metadata": {
+      "affected_product": [
+        "Windows_XP_Vista_7_8_10_Server_32_64_Bit"
+      ],
+      "attack_target": [
+        "Client_Endpoint"
+      ],
+      "created_at": [
+        "2017_03_15"
+      ],
+      "deployment": [
+        "Perimeter"
+      ],
+      "former_category": [
+        "MALWARE"
+      ],
+      "malware_family": [
+        "CryptFile2"
+      ],
+      "performance_impact": [
+        "Moderate"
+      ],
+      "signature_severity": [
+        "Major"
+      ],
+      "updated_at": [
+        "2020_08_04"
+      ]
+    }
+  },
+
+Action field
 ~~~~~~~~~~~~
 
-Possible values: "allowed" and "blocked"
+Possible values: "allowed" and "blocked".
 
 Example:
 
 ::
 
-
   "action":"allowed"
 
-Action is set to "allowed" unless a rule used the "drop" action and Suricata is in IPS mode, or when the rule used the "reject" action.
+Action is set to "allowed" unless a rule used the "drop" action and Suricata is
+in IPS mode, or when the rule used the "reject" action. It is important to note
+that this does not necessarily indicate the final verdict for a given packet or
+flow, since one packet may match on several rules.
 
-It can also contain information about Source and Target of the attack in the alert.source and alert.target field it target keyword is used in
-the signature.
+.. _verdict-alert:
+
+Verdict
+~~~~~~~
+
+An object containing info on the final action that will be applied to a given
+packet, based on all the signatures triggered by it and other possible events
+(e.g., a flow drop). For that reason, it is possible for an alert with
+an action ``allowed`` to have a verdict ``drop``, in IPS mode, for instance, if
+that packet was dropped due to a different alert.
+
+* Action: ``alert``, ``pass``, ``drop`` (this latter only occurs in IPS mode)
+* Reject-target: ``to_server``, ``to_client``, ``both`` (only occurs for 'reject' rules)
+* Reject: an array of strings with possible reject types: ``tcp-reset``,
+  ``icmp-prohib`` (only occurs for 'reject' rules)
+
+Example:
 
 ::
 
-   "alert": {
-     "action": "allowed",
-     "gid": 1,
-     "signature_id": 1,
-     "rev": 1,
-     "app_proto": "http",
-     "signature": "HTTP body talking about corruption",
-     "severity": 3,
-     "source": {
-       "ip": "192.168.43.32",
-       "port": 36292
-     },
-     "target": {
-       "ip": "179.60.192.3",
-       "port": 80
-     },
+    "verdict": {
+       "action": "drop",
+       "reject-target": "to_client",
+       "reject": "[icmp-prohib]"
+     }
+
+
+Pcap Field
+~~~~~~~~~~
+
+If pcap log capture is active in `multi` mode, a `capture_file` key will be added to the event
+with value being the full path of the pcap file where the corresponding packets
+have been extracted.
+
+.. _eve-format-anomaly:
 
 Event type: Anomaly
 -------------------
@@ -222,6 +614,8 @@ Examples
       }
     }
 
+.. _eve-format-http:
+
 Event type: HTTP
 ----------------
 
@@ -241,7 +635,7 @@ suricata.yaml file the following fields are (can) also included:
 * "status": HTTP status code
 * "protocol": Protocol / Version of HTTP (ex: HTTP/1.1)
 * "http_method": The HTTP method (ex: GET, POST, HEAD)
-* "http_refer": The referrer for this action
+* "http_refer": The referer for this action
 
 In addition to the extended logging fields one can also choose to enable/add
 from more than 50 additional custom logging HTTP fields enabled in the
@@ -273,7 +667,7 @@ suricata.yaml file. The additional fields can be enabled as following:
               allow, connection, content-encoding, content-language,
               content-length, content-location, content-md5, content-range,
               content-type, date, etags, expires, last-modified, link, location,
-              proxy-authenticate, referrer, refresh, retry-after, server,
+              proxy-authenticate, referer, refresh, retry-after, server,
               set-cookie, trailer, transfer-encoding, upgrade, vary, warning,
               www-authenticate, x-flash-version, x-authenticated-user]
 
@@ -369,27 +763,32 @@ Event with ``dump-all-headers`` set to "both":
 Event type: DNS
 ---------------
 
-A new version of dns logging has been introduced to improve how dns answers
-are logged.
-
-With that new version, dns answers are logged in one event
-rather than an event for each answer.
-
-It's possible to customize how a dns answer will be logged with the following
-formats:
+DNS has 2 logging style that can be used together or independently:
 
 * "detailed": "rrname", "rrtype", "rdata" and "ttl" fields are logged for each answer
 * "grouped": answers logged are aggregated by their type (A, AAAA, NS, ...)
 
+If no format is chosen, "detailed" will be used by default.
+
 It will be still possible to use the old DNS logging format, you can control it
 with "version" option in dns configuration section.
+
+Suricata 8.0.0 introduces version 3 of the DNS logging format. This
+update unifies the DNS logging style used by ``dns`` events as well as
+the ``dns`` object in ``alert`` records. See :doc:`DNS Logging Changes
+for 8.0 <../../upgrade/8.0-dns-logging-changes>` for more details on the
+changes to logging format.
+
+.. note:: Suricata 7 style DNS logging can be retained by setting the
+          ``version`` field to 2, however this will be removed in
+          Suricata 9.
 
 Fields
 ~~~~~~
 
 Outline of fields seen in the different kinds of DNS events:
 
-* "type": Indicating DNS message type, can be "answer" or "query".
+* "type": Indicating DNS message type, can be "request" or "response".
 * "id": Identifier field
 * "version": Indicating DNS logging version in use
 * "flags": Indicating DNS answer flag, in hexadecimal (ex: 8180 , please note 0x is not output)
@@ -398,18 +797,44 @@ Outline of fields seen in the different kinds of DNS events:
 * "tc": Indicating in case of DNS answer flag, Truncation flag (ex: true if set)
 * "rd": Indicating in case of DNS answer flag, Recursion Desired flag (ex: true if set)
 * "ra": Indicating in case of DNS answer flag, Recursion Available flag (ex: true if set)
+* "z": Indicating in case of DNS answer flag, Reserved bit (ex: true if set)
 * "rcode": (ex: NOERROR)
-* "rrname": Resource Record Name (ex: a domain name)
-* "rrtype": Resource Record Type (ex: A, AAAA, NS, PTR)
-* "rdata": Resource Data (ex. IP that domain name resolves to)
 * "ttl": Time-To-Live for this resource record
+* "queries": A list of query objects
+* "answers": A list of answer objects
+* "authorities": A list of authority objects
+* "additionals": A list of additional objects
 
+More complex DNS record types may log additional fields for resource data:
 
-One can also control which RR types are logged explicitly from additional custom field enabled in the suricata.yaml file. If custom field is not specified, all RR types are logged. More than 50 values can be specified with the custom field and can be used as following:
+* "soa": Section containing fields for the SOA (start of authority) record type
 
+  * "mname": Primary name server for this zone
+  * "rname": Authority's mailbox
+  * "serial": Serial version number
+  * "refresh": Refresh interval (seconds)
+  * "retry": Retry interval (seconds)
+  * "expire": Upper time limit until zone is no longer authoritative (seconds)
+  * "minimum": Minimum ttl for records in this zone (seconds)
 
-::
+* "sshfp": section containing fields for the SSHFP (ssh fingerprint) record type
 
+  * "fingerprint": Hex format of the fingerprint (ex: ``12:34:56:78:9a:bc:de:...``)
+  * "algo": Algorithm number (ex: 1 for RSA, 2 for DSS)
+  * "type": Fingerprint type (ex: 1 for SHA-1)
+
+* "srv": section containing fields for the SRV (location of services) record type
+
+  * "target": Domain name of the target host (ex: ``foo.bar.baz``)
+  * "priority": Target priority (ex: 20)
+  * "weight": Weight for target selection (ex: 1)
+  * "port": Port on this target host of this service (ex: 5060)
+
+One can control which RR types are logged by using the "types" field in the
+suricata.yaml file. If this field is not specified, all RR types are logged.
+More than 50 values can be specified with this field as shown below:
+
+Configuration::
 
     - eve-log:
         enabled: yes
@@ -423,14 +848,21 @@ One can also control which RR types are logged explicitly from additional custom
         types:
           - alert
           - dns:
-            # control logging of queries and answers
-            # default yes, no to disable
-            query: yes     # enable logging of DNS queries
-            answer: yes    # enable logging of DNS answers
-            # control which RR types are logged
-            # all enabled if custom not specified
-            #custom: [a, aaaa, cname, mx, ns, ptr, txt]
-            custom: [a, ns, md, mf, cname, soa, mb, mg, mr, null,
+
+            # Logging format. In 8.0 version 3 is the default. Can be
+            # set to 2 to keep compatibility with Suricata 7.0.
+            # version: 3
+
+            # Control logging of requests and responses:
+            # - requests: enable logging of DNS queries
+            # - responses: enable logging of DNS answers
+            # By default both requests and responses are logged.
+            requests: yes
+            responses: yes
+            # DNS record types to log, based on the query type.
+            # Default: all.
+            #types: [a, aaaa, cname, mx, ns, ptr, txt]
+            types: [a, ns, md, mf, cname, soa, mb, mg, mr, null,
             wks, ptr, hinfo, minfo, mx, txt, rp, afsdb, x25, isdn,
             rt, nsap, nsapptr, sig, key, px, gpos, aaaa, loc, nxt,
             srv, atma, naptr, kx, cert, a6, dname, opt, apl, ds,
@@ -442,25 +874,24 @@ One can also control which RR types are logged explicitly from additional custom
 Examples
 ~~~~~~~~
 
-Example of a DNS query for the IPv4 address of "twitter.com" (resource record type 'A'):
-
-::
-
+Example of a DNS query for the IPv4 address of "twitter.com" (resource record type 'A')::
 
   "dns": {
-      "type": "query",
+      "version": 3,
+      "type": "request",
       "id": 16000,
-      "rrname": "twitter.com",
-      "rrtype":"A"
+      "queries": [
+        {
+          "rrname": "twitter.com",
+          "rrtype": "A"
+        }
+      ]
   }
 
-Example of a DNS answer with "detailed" format:
-
-::
-
+Example of a DNS answer with "detailed" format::
 
   "dns": {
-      "version": 2,
+      "version": 3,
       "type": "answer",
       "id": 45444,
       "flags": "8180",
@@ -468,21 +899,27 @@ Example of a DNS answer with "detailed" format:
       "rd": true,
       "ra": true,
       "rcode": "NOERROR",
+      "queries": [
+        {
+          "rrname": "www.suricata.io",
+          "rrtype": "A"
+        }
+      ],
       "answers": [
         {
-          "rrname": "www.suricata-ids.org",
+          "rrname": "www.suricata.io",
           "rrtype": "CNAME",
           "ttl": 3324,
-          "rdata": "suricata-ids.org"
+          "rdata": "suricata.io"
         },
         {
-          "rrname": "suricata-ids.org",
+          "rrname": "suricata.io",
           "rrtype": "A",
           "ttl": 10,
           "rdata": "192.0.78.24"
         },
         {
-          "rrname": "suricata-ids.org",
+          "rrname": "suricata.io",
           "rrtype": "A",
           "ttl": 10,
           "rdata": "192.0.78.25"
@@ -490,12 +927,10 @@ Example of a DNS answer with "detailed" format:
       ]
   }
 
-Example of a DNS answer with "grouped" format:
-
-::
+Example of a DNS answer with "grouped" format::
 
   "dns": {
-      "version": 2,
+      "version": 3,
       "type": "answer",
       "id": 18523,
       "flags": "8180",
@@ -509,29 +944,9 @@ Example of a DNS answer with "grouped" format:
           "192.0.78.25"
         ],
         "CNAME": [
-          "suricata-ids.org"
+          "suricata.io"
         ]
       }
-  }
-
-
-Example of a old DNS answer with an IPv4 (resource record type 'A') return:
-
-::
-
-
-  "dns": {
-      "type": "answer",
-      "id":16000,
-      "flags":"8180",
-      "qr":true,
-      "rd":true,
-      "ra":true,
-      "rcode":"NOERROR"
-      "rrname": "twitter.com",
-      "rrtype":"A",
-      "ttl":8,
-      "rdata": "199.16.156.6"
   }
 
 Event type: FTP
@@ -624,17 +1039,25 @@ If extended logging is enabled the following fields are also included:
 * "fingerprint": The (SHA1) fingerprint of the TLS certificate
 * "sni": The Server Name Indication (SNI) extension sent by the client
 * "version": The SSL/TLS version used
-* "not_before": The NotBefore field from the TLS certificate
-* "not_after": The NotAfter field from the TLS certificate
+* "notbefore": The NotBefore field from the TLS certificate
+* "notafter": The NotAfter field from the TLS certificate
 * "ja3": The JA3 fingerprint consisting of both a JA3 hash and a JA3 string
 * "ja3s": The JA3S fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja4": The JA4 client fingerprint for TLS
+* "client_alpns": array of strings with ALPN values
+* "server_alpns": array of strings with ALPN values
 
-JA3 must be enabled in the Suricata config file (set 'app-layer.protocols.tls.ja3-fingerprints' to 'yes').
+JA3 and JA4 must be enabled in the Suricata config file (set 'app-layer.protocols.tls.ja3-fingerprints'/'app-layer.protocols.tls.ja4-fingerprints' to 'yes').
 
 In addition to this, custom logging also allows the following fields:
 
 * "certificate": The TLS certificate base64 encoded
 * "chain": The entire TLS certificate chain base64 encoded
+* "client_handshake": structure containing "version", "ciphers" ([u16]), "exts" ([u16]), "sig_algs" ([u16]),
+  for client hello supported cipher suites, extensions, and signature algorithms,
+  respectively, in the order that they're mentioned (ie. unsorted)
+* "server_handshake": structure containing "version", "chosen cipher", "exts" ([u16]), for server hello
+  in the order that they're mentioned (ie. unsorted)
 
 Examples
 ~~~~~~~~
@@ -701,6 +1124,37 @@ Example of TFTP logging:
       "mode": "octet"
    }
 
+Event type: KRB5
+----------------
+
+KRB5 Fields
+~~~~~~~~~~~
+
+* "cname" (string): The client PrincipalName
+* "encryption" (string): Encryption used (only in AS-REP and TGS-REP)
+* "error_code" (string): Error code, if request has failed
+* "failed_request" (string): The request type for which the response had an error_code
+* "msg_type" (string): The message type: AS-REQ, AS-REP, etc...
+* "realm" (string): The server Realm
+* "sname" (string): The server PrincipalName
+* "ticket_encryption" (string): Encryption used for ticket
+* "ticket_weak_encryption" (boolean): Whether the encryption used for ticket is a weak cipher
+* "weak_encryption" (boolean): Whether the encryption used in AS-REP or TGS-REP is a weak cipher
+
+Examples of KRB5 logging:
+
+Pipe open::
+
+    "krb5": {
+      "msg_type": "KRB_TGS_REP",
+      "cname": "robin",
+      "realm": "CYLERA.LAB",
+      "sname": "ldap/dc01",
+      "encryption": "aes256-cts-hmac-sha1-96",
+      "weak_encryption": false,
+      "ticket_encryption": "aes256-cts-hmac-sha1-96",
+      "ticket_weak_encryption": false
+    }
 
 Event type: SMB
 ---------------
@@ -730,6 +1184,21 @@ SMB Fields
 * "request.native_lm" (string): SMB1 native Lan Manager string
 * "response.native_os" (string): SMB1 native OS string
 * "response.native_lm" (string): SMB1 native Lan Manager string
+
+One can restrict which transactions are logged by using the "types" field in the
+suricata.yaml file. If this field is not specified, all transactions types are logged.
+9 values can be specified with this field as shown below:
+
+Configuration::
+
+    - eve-log:
+        enabled: yes
+        type: file
+        filename: eve.json
+        types:
+          - smb:
+              types: [file, tree_connect, negotiate, dcerpc, create,
+                session_setup, ioctl, rename, set_file_path_info, generic]
 
 Examples of SMB logging:
 
@@ -913,13 +1382,15 @@ NTLMSSP fields
 * "domain" (string): the Windows domain.
 * "user" (string): the user.
 * "host" (string): the host.
+* "version" (string): the client version.
 
 Example::
 
     "ntlmssp": {
       "domain": "VNET3",
       "user": "administrator",
-      "host": "BLU"
+      "host": "BLU",
+      "version": "60.230 build 13699 rev 188"
     }
 
 More complete example::
@@ -935,7 +1406,8 @@ More complete example::
     "ntlmssp": {
       "domain": "VNET3",
       "user": "administrator",
-      "host": "BLU"
+      "host": "BLU",
+      "version": "60.230 build 13699 rev 188"
     },
     "request": {
       "native_os": "Unix",
@@ -971,6 +1443,229 @@ Example::
     }
   }
 
+
+Event type: BITTORRENT-DHT
+--------------------------
+
+Common fields:
+~~~~~~~~~~~~~~
+
+* "transaction_id" (hex): the unique id of the transaction, generated by node making the request (a.k.a the querying node). Same transaction_id is echoed back by responding nodes.
+* "client_version" (hex): identifies the type and version of the bittorrent-dht client. Some implementations may be missing this field.
+
+Extra fields:
+~~~~~~~~~~~~~
+Packets should also contain one of either the fields:
+
+| error
+
+* "error": details of an error which occurred while processing the request
+   * "error.num" (num): the error code
+   * "error.msg" (string): the error message
+
+| request_type and request
+
+* "request_type" (string): the type of the request (a.k.a. the query). Included if this packet was a request
+* "request": a request (a.k.a. a query) sent by the bittorrent-dht client
+   * "request.id" (hex): the node ID of the node which sent the request (20 bytes in network byte order)
+   * "request.target" (hex): the target node ID. Used by the find_node request_type
+   * "request.info_hash" (hex): info hash of target torrent (20 bytes). Used by the get_peers and announce_peer request_types
+   * "request.token" (hex): token key received from previous get_peers request. Used by the announce_peer request type
+   * "request.implied_port" (num): 0 or 1, if 1 ignore provided port and use source port of UDP packet. Used by the announce_peer request_type
+   * "request.port" (num): port on which peer will download torrent. Used by the announce_peer request_type
+
+| response
+
+* "response": a response to the client's request
+   * "response.id" (hex): the node ID of the node which sent the response (20 bytes in network byte order)
+   * "response.nodes" (array): find_node/get_peers - a list of info objects for target node or K(8) closest good nodes in routing table
+   * "response.nodes6" (array): find_node/get_peers - a list of info objects for target node or K(8) closest good nodes in routing table (ipv6)
+   * "response.values" (array): list of compact peer info strings. Used by the get_peers request_type
+   * "response.token" (hex): token key required for sender's future announce_peer query
+
+| node object
+
+* "id" (hex): node ID
+* "ip" (string): IPv4 or IPv6 address of node
+* "port" (integer): node port
+
+| peer object (values array)
+
+* "ip" (string): IPv6 or IPv6 address of node
+* "port" (integer): node port
+
+Examples:
+~~~~~~~~~
+
+Ping and response::
+
+  "bittorrent_dht": {
+    "transaction_id": "0c17",
+    "client_version": "4c540126",
+    "request_type": "ping",
+    "request": {
+      "id": "41aff1580119f074e2f537f231f12adf684f0d1f"
+    }
+  }
+
+  "bittorrent_dht": {
+    "transaction_id": "0c17",
+    "client_version": "5554b50c",
+    "response": {
+      "id": "42aeb304a0845b3b9ee089327b48967b8e87b2e2"
+    }
+  }
+
+Find_node and response::
+
+  "bittorrent_dht": {
+    "transaction_id": "420f0000",
+    "client_version": "5554b50c",
+    "request_type": "find_node",
+    "request": {
+      "id": "37579bad1bad166af4329508096fae8c553c6cf4",
+      "target": "37579bad1bad166af4329508096fae8c553c6cf4"
+    }
+  }
+
+Get_peers and response with values param::
+
+  "bittorrent_dht": {
+    "transaction_id": "05e4",
+    "client_version": "4c540126",
+    "request_type": "get_peers",
+    "request": {
+      "id": "41aff1580119f074e2f537f231f12adf684f0d1f",
+      "info_hash": "19a6fcfcba6cc2c6d371eb754074d095adb5d291"
+    }
+  }
+  "bittorrent_dht": {
+    "transaction_id": "05e4",
+    "client_version": "555462d6",
+    "response": {
+      "id": "19a6f98be177e32e7b5bd77276d529f03e3ba8a9",
+      "values": [
+        {
+          "ip": "45.238.190.2",
+          "port": 6881
+        },
+        {
+          "ip": "185.70.52.245",
+          "port": 51215
+        },
+        {
+          "ip": "45.21.238.247",
+          "port": 55909
+        },
+        {
+          "ip": "62.28.248.195",
+          "port": 6881
+        }
+      ],
+      "token": "c17094641ca8844d711120baecb2b5cf25435614"
+    }
+  }
+
+Get_peers and response with nodes param::
+
+   "bittorrent_dht": {
+    "transaction_id": "44e6",
+    "client_version": "4c540126",
+    "request_type": "get_peers",
+    "request": {
+      "id": "41aff1580119f074e2f537f231f12adf684f0d1f",
+      "info_hash": "19a6fcfcba6cc2c6d371eb754074d095adb5d291"
+    }
+  }
+
+  "bittorrent_dht": {
+    "transaction_id": "44e6",
+    "response": {
+      "id": "19a7c8f4f6d14d9f87a67671720633e551f30cb7",
+      "values": [
+        {
+          "ip": "45.22.252.153",
+          "port": 36798
+        },
+        {
+          "ip": "94.41.206.37",
+          "port": 30850
+        },
+        {
+          "ip": "84.228.120.50",
+          "port": 6881
+        },
+        {
+          "ip": "178.81.206.84",
+          "port": 12373
+        },
+        {
+          "ip": "110.188.93.186",
+          "port": 22223
+        }
+      ],
+      "token": "c897ee539e02a54595b4d7cfb6319ad48e71b282"
+    }
+  }
+
+Announce_peer and response::
+
+  "bittorrent_dht": {
+    "transaction_id": "aa",
+    "request_type": "announce_peer",
+    "request": {
+      "id": "abcdefghij0123456789",
+      "info_hash": "mnopqrstuvwxyz123456",
+      "token": "aoeusnth",
+      "port": 6881
+    }
+  }
+  "bittorrent_dht": {
+    "transaction_id": "aa",
+    "response": {
+      "id": "mnopqrstuvwxyz123456"
+    }
+  }
+
+Announce_peer with implied_port param and response::
+
+  "bittorrent_dht": {
+    "transaction_id": "7fe9",
+    "client_version": "4c540126",
+    "request_type": "announce_peer",
+    "request": {
+      "id": "51bc83f53417a62a40e8a48170cad369a13fef3c",
+      "info_hash": "19a6fcfcba6cc2c6d371eb754074d095adb5d291",
+      "token": "cacbef35",
+      "implied_port": 1,
+      "port": 54892
+    }
+  }
+
+  "bittorrent_dht": {
+    "transaction_id": "7fe9",
+    "client_version": "4c54012f",
+    "response": {
+      "id": "19a66dece45e0288ab75d141e0255738a1ce8508"
+    }
+  }
+
+Sample error responses::
+
+  "bittorrent_dht": {
+    "transaction_id": "aa",
+    "error": {
+      "num": 201,
+      "msg": "A Generic Error Ocurred"
+    }
+  }
+  "bittorrent_dht": {
+    "transaction_id": "aa",
+    "error": {
+      "num": 203,
+      "msg": "Malformed Packet"
+    }
+  }
 
 Event type: SSH
 ----------------
@@ -1008,6 +1703,8 @@ Example of SSH logging:
      }
   }
 
+.. _eve-format-flow:
+
 Event type: Flow
 ----------------
 
@@ -1029,6 +1726,15 @@ Fields
 * "state": display state of the flow (include "new", "established", "closed", "bypassed")
 * "reason": mechanism that did trigger the end of the flow (include "timeout", "forced" and "shutdown")
 * "alerted": "true" or "false" depending if an alert has been seen on flow
+* "action": "pass" or "drop" depending if flow was PASS'ed or DROP'ed (no present if none)
+* "tx_cnt": number of transactions seen in the flow (only present if flow has an application layer)
+* "exception_policy": array consisting of exception policies that have been triggered by
+  the flow:
+
+    * "target": if an exception policy was triggered, what setting exceptions
+      led to this (cf. :ref:`Exception Policy - Specific Settings<eps_settings>`).
+    * "policy": if an exception policy was triggered, what policy was applied
+      (to the flow or to any packet(s) from it).
 
 Example ::
 
@@ -1049,7 +1755,14 @@ Example ::
     "bypass": "capture",
     "state": "bypassed",
     "reason": "timeout",
-    "alerted": false
+    "alerted": false,
+    "action": "pass",
+    "exception_policy": [
+      {
+        "target": "stream_midstream",
+        "policy": "pass_flow"
+      }
+    ]
   }
 
 Event type: RDP
@@ -1142,7 +1855,7 @@ The optional "client" field is a sub-object that may contain the following:
 * "capabilities": List of any of the following: "support_errinfo_pdf", "want_32bpp_session", "support_statusinfo_pdu", "strong_asymmetric_keys", "valid_connection_type", "support_monitor_layout_pdu", "support_netchar_autodetect", "support_dynvc_gfx_protocol", "support_dynamic_time_zone", "support_heartbeat_pdu".
 * "id": Client product id string.
 * "connection_hint": Possible values are "modem", "low_broadband", "satellite", "high_broadband", "wan", "lan", "autodetect".
-* "physical_width": Numeric phyical width of display.
+* "physical_width": Numeric physical width of display.
 * "physical_height": Numeric physical height of display.
 * "desktop_orientation": Numeric angle of orientation.
 * "scale_factor": Numeric scale factor of desktop.
@@ -1249,7 +1962,7 @@ Fields
 * "client_protocol_version.major", "client_protocol_version.minor": The RFB protocol version agreed by the client.
 * "authentication.security_type": Security type agreed upon in the logged transaction, e.g. ``2`` is VNC auth.
 * "authentication.vnc.challenge", "authentication.vnc.response": Only available when security type 2 is used. Contains the challenge and response byte buffers exchanged by the server and client as hex strings.
-* "authentication.security-result": Result of the authentication process (``OK``, ``FAIL`` or ``TOOMANY``).
+* "authentication.security_result": Result of the authentication process (``OK``, ``FAIL`` or ``TOOMANY``).
 * "screen_shared": Boolean value describing whether the client requested screen sharing.
 * "framebuffer": Contains metadata about the initial screen setup process. Only available when the handshake completed this far.
 * "framebuffer.width", "framebuffer.height": Screen size as offered by the server.
@@ -1279,7 +1992,7 @@ Example of RFB logging, with full VNC style authentication parameters:
         "challenge": "0805b790b58e967f2b350a0c99de3881",
         "response": "aecb26faeaaa62179636a5934bac1078"
       },
-      "security-result": "OK"
+      "security_result": "OK"
     },
     "screen_shared": false,
     "framebuffer": {
@@ -1782,4 +2495,713 @@ Example of HTTP2 logging, of a request and response:
         }
       ]
     }
+  }
+
+Event type: PGSQL
+-----------------
+
+PGSQL eve-logs reflect the bidirectional nature of the protocol transactions.
+Each PGSQL event lists at most one "Request" message field and one or more
+"Response" messages.
+
+The PGSQL parser merges individual messages into one EVE output item if they
+belong to the same transaction. In such cases, the source and destination
+information (IP/port) reflect the direction of the initial request, but contain
+messages from both sides.
+
+Example of ``pgsql`` event for a SimpleQuery transaction complete with request
+with a ``SELECT`` statement and its response::
+
+  {
+    "timestamp": "2021-11-24T16:56:24.403417+0000",
+    "flow_id": 1960113262002448,
+    "pcap_cnt": 780,
+    "event_type": "pgsql",
+    "src_ip": "172.18.0.1",
+    "src_port": 54408,
+    "dest_ip": "172.18.0.2",
+    "dest_port": 5432,
+    "proto": "TCP",
+    "pgsql": {
+      "tx_id": 4,
+      "request": {
+        "simple_query": "select * from rule limit 5000;"
+      },
+      "response": {
+        "field_count": 7,
+        "data_rows": 5000,
+        "data_size": 3035751,
+        "command_completed": "SELECT 5000"
+      }
+    }
+  }
+
+While on the wire PGSQL messages follow basically two types (startup messages
+and regular messages), those may have different subfields and/or meanings, based
+on the message type. Messages are logged based on their type and relevant fields.
+
+We list a few possible message types and what they mean in Suricata. For more
+details on message types and formats as well as what each message and field mean
+for PGSQL, check `PostgreSQL's official documentation <https://www.postgresql.org
+/docs/14/protocol-message-formats.html>`_.
+
+Fields
+~~~~~~
+
+* "tx_id": internal transaction id.
+* "request":  each PGSQL transaction may have up to one request message. The
+  possible messages will be described in another section.
+* "response": even when there are several "Response" messages, there is one
+  ``response`` field that summarizes all responses for that transaction. The
+  possible messages will be described in another section.
+
+Request Messages
+~~~~~~~~~~~~~~~~
+
+Requests are sent by the frontend (client), which would be the source of a pgsql
+flow. Some of the possible request messages are:
+
+* "startup_message": message sent to start a new PostgreSQL connection
+* "password": if password output for PGSQL is enabled in suricata.yaml,
+  carries the password sent during Authentication phase
+* "password_redacted": set to true in case there is a password message, but its
+  logging is disabled
+* "simple_query": issued SQL command during simple query subprotocol. PostgreSQL
+  identifies specific sets of commands that change the set of expected messages
+  to be exchanged as subprotocols.
+* ``"message": "cancel_request"``: sent after a query, when the frontend
+  attempts to cancel said query. This message is sent over a different port,
+  thus bring shown as a different flow. It has no direct answer from the
+  backend, but if successful will lead to an ``ErrorResponse`` in the
+  transaction where the query was sent.
+* "message": requests which do not have meaningful payloads are logged like this,
+  where the field value is the message type
+* "copy_data_in": object. Part of the CopyIn subprotocol, consolidated data
+  resulting from a ``Copy From Stdin`` query
+* "copy_done": string. Similar to ``command_completed`` but sent after the
+  frontend finishes sending a batch of ``CopyData`` messages
+
+There are several different authentication messages possible, based on selected
+authentication method. (e.g. the SASL authentication will have a set of
+authentication messages different from when ``md5`` authentication is chosen).
+
+Response Messages
+~~~~~~~~~~~~~~~~~
+
+Responses are sent by the backend (server), which would be the destination of a
+pgsql flow. Some of the possible request messages are:
+
+* "authentication_sasl_final": final SCRAM ``server-final-message``, as explained
+  at https://www.postgresql.org/docs/14/sasl-authentication.html#SASL-SCRAM-SHA-256
+* "message": Backend responses which do not have meaningful payloads are logged
+  like this, where the field value is the message type
+* "error_response"
+* "notice_response"
+* "notification_response"
+* "authentication_md5_password": a string with the ``md5`` salt value
+* "parameter_status": logged as an array
+* "backend_key_data"
+* "data_rows": integer. When one or many ``DataRow`` messages are parsed, the
+  total returned rows
+* "data_size": in bytes. When one or many ``DataRow`` messages are parsed, the
+  total size in bytes of the data returned
+* "command_completed": string. Informs the command just completed by the backend
+* "copy_in_response": object. Indicates the beginning of a CopyIn mode, shows
+  how many columns will be copied from STDIN (``columns`` field)
+* "copy_out_response": object. Indicates the beginning of a CopyTo mode, shows
+  how many columns will be copied to STDOUT (``columns`` field)
+* "copy_data_out": object. Consolidated data on the CopyData sent by the backend
+  in a CopyOut transaction
+* "copy_done": string. Similar to ``command_completed`` but sent after the
+  backend finishes sending a batch of ``CopyData`` messages
+* "ssl_accepted": bool. With this event, the initial PGSQL SSL Handshake
+  negotiation is complete in terms of tracking and logging. The session will be
+  upgraded to use TLS encryption
+
+Examples
+~~~~~~~~
+
+The two ``pgsql`` events in this example represent a rejected ``SSL handshake``
+and a following connection request where the authentication method indicated by
+the backend was ``md5``::
+
+  {
+    "timestamp": "2021-11-24T16:56:19.435242+0000",
+    "flow_id": 1960113262002448,
+    "pcap_cnt": 21,
+    "event_type": "pgsql",
+    "src_ip": "172.18.0.1",
+    "src_port": 54408,
+    "dest_ip": "172.18.0.2",
+    "dest_port": 5432,
+    "proto": "TCP",
+    "pgsql": {
+      "tx_id": 1,
+      "request": {
+        "message": "SSL Request"
+      },
+      "response": {
+        "accepted": false
+      }
+    }
+  }
+  {
+    "timestamp": "2021-11-24T16:56:19.436228+0000",
+    "flow_id": 1960113262002448,
+    "pcap_cnt": 25,
+    "event_type": "pgsql",
+    "src_ip": "172.18.0.1",
+    "src_port": 54408,
+    "dest_ip": "172.18.0.2",
+    "dest_port": 5432,
+    "proto": "TCP",
+    "pgsql": {
+      "tx_id": 2,
+      "request": {
+        "protocol_version": "3.0",
+        "startup_parameters": {
+          "user": "rules",
+          "database": "rules",
+          "optional_parameters": [
+            {
+              "application_name": "psql"
+            },
+            {
+              "client_encoding": "UTF8"
+            }
+          ]
+        }
+      },
+      "response": {
+        "authentication_md5_password": "Z\\xdc\\xfdf"
+      }
+    }
+  }
+
+``AuthenticationOk``: a response indicating that the connection was successfully
+established.::
+
+  {
+    "pgsql": {
+      "tx_id": 3,
+      "response": {
+        "message": "authentication_ok",
+        "parameter_status": [
+          {
+            "application_name": "psql"
+          },
+          {
+            "client_encoding": "UTF8"
+          },
+          {
+            "date_style": "ISO, MDY"
+          },
+          {
+            "integer_datetimes": "on"
+          },
+          {
+            "interval_style": "postgres"
+          },
+          {
+            "is_superuser": "on"
+          },
+          {
+            "server_encoding": "UTF8"
+          },
+          {
+            "server_version": "13.6 (Debian 13.6-1.pgdg110+1)"
+          },
+          {
+            "session_authorization": "rules"
+          },
+          {
+            "standard_conforming_strings": "on"
+          },
+          {
+            "time_zone": "Etc/UTC"
+          }
+        ],
+        "process_id": 28954,
+        "secret_key": 889887985
+      }
+    }
+  }
+
+.. note::
+   In Suricata, the ``AuthenticationOk`` message is also where the backend's
+   ``process_id`` and ``secret_key`` are logged. These must be sent by the
+   frontend when it issues a ``CancelRequest`` message (seen below).
+
+A ``CancelRequest`` message::
+
+   {
+      "timestamp": "2023-12-07T15:46:56.971150+0000",
+      "flow_id": 775771889500133,
+      "event_type": "pgsql",
+      "src_ip": "100.88.2.140",
+      "src_port": 39706,
+      "dest_ip": "100.96.199.113",
+      "dest_port": 5432,
+      "proto": "TCP",
+      "pkt_src": "stream (flow timeout)",
+      "pgsql": {
+        "tx_id": 1,
+        "request": {
+          "message": "cancel_request",
+          "process_id": 28954,
+          "secret_key": 889887985
+        }
+      }
+   }
+
+.. note::
+   As the ``CancelRequest`` message is sent over a new connection, the way to
+   correlate it with the proper frontend/flow from which it originates is by
+   querying on ``process_id`` and ``secret_key`` seen in the
+   ``AuthenticationOk`` event.
+
+References:
+  * `PostgreSQL protocol - Canceling Requests in Progress`_
+  * `PostgreSQL message format - BackendKeyData`_
+
+.. _PostgreSQL protocol - Canceling Requests in Progress: https://www.postgresql
+   .org/docs/current/protocol-flow.html#PROTOCOL-FLOW-CANCELING-REQUESTS
+.. _PostgreSQL message format - BackendKeyData: https://www.postgresql.org/docs
+   /current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA
+
+Field Reference
+~~~~~~~~~~~~~~~
+
+.. include:: ../../_generated/pgsql.rst
+
+Event type: IKE
+---------------
+
+The parser implementations for IKEv1 and IKEv2 have a slightly different feature
+set. They can be distinguished using the "version_major" field (which equals
+either 1 or 2).
+The unique properties are contained within a separate "ikev1" and "ikev2" sub-object.
+
+Fields
+~~~~~~
+
+* "init_spi", "resp_spi": The Security Parameter Index (SPI) of the initiator and responder.
+* "version_major": Major version of the ISAKMP header.
+* "version_minor": Minor version of the ISAKMP header.
+* "payload": List of payload types in the current packet.
+* "exchange_type": Type of the exchange, as numeric values.
+* "exchange_type_verbose": Type of the exchange, in human-readable form. Needs ``extended: yes`` set in the ``ike`` EVE output option.
+* "alg_enc", "alg_hash", "alg_auth", "alg_dh", "alg_esn": Properties of the chosen security association by the server.
+* "ikev1.encrypted_payloads": Set to ``true`` if the payloads in the packet are encrypted.
+* "ikev1.doi": Value of the domain of interpretation (DOI).
+* "ikev1.server.key_exchange_payload", "ikev1.client.key_exchange_payload": Public key exchange payloads of the server and client.
+* "ikev1.server.key_exchange_payload_length", "ikev1.client.key_exchange_payload_length": Length of the public key exchange payload.
+* "ikev1.server.nonce_payload", "ikev1.client.nonce_payload": Nonce payload of the server and client.
+* "ikev1.server.nonce_payload_length", "ikev1.client.nonce_payload_length": Length of the nonce payload.
+* "ikev1.client.client_proposals": List of the security associations proposed to the server.
+* "ikev1.vendor_ids": List of the vendor IDs observed in the communication.
+* "server_proposals": List of server proposals with parameters, if there are more than one. This is a non-standard case; this field is only present if such a situation was observed in the inspected traffic.
+
+
+
+Examples
+~~~~~~~~
+
+Example of IKE logging:
+
+::
+
+  "ike": {
+    "version_major": 1,
+    "version_minor": 0,
+    "init_spi": "8511617bfea2f172",
+    "resp_spi": "c0fc6bae013de0f5",
+    "message_id": 0,
+    "exchange_type": 2,
+    "exchange_type_verbose": "Identity Protection",
+    "sa_life_type": "LifeTypeSeconds",
+    "sa_life_type_raw": 1,
+    "sa_life_duration": "Unknown",
+    "sa_life_duration_raw": 900,
+    "alg_enc": "EncAesCbc",
+    "alg_enc_raw": 7,
+    "alg_hash": "HashSha2_256",
+    "alg_hash_raw": 4,
+    "alg_auth": "AuthPreSharedKey",
+    "alg_auth_raw": 1,
+    "alg_dh": "GroupModp2048Bit",
+    "alg_dh_raw": 14,
+    "sa_key_length": "Unknown",
+    "sa_key_length_raw": 256,
+    "alg_esn": "NoESN",
+    "payload": [
+      "VendorID",
+      "Transform",
+      "Proposal",
+      "SecurityAssociation"
+    ],
+    "ikev1": {
+      "doi": 1,
+      "encrypted_payloads": false,
+      "client": {
+        "key_exchange_payload": "0bf7907681a656aabed38fb1ba8918b10d707a8e635a...",
+        "key_exchange_payload_length": 256,
+        "nonce_payload": "1427d158fc1ed6bbbc1bd81e6b74960809c87d18af5f0abef14d5274ac232904",
+        "nonce_payload_length": 32,
+        "proposals": [
+          {
+            "sa_life_type": "LifeTypeSeconds",
+            "sa_life_type_raw": 1,
+            "sa_life_duration": "Unknown",
+            "sa_life_duration_raw": 900,
+            "alg_enc": "EncAesCbc",
+            "alg_enc_raw": 7,
+            "alg_hash": "HashSha2_256",
+            "alg_hash_raw": 4,
+            "alg_auth": "AuthPreSharedKey",
+            "alg_auth_raw": 1,
+            "alg_dh": "GroupModp2048Bit",
+            "alg_dh_raw": 14,
+            "sa_key_length": "Unknown",
+            "sa_key_length_raw": 256
+          }
+        ]
+      },
+      "server": {
+        "key_exchange_payload": "1e43be52b088ec840ff81865074b6d459b5ca7813b46...",
+        "key_exchange_payload_length": 256,
+        "nonce_payload": "04d78293ead007bc1a0f0c6c821a3515286a935af12ca50e08905b15d6c8fcd4",
+        "nonce_payload_length": 32
+      },
+      "vendor_ids": [
+        "4048b7d56ebce88525e7de7f00d6c2d3",
+        "4a131c81070358455c5728f20e95452f",
+        "afcad71368a1f1c96b8696fc77570100",
+        "7d9419a65310ca6f2c179d9215529d56",
+        "cd60464335df21f87cfdb2fc68b6a448",
+        "90cb80913ebb696e086381b5ec427b1f"
+      ]
+    },
+  }
+
+Event type: Modbus
+------------------
+
+Common fields
+~~~~~~~~~~~~~
+
+* "id": The unique transaction number given by Suricata
+
+Request/Response fields
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* "transaction_id": The transaction id found in the packet
+* "protocol_id": The modbus version
+* "unit_id": ID of the remote server to interact with
+* "function_raw": Raw value of the function code byte
+* "function_code": Associated name of the raw function value
+* "access_type": Type of access requested by the function
+* "category": The function code's category
+* "error_flags": Errors found in the data while parsing
+
+Exception fields
+~~~~~~~~~~~~~~~~
+
+* "raw": Raw value of the exception code byte
+* "code": Associated name of the raw exception value
+
+Diagnostic fields
+~~~~~~~~~~~~~~~~~
+
+* "raw": Raw value of the subfunction code bytes
+* "code": Associated name of the raw subfunction value
+* "data": Bytes following the subfunction code
+
+MEI fields
+~~~~~~~~~~
+
+* "raw": Raw value of the mei function code bytes
+* "code": Associated name of the raw mei function value
+* "data": Bytes following the mei function code
+
+Read Request fields
+~~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to read from
+* "quantity": Amount to read
+
+Read Response fields
+~~~~~~~~~~~~~~~~~~~~
+
+* "data": Data that was read
+
+Multiple Write Request fields
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to write to
+* "quantity": Amount to write
+* "data": Data to write
+
+Mask Write fields
+~~~~~~~~~~~~~~~~~
+
+* "address": Starting address of content modification
+* "and_mask": And mask to modify content with
+* "or_mask": Or mask to modify content with
+
+Other Write fields
+~~~~~~~~~~~~~~~~~~
+
+* "address": Starting address to write to
+* "data": Data to write
+
+Generic Data fields
+~~~~~~~~~~~~~~~~~~~
+
+* "data": Data following the function code
+
+Example
+~~~~~~~
+
+Example of Modbus logging of a request and response:
+
+::
+
+  "modbus": {
+    "id": 1,
+    "request": {
+      "transaction_id": 0,
+      "protocol_id": 0,
+      "unit_id": 0,
+      "function_raw": 1,
+      "function_code": "RdCoils",
+      "access_type": "READ | COILS",
+      "category": "PUBLIC_ASSIGNED",
+      "error_flags": "NONE",
+    },
+    "response": {
+      "transaction_id": 0,
+      "protocol_id": 0,
+      "unit_id": 0,
+      "function_raw": 1,
+      "function_code": "RdCoils",
+      "access_type": "READ | COILS",
+      "category": "PUBLIC_ASSIGNED",
+      "error_flags": "DATA_VALUE",
+    },
+  }
+
+Event type: QUIC
+-----------------
+
+Fields
+~~~~~~
+
+* "version": Version of the QUIC packet if contained in the packet, 0 if not
+* "cyu": List of found CYUs in the packet
+* "cyu[].hash": CYU hash
+* "cyu[].string": CYU string
+* "ja3": The JA3 fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja3s": The JA3S fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja4": The JA4 client fingerprint for QUIC
+
+Examples
+~~~~~~~~
+
+Example of QUIC logging with CYU, JA3 and JA4 hashes (note that the JA4 hash is only an example to illustrate the format and does not correlate with the others):
+
+::
+
+
+  "quic": {
+    "version": 1362113590,
+    "cyu": [
+        {
+            "hash": "7b3ceb1adc974ad360cfa634e8d0a730",
+            "string": "46,PAD-SNI-STK-SNO-VER-CCS-NONC-AEAD-UAID-SCID-TCID-PDMD-SMHL-ICSL-NONP-PUBS-MIDS-SCLS-KEXS-XLCT-CSCT-COPT-CCRT-IRTT-CFCW-SFCW"
+        }
+    ],
+    "ja3": {
+        "hash": "324f8c50e267adba4b5dd06c964faf67",
+        "string": "771,4865-4866-4867,51-43-13-27-17513-16-45-0-10-57,29-23-24,"
+    },
+    "ja4": "q13d0310h3_55b375c5d22e_cd85d2d88918"
+  }
+
+Output Reference
+~~~~~~~~~~~~~~~~
+
+.. include:: ../../_generated/quic.rst
+
+Event type: DHCP
+-----------------
+
+The default DHCP logging level only logs enough information to map a
+MAC address to an IP address. Enable extended mode to log all DHCP
+message types in full detail.
+
+Fields
+~~~~~~
+
+* "type": message type (e.g. request, reply)
+* "id": DHCP transaction id
+* "client_mac": client MAC address
+* "assigned_ip": IP address given by DHCP server
+* "client_ip": client IP address
+* "dhcp_type": DHCP message type
+* "client_id": DHCP client identifier
+* "hostname": DHCP client host name
+* "params": DHCP parameter request list
+* "requested_ip": DHCP client requesting specific IP address
+* "relay_ip": BOOTP relay agent IP address
+* "next_server_ip": BOOTP next IP address to use for booting process
+* "subnet_mask": subnet mask to use with client IP address
+* "routers": IP address(es) to be used as default gateways on DHCP client
+* "lease_time": Duration of IP address assignment to client
+* "renewal_time": Time in seconds since client began IP address request or renewal process
+* "rebinding_time": Time in seconds before the client begins to renew its IP address lease
+* "dns_servers": IP address(es) of servers the client will use for DNS queries
+
+Examples
+~~~~~~~~
+
+Example of DHCP log entry (default logging level):
+
+::
+
+  "dhcp": {
+    "type":"reply",
+    "id":755466399,
+    "client_mac":"54:ee:75:51:e0:66",
+    "assigned_ip":"100.78.202.125",
+    "dhcp_type":"ack",
+    "renewal_time":21600,
+    "client_id":"54:ee:75:51:e0:66"
+  }
+
+Example of DHCP log entry (extended logging enabled):
+
+::
+
+  "dhcp": {
+    "type":"reply",
+    "id":2787908432,
+    "client_mac":"54:ee:75:51:e0:66",
+    "assigned_ip":"192.168.1.120",
+    "client_ip":"0.0.0.0",
+    "relay_ip":"192.168.1.1",
+    "next_server_ip":"0.0.0.0",
+    "dhcp_type":"offer",
+    "subnet_mask":"255.255.255.0",
+    "routers":["192.168.1.100"],
+    "hostname":"test",
+    "lease_time":86400,
+    "renewal_time":21600,
+    "rebinding_time":43200,
+    "client_id":"54:ee:75:51:e0:66",
+    "dns_servers":["192.168.1.50","192.168.1.49"]
+  }
+
+Event type: ARP
+---------------
+
+Fields
+~~~~~~
+
+* "hw_type": network link protocol type
+* "proto_type": internetwork protocol for which the request is intended
+* "opcode": operation that the sender is performing (e.g. request, response)
+* "src_mac": source MAC address
+* "src_ip": source IP address
+* "dest_mac": destination MAC address
+* "dest_ip": destination IP address
+
+Examples
+~~~~~~~~
+
+Example of ARP logging: request and response
+
+::
+
+  "arp": {
+    "hw_type": "ethernet",
+    "proto_type": "ipv4",
+    "opcode": "request",
+    "src_mac": "00:1a:6b:6c:0c:cc",
+    "src_ip": "10.10.10.2",
+    "dest_mac": "00:00:00:00:00:00",
+    "dest_ip": "10.10.10.1"
+  }
+
+::
+
+  "arp": {
+    "hw_type": "ethernet",
+    "proto_type": "ipv4",
+    "opcode": "reply",
+    "src_mac": "00:1a:6b:6c:0c:cc",
+    "src_ip": "10.10.10.2",
+    "dest_mac": "00:1d:09:f0:92:ab",
+    "dest_ip": "10.10.10.1"
+  }
+
+Event type: POP3
+----------------
+
+Fields
+~~~~~~
+
+- "request" (optional): a request sent by the pop3 client
+   * "request.command" (string): a pop3 command, for example "USER" or
+     "STAT", if unknown but valid `UnknownCommand` event will be set
+   * "request.args" (array of strings): pop3 command arguments, if
+     incorrect number for command `IncorrectArgumentCount` event will be set
+- "response" (optional): a response sent by the pop3 server
+   * "response.success" (boolean): whether the response is successful, ie. +OK
+   * "response.status" (string): the response status, one of "OK" or "ERR"
+   * "response.header" (string): the content of the first line of the response
+   * "response.data" (array of strings): the response data, which may contain multiple lines
+
+Example of POP3 logging:
+
+::
+
+  "pop3": {
+      "request": {
+          "command": "USER",
+          "args": ["user@example.com"],
+      },
+      "response": {
+          "success": true,
+          "status": "OK",
+          "header": "+OK password required for \"user@example.com\"",
+          "data": []
+      }
+   }
+
+Event type: Netflow
+-------------------
+
+Fields
+~~~~~~
+
+* "age": duration of the flow (measured from timestamp of last packet and first packet)
+* "bytes": total number of bytes to client
+* "end": date of the end of the flow
+* "max_ttl": maximum observed Time-To-Live (TTL) value
+* "min_ttl": minimum observed TTL value
+* "pkts": total number of packets to client
+* "start": date of start of the flow
+* "tx_cnt": number of transactions seen in the flow (only present if flow has an application layer)
+
+Example ::
+
+ "netflow": {
+    "pkts": 1,
+    "bytes": 160,
+    "start": "2013-02-26T17:02:42.907340-0500",
+    "end": "2013-02-26T17:02:42.907340-0500",
+    "age": 0,
+    "min_ttl": 1,
+    "max_ttl": 1
   }

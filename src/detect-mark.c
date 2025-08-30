@@ -1,4 +1,4 @@
-/* Copyright (C) 2011-2020 Open Information Security Foundation
+/* Copyright (C) 2011-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -35,6 +35,7 @@
 #include "detect-parse.h"
 
 #include "util-unittest.h"
+#include "util-byte.h"
 #include "util-debug.h"
 
 #define PARSE_REGEX "([0x]*[0-9a-f]+)/([0x]*[0-9a-f]+)"
@@ -77,98 +78,82 @@ void DetectMarkRegister (void)
  */
 static void * DetectMarkParse (const char *rawstr)
 {
-    int ret = 0, res = 0;
-    int ov[MAX_SUBSTRINGS];
+    int res = 0;
+    size_t pcre2_len;
     const char *str_ptr = NULL;
     char *ptr = NULL;
-    char *endptr = NULL;
     uint32_t mark;
     uint32_t mask;
     DetectMarkData *data;
 
-    ret = DetectParsePcreExec(&parse_regex, rawstr, 0, 0, ov, MAX_SUBSTRINGS);
+    pcre2_match_data *match = NULL;
+    int ret = DetectParsePcreExec(&parse_regex, &match, rawstr, 0, 0);
     if (ret < 1) {
-        SCLogError(SC_ERR_PCRE_MATCH, "pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
+        SCLogError("pcre_exec parse error, ret %" PRId32 ", string %s", ret, rawstr);
+        pcre2_match_data_free(match);
         return NULL;
     }
 
-    res = pcre_get_substring((char *)rawstr, ov, MAX_SUBSTRINGS, 1, &str_ptr);
+    res = pcre2_substring_get_bynumber(match, 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
-        return NULL;
+        SCLogError("pcre2_substring_get_bynumber failed");
+        goto error;
     }
 
     ptr = (char *)str_ptr;
 
     if (ptr == NULL)
-        return NULL;
+        goto error;
 
-    errno = 0;
-    mark = strtoul(ptr, &endptr, 0);
-    if (errno == ERANGE) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range");
-        SCFree(ptr);
-        return NULL;
-    }     /* If there is no numeric value in the given string then strtoull(), makes
-             endptr equals to ptr and return 0 as result */
-    else if (endptr == ptr && mark == 0) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "No numeric value");
-        SCFree(ptr);
-        return NULL;
-    } else if (endptr == ptr) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "Invalid numeric value");
-        SCFree(ptr);
-        return NULL;
+    if (ByteExtractStringUint32(&mark, 0, strlen(ptr), ptr) <= 0) {
+        SCLogError("invalid input as arg to nfq_set_mark keyword");
+        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
+        goto error;
     }
 
-    res = pcre_get_substring((char *)rawstr, ov, MAX_SUBSTRINGS, 2, &str_ptr);
+    res = pcre2_substring_get_bynumber(match, 2, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_get_substring failed");
-        return NULL;
+        SCLogError("pcre2_substring_get_bynumber failed");
+        goto error;
     }
 
-    SCFree(ptr);
+    pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
     ptr = (char *)str_ptr;
 
     if (ptr == NULL) {
         data = SCMalloc(sizeof(DetectMarkData));
         if (unlikely(data == NULL)) {
-            return NULL;
+            goto error;
         }
         data->mark = mark;
         data->mask = 0xffff;
+        pcre2_match_data_free(match);
         return data;
     }
 
-    errno = 0;
-    mask = strtoul(ptr, &endptr, 0);
-    if (errno == ERANGE) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range");
-        SCFree(ptr);
-        return NULL;
-    }     /* If there is no numeric value in the given string then strtoull(), makes
-             endptr equals to ptr and return 0 as result */
-    else if (endptr == ptr && mask == 0) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "No numeric value");
-        SCFree(ptr);
-        return NULL;
-    }
-    else if (endptr == ptr) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "Invalid numeric value");
-        SCFree(ptr);
-        return NULL;
+    if (ByteExtractStringUint32(&mask, 0, strlen(ptr), ptr) <= 0) {
+        SCLogError("invalid input as arg to nfq_set_mark keyword");
+        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
+        goto error;
     }
 
     SCLogDebug("Rule will set mark 0x%x with mask 0x%x", mark, mask);
-    SCFree(ptr);
+    pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
 
     data = SCMalloc(sizeof(DetectMarkData));
     if (unlikely(data == NULL)) {
-        return NULL;
+        goto error;
     }
     data->mark = mark;
     data->mask = mask;
+    pcre2_match_data_free(match);
     return data;
+
+error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
+    return NULL;
 }
 
 #endif /* NFQ */
@@ -193,18 +178,14 @@ static int DetectMarkSetup (DetectEngineCtx *de_ctx, Signature *s, const char *r
     if (data == NULL) {
         return -1;
     }
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
-        DetectMarkDataFree(de_ctx, data);
-        return -1;
-    }
-
-    sm->type = DETECT_MARK;
-    sm->ctx = (SigMatchCtx *)data;
 
     /* Append it to the list of post match, so the mark is set if the
      * full signature matches. */
-    SigMatchAppendSMToList(s, sm, DETECT_SM_LIST_POSTMATCH);
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_MARK, (SigMatchCtx *)data, DETECT_SM_LIST_POSTMATCH) == NULL) {
+        DetectMarkDataFree(de_ctx, data);
+        return -1;
+    }
     return 0;
 #endif
 }
@@ -222,22 +203,27 @@ static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
 #ifdef NFQ
     const DetectMarkData *nf_data = (const DetectMarkData *)ctx;
     if (nf_data->mask) {
-        if (!(IS_TUNNEL_PKT(p))) {
+        if (PacketIsNotTunnel(p)) {
+            /* for a non-tunnel packet we don't need a lock,
+             * and if we're here we can't turn into a tunnel
+             * packet anymore. */
+
             /* coverity[missing_lock] */
             p->nfq_v.mark = (nf_data->mark & nf_data->mask)
                 | (p->nfq_v.mark & ~(nf_data->mask));
-            p->flags |= PKT_MARK_MODIFIED;
+            /* coverity[missing_lock] */
+            p->nfq_v.mark_modified = true;
         } else {
             /* real tunnels may have multiple flows inside them, so marking
              * might 'mark' too much. Rebuilt packets from IP fragments
              * are fine. */
             if (p->flags & PKT_REBUILT_FRAGMENT) {
                 Packet *tp = p->root ? p->root : p;
-                SCMutexLock(&tp->tunnel_mutex);
+                SCSpinLock(&tp->persistent.tunnel_lock);
                 tp->nfq_v.mark = (nf_data->mark & nf_data->mask)
                     | (tp->nfq_v.mark & ~(nf_data->mask));
-                tp->flags |= PKT_MARK_MODIFIED;
-                SCMutexUnlock(&tp->tunnel_mutex);
+                tp->nfq_v.mark_modified = true;
+                SCSpinUnlock(&tp->persistent.tunnel_lock);
             }
         }
     }
@@ -253,8 +239,6 @@ static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
 /**
  * \test MarkTestParse01 is a test for a valid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse01 (void)
 {
@@ -262,19 +246,17 @@ static int MarkTestParse01 (void)
 
     data = DetectMarkParse("1/1");
 
-    if (data == NULL) {
-        return 0;
-    }
+    FAIL_IF_NULL(data);
+    FAIL_IF(data->mark != 1);
+    FAIL_IF(data->mask != 1);
 
     DetectMarkDataFree(NULL, data);
-    return 1;
+    PASS;
 }
 
 /**
  * \test MarkTestParse02 is a test for an invalid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse02 (void)
 {
@@ -282,39 +264,33 @@ static int MarkTestParse02 (void)
 
     data = DetectMarkParse("4");
 
-    if (data == NULL) {
-        return 1;
-    }
+    FAIL_IF_NOT_NULL(data);
 
     DetectMarkDataFree(NULL, data);
-    return 0;
+    PASS;
 }
 
 /**
  * \test MarkTestParse03 is a test for a valid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse03 (void)
 {
     DetectMarkData *data;
 
     data = DetectMarkParse("0x10/0xff");
+    FAIL_IF(data->mark != 0x10);
+    FAIL_IF(data->mask != 0xff);
 
-    if (data == NULL) {
-        return 0;
-    }
+    FAIL_IF_NULL(data);
 
     DetectMarkDataFree(NULL, data);
-    return 1;
+    PASS;
 }
 
 /**
  * \test MarkTestParse04 is a test for a invalid mark value
  *
- *  \retval 1 on succces
- *  \retval 0 on failure
  */
 static int MarkTestParse04 (void)
 {
@@ -322,12 +298,10 @@ static int MarkTestParse04 (void)
 
     data = DetectMarkParse("0x1g/0xff");
 
-    if (data == NULL) {
-        return 1;
-    }
+    FAIL_IF_NOT_NULL(data);
 
     DetectMarkDataFree(NULL, data);
-    return 0;
+    PASS;
 }
 
 /**

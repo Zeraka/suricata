@@ -23,15 +23,13 @@
  * Generic Route Encapsulation (GRE) from RFC 1701.
  */
 
-#ifndef __DECODE_GRE_H__
-#define __DECODE_GRE_H__
+#ifndef SURICATA_DECODE_GRE_H
+#define SURICATA_DECODE_GRE_H
 
 #ifndef IPPROTO_GRE
 #define IPPROTO_GRE 47
 #endif
 
-#include "decode.h"
-#include "threadvars.h"
 
 typedef struct GREHdr_
 {
@@ -40,6 +38,13 @@ typedef struct GREHdr_
     uint16_t ether_type; /**< ether type of the encapsulated traffic */
 
 } __attribute__((__packed__)) GREHdr;
+
+/* Enhanced GRE header - https://tools.ietf.org/html/rfc2637#section-4.1 */
+typedef struct GREPPtPHdr_ {
+    GREHdr greh;             /** base GRE packet header */
+    uint16_t payload_length; /** PPP payload length */
+    uint16_t call_id;        /** PPP peer id */
+} __attribute__((__packed__)) GREPPtPHd;
 
 /* Generic Routing Encapsulation Source Route Entries (SREs).
  * The header is followed by a variable amount of Routing Information.
@@ -79,5 +84,4 @@ typedef struct GRESreHdr_
 
 void DecodeGRERegisterTests(void);
 
-#endif /* __DECODE_GRE_H__ */
-
+#endif /* SURICATA_DECODE_GRE_H */

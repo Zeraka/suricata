@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __SOURCE_NFQ_H__
-#define __SOURCE_NFQ_H__
+#ifndef SURICATA_SOURCE_NFQ_H
+#define SURICATA_SOURCE_NFQ_H
 
 #ifdef NFQ
 
@@ -40,7 +40,8 @@ typedef struct NFQPacketVars_
 {
     int id; /* this nfq packets id */
     uint16_t nfq_index; /* index in NFQ array */
-    uint8_t verdicted;
+    bool verdicted;
+    bool mark_modified;
 
     uint32_t mark;
     uint32_t ifi;
@@ -89,14 +90,11 @@ typedef struct NFQGlobalVars_
     char unbind;
 } NFQGlobalVars;
 
-void NFQInitConfig(char quiet);
+void NFQInitConfig(bool quiet);
 int NFQRegisterQueue(const uint16_t number);
 int NFQParseAndRegisterQueues(const char *queues);
-int NFQGetQueueCount(void);
 void *NFQGetQueue(int number);
-int NFQGetQueueNum(int number);
 void *NFQGetThread(int number);
 void NFQContextsClean(void);
 #endif /* NFQ */
-#endif /* __SOURCE_NFQ_H__ */
-
+#endif /* SURICATA_SOURCE_NFQ_H */

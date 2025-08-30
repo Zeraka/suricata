@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,12 +21,8 @@
  * \author Breno Silva <breno.silva@gmail.com>
  */
 
-#ifndef __DETECT_REFERENCE_H__
-#define __DETECT_REFERENCE_H__
-
-#include "decode-events.h"
-#include "decode-ipv4.h"
-#include "decode-tcp.h"
+#ifndef SURICATA_DETECT_REFERENCE_H
+#define SURICATA_DETECT_REFERENCE_H
 
 /**
  * \brief Signature reference list.
@@ -36,6 +32,13 @@ typedef struct DetectReference_ {
     char *key;
     /* reference data */
     char *reference;
+
+    /*
+     * These have been length checked against REFERENCE_SYSTEM_NAME_MAX,
+     * and REFERENCE_CONTENT_NAME_MAX
+     */
+    uint16_t key_len;
+    uint16_t reference_len;
     /* next reference in the signature */
     struct DetectReference_ *next;
 } DetectReference;
@@ -50,4 +53,4 @@ void DetectReferenceRegister(void);
  */
 void DetectReferenceFree(DetectReference *);
 
-#endif /*__DETECT_REFERENCE_H__ */
+#endif /*SURICATA_DETECT_REFERENCE_H */

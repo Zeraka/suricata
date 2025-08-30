@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2020 Open Information Security Foundation
+/* Copyright (C) 2019-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -17,35 +17,61 @@
 
 // written by Giuseppe Longo <giuseppe@glongo.it>
 
-extern crate nom;
-
 use crate::applayer::{self, *};
 use crate::core;
-use crate::core::{sc_detect_engine_state_free, AppProto, Flow, ALPROTO_UNKNOWN};
-use crate::log::*;
+use crate::core::{
+    sc_app_layer_parser_trigger_raw_stream_inspection, ALPROTO_UNKNOWN, IPPROTO_TCP, IPPROTO_UDP,
+};
+use crate::direction::Direction;
+use crate::flow::Flow;
+use crate::frames::*;
 use crate::sip::parser::*;
+use nom7::Err;
 use std;
-use std::ffi::{CStr, CString};
+use std::collections::VecDeque;
+use std::ffi::CString;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerParserStateIssetFlag,
+    SCAppLayerProtoDetectConfProtoDetectionEnabled, SCAppLayerProtoDetectPMRegisterPatternCS,
+};
 
-#[repr(u32)]
+// app-layer-frame-documentation tag start: FrameType enum
+#[derive(AppLayerFrameType)]
+pub enum SIPFrameType {
+    Pdu,
+    RequestLine,
+    ResponseLine,
+    RequestHeaders,
+    ResponseHeaders,
+    RequestBody,
+    ResponseBody,
+}
+// app-layer-frame-documentation tag end: FrameType enum
+
+#[derive(AppLayerEvent)]
 pub enum SIPEvent {
-    IncompleteData = 0,
+    IncompleteData,
     InvalidData,
 }
 
-impl SIPEvent {
-    fn from_i32(value: i32) -> Option<SIPEvent> {
-        match value {
-            0 => Some(SIPEvent::IncompleteData),
-            1 => Some(SIPEvent::InvalidData),
-            _ => None,
-        }
-    }
+#[derive(Default)]
+pub struct SIPState {
+    state_data: AppLayerStateData,
+    transactions: VecDeque<SIPTransaction>,
+    tx_id: u64,
+    request_frame: Option<Frame>,
+    response_frame: Option<Frame>,
 }
 
-pub struct SIPState {
-    transactions: Vec<SIPTransaction>,
-    tx_id: u64,
+impl State<SIPTransaction> for SIPState {
+    fn get_transaction_count(&self) -> usize {
+        self.transactions.len()
+    }
+
+    fn get_transaction_by_index(&self, index: usize) -> Option<&SIPTransaction> {
+        self.transactions.get(index)
+    }
 }
 
 pub struct SIPTransaction {
@@ -54,26 +80,27 @@ pub struct SIPTransaction {
     pub response: Option<Response>,
     pub request_line: Option<String>,
     pub response_line: Option<String>,
-    de_state: Option<*mut core::DetectEngineState>,
-    events: *mut core::AppLayerDecoderEvents,
     tx_data: applayer::AppLayerTxData,
+}
+
+impl Transaction for SIPTransaction {
+    fn id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl SIPState {
     pub fn new() -> SIPState {
-        SIPState {
-            transactions: Vec::new(),
-            tx_id: 0,
-        }
+        Default::default()
     }
 
     pub fn free(&mut self) {
         self.transactions.clear();
     }
 
-    fn new_tx(&mut self) -> SIPTransaction {
+    fn new_tx(&mut self, direction: Direction) -> SIPTransaction {
         self.tx_id += 1;
-        SIPTransaction::new(self.tx_id)
+        SIPTransaction::new(self.tx_id, direction)
     }
 
     fn get_tx_by_id(&mut self, tx_id: u64) -> Option<&SIPTransaction> {
@@ -81,35 +108,45 @@ impl SIPState {
     }
 
     fn free_tx(&mut self, tx_id: u64) {
-        let tx = self
-            .transactions
-            .iter()
-            .position(|ref tx| tx.id == tx_id + 1);
-        debug_assert!(tx != None);
+        let tx = self.transactions.iter().position(|tx| tx.id == tx_id + 1);
+        debug_assert!(tx.is_some());
         if let Some(idx) = tx {
             let _ = self.transactions.remove(idx);
         }
     }
 
     fn set_event(&mut self, event: SIPEvent) {
-        if let Some(tx) = self.transactions.last_mut() {
-            let ev = event as u8;
-            core::sc_app_layer_decoder_events_set_event_raw(&mut tx.events, ev);
+        if let Some(tx) = self.transactions.back_mut() {
+            tx.tx_data.set_event(event as u8);
         }
     }
 
-    fn parse_request(&mut self, input: &[u8]) -> bool {
-        match sip_parse_request(input) {
+    // app-layer-frame-documentation tag start: parse_request
+    fn parse_request(&mut self, flow: *const Flow, stream_slice: StreamSlice) -> bool {
+        let input = stream_slice.as_slice();
+        let _pdu = Frame::new(
+            flow,
+            &stream_slice,
+            input,
+            input.len() as i64,
+            SIPFrameType::Pdu as u8,
+            None,
+        );
+        SCLogDebug!("ts: pdu {:?}", _pdu);
+
+        match parse_request(input) {
             Ok((_, request)) => {
-                let mut tx = self.new_tx();
+                let mut tx = self.new_tx(Direction::ToServer);
+                sip_frames_ts(flow, &stream_slice, &request, tx.id);
                 tx.request = Some(request);
                 if let Ok((_, req_line)) = sip_take_line(input) {
                     tx.request_line = req_line;
                 }
-                self.transactions.push(tx);
+                self.transactions.push_back(tx);
                 return true;
             }
-            Err(nom::Err::Incomplete(_)) => {
+            // app-layer-frame-documentation tag end: parse_request
+            Err(Err::Incomplete(_)) => {
                 self.set_event(SIPEvent::IncompleteData);
                 return false;
             }
@@ -120,18 +157,95 @@ impl SIPState {
         }
     }
 
-    fn parse_response(&mut self, input: &[u8]) -> bool {
-        match sip_parse_response(input) {
+    fn parse_request_tcp(
+        &mut self, flow: *mut Flow, stream_slice: StreamSlice,
+    ) -> AppLayerResult {
+        let input = stream_slice.as_slice();
+        if input.is_empty() {
+            return AppLayerResult::ok();
+        }
+
+        let mut start = input;
+        while !start.is_empty() {
+            if self.request_frame.is_none() {
+                self.request_frame = Frame::new(
+                    flow,
+                    &stream_slice,
+                    start,
+                    -1_i64,
+                    SIPFrameType::Pdu as u8,
+                    None,
+                );
+                SCLogDebug!("ts: pdu {:?}", self.request_frame);
+            }
+            match parse_request(start) {
+                Ok((rem, request)) => {
+                    let mut tx = self.new_tx(Direction::ToServer);
+                    let tx_id = tx.id;
+                    sip_frames_ts(flow, &stream_slice, &request, tx_id);
+                    tx.request = Some(request);
+                    if let Ok((_, req_line)) = sip_take_line(start) {
+                        tx.request_line = req_line;
+                    }
+                    self.transactions.push_back(tx);
+                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                        flow,
+                        Direction::ToServer as i32,
+                    );
+                    let consumed = start.len() - rem.len();
+                    start = rem;
+
+                    if let Some(frame) = &self.request_frame {
+                        frame.set_len(flow, consumed as i64);
+                        frame.set_tx(flow, tx_id);
+                        self.request_frame = None;
+                    }
+                }
+                Err(Err::Incomplete(_needed)) => {
+                    let consumed = input.len() - start.len();
+                    let needed_estimation = start.len() + 1;
+                    SCLogDebug!(
+                        "Needed: {:?}, estimated needed: {:?}",
+                        _needed,
+                        needed_estimation
+                    );
+                    return AppLayerResult::incomplete(consumed as u32, needed_estimation as u32);
+                }
+                Err(_) => {
+                    self.set_event(SIPEvent::InvalidData);
+                    return AppLayerResult::err();
+                }
+            }
+        }
+
+        // input fully consumed.
+        return AppLayerResult::ok();
+    }
+
+    fn parse_response(&mut self, flow: *const Flow, stream_slice: StreamSlice) -> bool {
+        let input = stream_slice.as_slice();
+        let _pdu = Frame::new(
+            flow,
+            &stream_slice,
+            input,
+            input.len() as i64,
+            SIPFrameType::Pdu as u8,
+            None,
+        );
+        SCLogDebug!("tc: pdu {:?}", _pdu);
+
+        match parse_response(input) {
             Ok((_, response)) => {
-                let mut tx = self.new_tx();
+                let mut tx = self.new_tx(Direction::ToClient);
+                sip_frames_tc(flow, &stream_slice, &response, tx.id);
                 tx.response = Some(response);
                 if let Ok((_, resp_line)) = sip_take_line(input) {
                     tx.response_line = resp_line;
                 }
-                self.transactions.push(tx);
+                self.transactions.push_back(tx);
                 return true;
             }
-            Err(nom::Err::Incomplete(_)) => {
+            Err(Err::Incomplete(_)) => {
                 self.set_event(SIPEvent::IncompleteData);
                 return false;
             }
@@ -141,269 +255,377 @@ impl SIPState {
             }
         }
     }
+
+    fn parse_response_tcp(
+        &mut self, flow: *mut Flow, stream_slice: StreamSlice,
+    ) -> AppLayerResult {
+        let input = stream_slice.as_slice();
+        if input.is_empty() {
+            return AppLayerResult::ok();
+        }
+
+        let mut start = input;
+        while !start.is_empty() {
+            if self.response_frame.is_none() {
+                self.response_frame = Frame::new(
+                    flow,
+                    &stream_slice,
+                    start,
+                    -1_i64,
+                    SIPFrameType::Pdu as u8,
+                    None,
+                );
+                SCLogDebug!("tc: pdu {:?}", self.request_frame);
+            }
+            match parse_response(start) {
+                Ok((rem, response)) => {
+                    let mut tx = self.new_tx(Direction::ToClient);
+                    let tx_id = tx.id;
+                    sip_frames_tc(flow, &stream_slice, &response, tx_id);
+                    tx.response = Some(response);
+                    if let Ok((_, resp_line)) = sip_take_line(start) {
+                        tx.response_line = resp_line;
+                    }
+                    self.transactions.push_back(tx);
+                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                        flow,
+                        Direction::ToClient as i32,
+                    );
+                    let consumed = start.len() - rem.len();
+                    start = rem;
+
+                    if let Some(frame) = &self.response_frame {
+                        frame.set_len(flow, consumed as i64);
+                        frame.set_tx(flow, tx_id);
+                        self.response_frame = None;
+                    }
+                }
+                Err(Err::Incomplete(_needed)) => {
+                    let consumed = input.len() - start.len();
+                    let needed_estimation = start.len() + 1;
+                    SCLogDebug!(
+                        "Needed: {:?}, estimated needed: {:?}",
+                        _needed,
+                        needed_estimation
+                    );
+                    return AppLayerResult::incomplete(consumed as u32, needed_estimation as u32);
+                }
+                Err(_) => {
+                    self.set_event(SIPEvent::InvalidData);
+                    return AppLayerResult::err();
+                }
+            }
+        }
+
+        // input fully consumed.
+        return AppLayerResult::ok();
+    }
 }
 
 impl SIPTransaction {
-    pub fn new(id: u64) -> SIPTransaction {
+    pub fn new(id: u64, direction: Direction) -> SIPTransaction {
         SIPTransaction {
-            id: id,
-            de_state: None,
+            id,
             request: None,
             response: None,
             request_line: None,
             response_line: None,
-            events: std::ptr::null_mut(),
-            tx_data: applayer::AppLayerTxData::new(),
+            tx_data: applayer::AppLayerTxData::for_direction(direction),
         }
     }
 }
 
-impl Drop for SIPTransaction {
-    fn drop(&mut self) {
-        if self.events != std::ptr::null_mut() {
-            core::sc_app_layer_decoder_events_free_events(&mut self.events);
-        }
-        if let Some(state) = self.de_state {
-            sc_detect_engine_state_free(state);
-        }
+// app-layer-frame-documentation tag start: function to add frames
+fn sip_frames_ts(flow: *const Flow, stream_slice: &StreamSlice, r: &Request, tx_id: u64) {
+    let oi = stream_slice.as_slice();
+    let _f = Frame::new(
+        flow,
+        stream_slice,
+        oi,
+        r.request_line_len as i64,
+        SIPFrameType::RequestLine as u8,
+        Some(tx_id),
+    );
+    SCLogDebug!("ts: request_line {:?}", _f);
+    let hi = &oi[r.request_line_len as usize..];
+    let _f = Frame::new(
+        flow,
+        stream_slice,
+        hi,
+        r.headers_len as i64,
+        SIPFrameType::RequestHeaders as u8,
+        Some(tx_id),
+    );
+    SCLogDebug!("ts: request_headers {:?}", _f);
+    if r.body_len > 0 {
+        let bi = &oi[r.body_offset as usize..];
+        let _f = Frame::new(
+            flow,
+            stream_slice,
+            bi,
+            r.body_len as i64,
+            SIPFrameType::RequestBody as u8,
+            Some(tx_id),
+        );
+        SCLogDebug!("ts: request_body {:?}", _f);
+    }
+}
+// app-layer-frame-documentation tag end: function to add frames
+
+fn sip_frames_tc(flow: *const Flow, stream_slice: &StreamSlice, r: &Response, tx_id: u64) {
+    let oi = stream_slice.as_slice();
+    let _f = Frame::new(
+        flow,
+        stream_slice,
+        oi,
+        r.response_line_len as i64,
+        SIPFrameType::ResponseLine as u8,
+        Some(tx_id),
+    );
+    let hi = &oi[r.response_line_len as usize..];
+    SCLogDebug!("tc: response_line {:?}", _f);
+    let _f = Frame::new(
+        flow,
+        stream_slice,
+        hi,
+        r.headers_len as i64,
+        SIPFrameType::ResponseHeaders as u8,
+        Some(tx_id),
+    );
+    SCLogDebug!("tc: response_headers {:?}", _f);
+    if r.body_len > 0 {
+        let bi = &oi[r.body_offset as usize..];
+        let _f = Frame::new(
+            flow,
+            stream_slice,
+            bi,
+            r.body_len as i64,
+            SIPFrameType::ResponseBody as u8,
+            Some(tx_id),
+        );
+        SCLogDebug!("tc: response_body {:?}", _f);
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_new() -> *mut std::os::raw::c_void {
+extern "C" fn sip_state_new(
+    _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
+) -> *mut std::os::raw::c_void {
     let state = SIPState::new();
     let boxed = Box::new(state);
-    return unsafe { std::mem::transmute(boxed) };
+    return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_free(state: *mut std::os::raw::c_void) {
-    let mut state: Box<SIPState> = unsafe { std::mem::transmute(state) };
+extern "C" fn sip_state_free(state: *mut std::os::raw::c_void) {
+    let mut state = unsafe { Box::from_raw(state as *mut SIPState) };
     state.free();
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_tx(
-    state: *mut std::os::raw::c_void,
-    tx_id: u64,
+unsafe extern "C" fn sip_state_get_tx(
+    state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, SIPState);
     match state.get_tx_by_id(tx_id) {
-        Some(tx) => unsafe { std::mem::transmute(tx) },
+        Some(tx) => tx as *const _ as *mut _,
         None => std::ptr::null_mut(),
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn sip_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, SIPState);
     state.tx_id
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn sip_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, SIPState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_progress_completion_status(_direction: u8) -> std::os::raw::c_int {
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_sip_tx_get_alstate_progress(
-    _tx: *mut std::os::raw::c_void,
-    _direction: u8,
+extern "C" fn sip_tx_get_alstate_progress(
+    _tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     1
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_set_tx_detect_state(
-    tx: *mut std::os::raw::c_void,
-    de_state: &mut core::DetectEngineState,
-) -> std::os::raw::c_int {
-    let tx = cast_pointer!(tx, SIPTransaction);
-    tx.de_state = Some(de_state);
-    0
+pub static mut ALPROTO_SIP: AppProto = ALPROTO_UNKNOWN;
+
+unsafe extern "C" fn sip_parse_request(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+) -> AppLayerResult {
+    let state = cast_pointer!(state, SIPState);
+    state.parse_request(flow, stream_slice).into()
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_tx_detect_state(
-    tx: *mut std::os::raw::c_void,
-) -> *mut core::DetectEngineState {
-    let tx = cast_pointer!(tx, SIPTransaction);
-    match tx.de_state {
-        Some(ds) => ds,
-        None => std::ptr::null_mut(),
+unsafe extern "C" fn sip_parse_request_tcp(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+) -> AppLayerResult {
+    if stream_slice.is_empty() {
+        if SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0 {
+            return AppLayerResult::ok();
+        } else {
+            return AppLayerResult::err();
+        }
     }
+
+    let state = cast_pointer!(state, SIPState);
+    state.parse_request_tcp(flow, stream_slice)
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_events(
-    tx: *mut std::os::raw::c_void,
-) -> *mut core::AppLayerDecoderEvents {
-    let tx = cast_pointer!(tx, SIPTransaction);
-    return tx.events;
+unsafe extern "C" fn sip_parse_response(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+) -> AppLayerResult {
+    let state = cast_pointer!(state, SIPState);
+    state.parse_response(flow, stream_slice).into()
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_event_info(
-    event_name: *const std::os::raw::c_char,
-    event_id: *mut std::os::raw::c_int,
-    event_type: *mut core::AppLayerEventType,
-) -> std::os::raw::c_int {
-    if event_name == std::ptr::null() {
+unsafe extern "C" fn sip_parse_response_tcp(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+) -> AppLayerResult {
+    if stream_slice.is_empty() {
+        if SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0 {
+            return AppLayerResult::ok();
+        } else {
+            return AppLayerResult::err();
+        }
+    }
+
+    let state = cast_pointer!(state, SIPState);
+    state.parse_response_tcp(flow, stream_slice)
+}
+
+fn register_pattern_probe(proto: u8) -> i8 {
+    let methods: Vec<&str> = vec![
+        "REGISTER\0",
+        "INVITE\0",
+        "ACK\0",
+        "BYE\0",
+        "CANCEL\0",
+        "REFER\0",
+        "PRACK\0",
+        "SUBSCRIBE\0",
+        "NOTIFY\0",
+        "PUBLISH\0",
+        "MESSAGE\0",
+        "INFO\0",
+    ];
+    let mut r = 0;
+    unsafe {
+        for method in methods {
+            let depth = (method.len() - 1) as u16;
+            r |= SCAppLayerProtoDetectPMRegisterPatternCS(
+                proto,
+                ALPROTO_SIP,
+                method.as_ptr() as *const std::os::raw::c_char,
+                depth,
+                0,
+                Direction::ToServer as u8,
+            );
+        }
+        r |= SCAppLayerProtoDetectPMRegisterPatternCS(
+            proto,
+            ALPROTO_SIP,
+            b"SIP/2.0\0".as_ptr() as *const std::os::raw::c_char,
+            8,
+            0,
+            Direction::ToClient as u8,
+        );
+        if proto == core::IPPROTO_UDP {
+            r |= SCAppLayerProtoDetectPMRegisterPatternCS(
+                proto,
+                ALPROTO_SIP,
+                "UPDATE\0".as_ptr() as *const std::os::raw::c_char,
+                "UPDATE".len() as u16,
+                0,
+                Direction::ToServer as u8,
+            );
+        }
+    }
+
+    if r == 0 {
+        return 0;
+    } else {
         return -1;
     }
-    let c_event_name: &CStr = unsafe { CStr::from_ptr(event_name) };
-    let event = match c_event_name.to_str() {
-        Ok(s) => {
-            match s {
-                "incomplete_data" => SIPEvent::IncompleteData as i32,
-                "invalid_data" => SIPEvent::InvalidData as i32,
-                _ => -1, // unknown event
-            }
-        }
-        Err(_) => -1, // UTF-8 conversion failed
-    };
-    unsafe {
-        *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        *event_id = event as std::os::raw::c_int;
-    };
-    0
 }
 
-#[no_mangle]
-pub extern "C" fn rs_sip_state_get_event_info_by_id(
-    event_id: std::os::raw::c_int,
-    event_name: *mut *const std::os::raw::c_char,
-    event_type: *mut core::AppLayerEventType,
-) -> i8 {
-    if let Some(e) = SIPEvent::from_i32(event_id as i32) {
-        let estr = match e {
-            SIPEvent::IncompleteData => "incomplete_data\0",
-            SIPEvent::InvalidData => "invalid_data\0",
-        };
-        unsafe {
-            *event_name = estr.as_ptr() as *const std::os::raw::c_char;
-            *event_type = core::APP_LAYER_EVENT_TYPE_TRANSACTION;
-        };
-        0
-    } else {
-        -1
-    }
-}
+export_tx_data_get!(sip_get_tx_data, SIPTransaction);
+export_state_data_get!(sip_get_state_data, SIPState);
 
-static mut ALPROTO_SIP: AppProto = ALPROTO_UNKNOWN;
+const PARSER_NAME: &[u8] = b"sip\0";
 
 #[no_mangle]
-pub extern "C" fn rs_sip_probing_parser_ts(
-    _flow: *const Flow,
-    _direction: u8,
-    input: *const u8,
-    input_len: u32,
-    _rdir: *mut u8,
-) -> AppProto {
-    let buf = build_slice!(input, input_len as usize);
-    if sip_parse_request(buf).is_ok() {
-        return unsafe { ALPROTO_SIP };
-    }
-    return ALPROTO_UNKNOWN;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_sip_probing_parser_tc(
-    _flow: *const Flow,
-    _direction: u8,
-    input: *const u8,
-    input_len: u32,
-    _rdir: *mut u8,
-) -> AppProto {
-    let buf = build_slice!(input, input_len as usize);
-    if sip_parse_response(buf).is_ok() {
-        return unsafe { ALPROTO_SIP };
-    }
-    return ALPROTO_UNKNOWN;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_sip_parse_request(
-    _flow: *const core::Flow,
-    state: *mut std::os::raw::c_void,
-    _pstate: *mut std::os::raw::c_void,
-    input: *const u8,
-    input_len: u32,
-    _data: *const std::os::raw::c_void,
-    _flags: u8,
-) -> AppLayerResult {
-    let buf = build_slice!(input, input_len as usize);
-    let state = cast_pointer!(state, SIPState);
-    state.parse_request(buf).into()
-}
-
-#[no_mangle]
-pub extern "C" fn rs_sip_parse_response(
-    _flow: *const core::Flow,
-    state: *mut std::os::raw::c_void,
-    _pstate: *mut std::os::raw::c_void,
-    input: *const u8,
-    input_len: u32,
-    _data: *const std::os::raw::c_void,
-    _flags: u8,
-) -> AppLayerResult {
-    let buf = build_slice!(input, input_len as usize);
-    let state = cast_pointer!(state, SIPState);
-    state.parse_response(buf).into()
-}
-
-export_tx_data_get!(rs_sip_get_tx_data, SIPTransaction);
-
-const PARSER_NAME: &'static [u8] = b"sip\0";
-
-#[no_mangle]
-pub unsafe extern "C" fn rs_sip_register_parser() {
-    let default_port = CString::new("5060").unwrap();
-    let parser = RustParser {
+pub unsafe extern "C" fn SCRegisterSipParser() {
+    let mut parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
-        default_port: default_port.as_ptr(),
+        default_port: std::ptr::null(),
         ipproto: core::IPPROTO_UDP,
-        probe_ts: Some(rs_sip_probing_parser_ts),
-        probe_tc: Some(rs_sip_probing_parser_tc),
+        probe_ts: None,
+        probe_tc: None,
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_sip_state_new,
-        state_free: rs_sip_state_free,
-        tx_free: rs_sip_state_tx_free,
-        parse_ts: rs_sip_parse_request,
-        parse_tc: rs_sip_parse_response,
-        get_tx_count: rs_sip_state_get_tx_count,
-        get_tx: rs_sip_state_get_tx,
-        tx_get_comp_st: rs_sip_state_progress_completion_status,
-        tx_get_progress: rs_sip_tx_get_alstate_progress,
-        get_de_state: rs_sip_state_get_tx_detect_state,
-        set_de_state: rs_sip_state_set_tx_detect_state,
-        get_events: Some(rs_sip_state_get_events),
-        get_eventinfo: Some(rs_sip_state_get_event_info),
-        get_eventinfo_byid: Some(rs_sip_state_get_event_info_by_id),
+        state_new: sip_state_new,
+        state_free: sip_state_free,
+        tx_free: sip_state_tx_free,
+        parse_ts: sip_parse_request,
+        parse_tc: sip_parse_response,
+        get_tx_count: sip_state_get_tx_count,
+        get_tx: sip_state_get_tx,
+        tx_comp_st_ts: 1,
+        tx_comp_st_tc: 1,
+        tx_get_progress: sip_tx_get_alstate_progress,
+        get_eventinfo: Some(SIPEvent::get_event_info),
+        get_eventinfo_byid: Some(SIPEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
-        get_files: None,
-        get_tx_iterator: None,
-        get_tx_data: rs_sip_get_tx_data,
+        get_tx_files: None,
+        get_tx_iterator: Some(applayer::state_get_tx_iterator::<SIPState, SIPTransaction>),
+        get_tx_data: sip_get_tx_data,
+        get_state_data: sip_get_state_data,
         apply_tx_config: None,
         flags: 0,
+        get_frame_id_by_name: Some(SIPFrameType::ffi_id_from_name),
+        get_frame_name_by_id: Some(SIPFrameType::ffi_name_from_id),
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("udp").unwrap();
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
         let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
         ALPROTO_SIP = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
+        if register_pattern_probe(core::IPPROTO_UDP) < 0 {
+            return;
+        }
+        SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_SIP);
     } else {
-        SCLogDebug!("Protocol detecter and parser disabled for SIP/UDP.");
+        SCLogDebug!("Protocol detection and parsing disabled for UDP SIP.");
+    }
+
+    // register TCP parser
+    parser.ipproto = core::IPPROTO_TCP;
+    parser.probe_ts = None;
+    parser.probe_tc = None;
+    parser.parse_ts = sip_parse_request_tcp;
+    parser.parse_tc = sip_parse_response_tcp;
+
+    let ip_proto_str = CString::new("tcp").unwrap();
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+        ALPROTO_SIP = alproto;
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+            let _ = AppLayerRegisterParser(&parser, alproto);
+        }
+        if register_pattern_probe(core::IPPROTO_TCP) < 0 {
+            return;
+        }
+        SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SIP);
+    } else {
+        SCLogDebug!("Protocol detection and parsing disabled for TCP SIP.");
     }
 }

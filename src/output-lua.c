@@ -1,4 +1,4 @@
-/* Copyright (C) 2014-2020 Open Information Security Foundation
+/* Copyright (C) 2014-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,47 +23,19 @@
  */
 
 #include "suricata-common.h"
-#include "debug.h"
-#include "pkt-var.h"
-#include "conf.h"
+#include "output-lua.h"
 
-#include "threads.h"
-#include "threadvars.h"
-#include "tm-threads.h"
-
-#include "util-print.h"
-#include "util-unittest.h"
-
+#include "util-lua-builtins.h"
 #include "util-debug.h"
-
 #include "output.h"
 #include "app-layer-htp.h"
-#include "app-layer.h"
 #include "app-layer-ssl.h"
 #include "app-layer-ssh.h"
 #include "app-layer-parser.h"
-#include "util-privs.h"
-#include "util-buffer.h"
-#include "util-proto-name.h"
-#include "util-logopenfile.h"
 #include "util-time.h"
-
-#include "output-lua.h"
-
-#ifdef HAVE_LUA
-
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
-
 #include "util-lua.h"
 #include "util-lua-common.h"
 #include "util-lua-http.h"
-#include "util-lua-dns.h"
-#include "util-lua-ja3.h"
-#include "util-lua-tls.h"
-#include "util-lua-ssh.h"
-#include "util-lua-hassh.h"
 #include "util-lua-smtp.h"
 
 #define MODULE_NAME "LuaLog"
@@ -74,7 +46,14 @@
  *  it's parent_ctx->data ptr.
  */
 typedef struct LogLuaMasterCtx_ {
-    char path[PATH_MAX]; /**< contains script-dir */
+    /** \brief Path to script directory. */
+    char script_dir[PATH_MAX];
+
+    /** \brief Lua search path for Lua modules. */
+    char path[PATH_MAX];
+
+    /** \brief Lua search path for C modules. */
+    char cpath[PATH_MAX];
 } LogLuaMasterCtx;
 
 typedef struct LogLuaCtx_ {
@@ -108,7 +87,7 @@ static int LuaTxLogger(ThreadVars *tv, void *thread_data, const Packet *p, Flow 
 
     LuaStateSetThreadVars(td->lua_ctx->luastate, tv);
     LuaStateSetPacket(td->lua_ctx->luastate, (Packet *)p);
-    LuaStateSetTX(td->lua_ctx->luastate, txptr);
+    LuaStateSetTX(td->lua_ctx->luastate, txptr, tx_id);
     LuaStateSetFlow(td->lua_ctx->luastate, f);
 
     /* prepare data to pass to script */
@@ -147,23 +126,36 @@ static int LuaStreamingLogger(ThreadVars *tv, void *thread_data, const Flow *f,
     }
 
     LogLuaThreadCtx *td = (LogLuaThreadCtx *)thread_data;
-
     SCMutexLock(&td->lua_ctx->m);
+    lua_State *luastate = td->lua_ctx->luastate;
 
-    LuaStateSetThreadVars(td->lua_ctx->luastate, tv);
+    LuaStateSetThreadVars(luastate, tv);
     if (flags & OUTPUT_STREAMING_FLAG_TRANSACTION)
-        LuaStateSetTX(td->lua_ctx->luastate, txptr);
-    LuaStateSetFlow(td->lua_ctx->luastate, (Flow *)f);
-    LuaStateSetStreamingBuffer(td->lua_ctx->luastate, &b);
+        LuaStateSetTX(luastate, txptr, tx_id);
+    LuaStateSetFlow(luastate, (Flow *)f);
+    LuaStateSetStreamingBuffer(luastate, &b);
 
     /* prepare data to pass to script */
-    lua_getglobal(td->lua_ctx->luastate, "log");
-    lua_newtable(td->lua_ctx->luastate);
+    lua_getglobal(luastate, "log");
+    lua_newtable(luastate);
 
     if (flags & OUTPUT_STREAMING_FLAG_TRANSACTION)
-        LuaPushTableKeyValueInt(td->lua_ctx->luastate, "tx_id", (int)(tx_id));
+        LuaPushTableKeyValueInt(luastate, "tx_id", (int)(tx_id));
 
-    int retval = lua_pcall(td->lua_ctx->luastate, 1, 0, 0);
+    /* create the "stream" subtable */
+    lua_pushstring(luastate, "stream");
+    lua_newtable(luastate);
+
+    LuaPushTableKeyValueLString(luastate, "data", (const char *)data, data_len);
+    LuaPushTableKeyValueBoolean(luastate, "open", flags & OUTPUT_STREAMING_FLAG_OPEN);
+    LuaPushTableKeyValueBoolean(luastate, "close", flags & OUTPUT_STREAMING_FLAG_CLOSE);
+    LuaPushTableKeyValueBoolean(luastate, "to_server", flags & OUTPUT_STREAMING_FLAG_TOSERVER);
+    LuaPushTableKeyValueBoolean(luastate, "to_client", flags & OUTPUT_STREAMING_FLAG_TOCLIENT);
+
+    /* set the "stream" subtable into the main args table */
+    lua_settable(luastate, -3);
+
+    int retval = lua_pcall(luastate, 1, 0, 0);
     if (retval != 0) {
         SCLogInfo("failed to run script: %s", lua_tostring(td->lua_ctx->luastate, -1));
     }
@@ -178,7 +170,7 @@ static int LuaStreamingLogger(ThreadVars *tv, void *thread_data, const Flow *f,
  *
  *  A single call to this function will run one script for a single
  *  packet. If it is called, it means that the registered condition
- *  function has returned TRUE.
+ *  function has returned true.
  *
  *  The script is called once for each alert stored in the packet.
  *
@@ -189,9 +181,9 @@ static int LuaPacketLoggerAlerts(ThreadVars *tv, void *thread_data, const Packet
     LogLuaThreadCtx *td = (LogLuaThreadCtx *)thread_data;
 
     char timebuf[64];
-    CreateTimeString(&p->ts, timebuf, sizeof(timebuf));
+    CreateTimeString(p->ts, timebuf, sizeof(timebuf));
 
-    if (!(PKT_IS_IPV4(p)) && !(PKT_IS_IPV6(p))) {
+    if (!(PacketIsIPv4(p)) && !(PacketIsIPv6(p))) {
         /* decoder event */
         goto not_supported;
     }
@@ -209,11 +201,12 @@ static int LuaPacketLoggerAlerts(ThreadVars *tv, void *thread_data, const Packet
 
         void *txptr = NULL;
         if (p->flow && p->flow->alstate && (pa->flags & PACKET_ALERT_FLAG_TX))
-            txptr = AppLayerParserGetTx(p->proto, p->flow->alproto, p->flow->alstate, pa->tx_id);
+            txptr = AppLayerParserGetTx(
+                    p->flow->proto, p->flow->alproto, p->flow->alstate, pa->tx_id);
 
         LuaStateSetThreadVars(td->lua_ctx->luastate, tv);
         LuaStateSetPacket(td->lua_ctx->luastate, (Packet *)p);
-        LuaStateSetTX(td->lua_ctx->luastate, txptr);
+        LuaStateSetTX(td->lua_ctx->luastate, txptr, pa->tx_id);
         LuaStateSetFlow(td->lua_ctx->luastate, p->flow);
         LuaStateSetPacketAlert(td->lua_ctx->luastate, (PacketAlert *)pa);
 
@@ -230,11 +223,9 @@ not_supported:
     SCReturnInt(0);
 }
 
-static int LuaPacketConditionAlerts(ThreadVars *tv, const Packet *p)
+static bool LuaPacketConditionAlerts(ThreadVars *tv, void *data, const Packet *p)
 {
-    if (p->alerts.cnt > 0)
-        return TRUE;
-    return FALSE;
+    return (p->alerts.cnt > 0);
 }
 
 /** \internal
@@ -242,7 +233,7 @@ static int LuaPacketConditionAlerts(ThreadVars *tv, const Packet *p)
  *
  *  A single call to this function will run one script for a single
  *  packet. If it is called, it means that the registered condition
- *  function has returned TRUE.
+ *  function has returned true.
  *
  *  The script is called once for each packet.
  *
@@ -254,11 +245,11 @@ static int LuaPacketLogger(ThreadVars *tv, void *thread_data, const Packet *p)
 
     char timebuf[64];
 
-    if ((!(PKT_IS_IPV4(p))) && (!(PKT_IS_IPV6(p)))) {
+    if ((!(PacketIsIPv4(p))) && (!(PacketIsIPv6(p)))) {
         goto not_supported;
     }
 
-    CreateTimeString(&p->ts, timebuf, sizeof(timebuf));
+    CreateTimeString(p->ts, timebuf, sizeof(timebuf));
 
     /* loop through alerts stored in the packet */
     SCMutexLock(&td->lua_ctx->m);
@@ -280,9 +271,9 @@ not_supported:
     SCReturnInt(0);
 }
 
-static int LuaPacketCondition(ThreadVars *tv, const Packet *p)
+static bool LuaPacketCondition(ThreadVars *tv, void *data, const Packet *p)
 {
-    return TRUE;
+    return true;
 }
 
 /** \internal
@@ -292,15 +283,16 @@ static int LuaPacketCondition(ThreadVars *tv, const Packet *p)
  *
  * NOTE p->flow is locked at this point
  */
-static int LuaFileLogger(ThreadVars *tv, void *thread_data, const Packet *p, const File *ff, uint8_t dir)
+static int LuaFileLogger(ThreadVars *tv, void *thread_data, const Packet *p, const File *ff,
+        void *tx, const uint64_t tx_id, uint8_t dir)
 {
     SCEnter();
     LogLuaThreadCtx *td = (LogLuaThreadCtx *)thread_data;
 
-    if ((!(PKT_IS_IPV4(p))) && (!(PKT_IS_IPV6(p))))
+    if ((!(PacketIsIPv4(p))) && (!(PacketIsIPv6(p))))
         return 0;
 
-    BUG_ON(ff->flags & FILE_LOGGED);
+    DEBUG_VALIDATE_BUG_ON(ff->flags & FILE_LOGGED);
 
     SCLogDebug("ff %p", ff);
 
@@ -308,12 +300,7 @@ static int LuaFileLogger(ThreadVars *tv, void *thread_data, const Packet *p, con
 
     LuaStateSetThreadVars(td->lua_ctx->luastate, tv);
     LuaStateSetPacket(td->lua_ctx->luastate, (Packet *)p);
-    if (p->flow && p->flow->alstate) {
-        void *txptr = AppLayerParserGetTx(p->proto, p->flow->alproto, p->flow->alstate, ff->txid);
-        if (txptr) {
-            LuaStateSetTX(td->lua_ctx->luastate, txptr);
-        }
-    }
+    LuaStateSetTX(td->lua_ctx->luastate, tx, tx_id);
     LuaStateSetFlow(td->lua_ctx->luastate, p->flow);
     LuaStateSetFile(td->lua_ctx->luastate, (File *)ff);
 
@@ -424,6 +411,33 @@ typedef struct LogLuaScriptOptions_ {
     int stats;
 } LogLuaScriptOptions;
 
+/** \brief Setup or clear Lua module search paths.
+ *
+ * If search paths are provided by the configuration, set them up,
+ * otherwise clear the default search paths.
+ */
+static void LuaSetPaths(lua_State *L, LogLuaMasterCtx *ctx)
+{
+    lua_getglobal(L, "package");
+
+    if (strlen(ctx->path) > 0) {
+        lua_pushstring(L, ctx->path);
+    } else {
+        lua_pushstring(L, "");
+    }
+    lua_setfield(L, -2, "path");
+
+    if (strlen(ctx->cpath) > 0) {
+        lua_pushstring(L, ctx->cpath);
+    } else {
+        lua_pushstring(L, "");
+    }
+    lua_setfield(L, -2, "cpath");
+
+    /* Pop package. */
+    lua_pop(L, 1);
+}
+
 /** \brief load and evaluate the script
  *
  *  This function parses the script, checks if all the required functions
@@ -434,67 +448,45 @@ typedef struct LogLuaScriptOptions_ {
  *  \param options struct to pass script requirements/options back to caller
  *  \retval errcode 0 ok, -1 error
  */
-static int LuaScriptInit(const char *filename, LogLuaScriptOptions *options) {
-    int status;
-
+static int LuaScriptInit(const char *filename, LogLuaScriptOptions *options, LogLuaMasterCtx *ctx)
+{
     lua_State *luastate = LuaGetState();
     if (luastate == NULL)
         goto error;
     luaL_openlibs(luastate);
+    SCLuaRequirefBuiltIns(luastate);
+    LuaSetPaths(luastate, ctx);
 
-    /* hackish, needed to allow unittests to pass buffers as scripts instead of files */
-#if 0//def UNITTESTS
-    if (ut_script != NULL) {
-        status = luaL_loadbuffer(luastate, ut_script, strlen(ut_script), "unittest");
-        if (status) {
-            SCLogError(SC_ERR_LUA_ERROR, "couldn't load file: %s", lua_tostring(luastate, -1));
-            goto error;
-        }
-    } else {
-#endif
-        status = luaL_loadfile(luastate, filename);
-        if (status) {
-            SCLogError(SC_ERR_LUA_ERROR, "couldn't load file: %s", lua_tostring(luastate, -1));
-            goto error;
-        }
-#if 0//def UNITTESTS
+    int status = luaL_loadfile(luastate, filename);
+    if (status) {
+        SCLogError("couldn't load file: %s", lua_tostring(luastate, -1));
+        goto error;
     }
-#endif
 
     /* prime the script (or something) */
     if (lua_pcall(luastate, 0, 0, 0) != 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "couldn't prime file: %s", lua_tostring(luastate, -1));
+        SCLogError("couldn't prime file: %s", lua_tostring(luastate, -1));
         goto error;
     }
 
     lua_getglobal(luastate, "init");
     if (lua_type(luastate, -1) != LUA_TFUNCTION) {
-        SCLogError(SC_ERR_LUA_ERROR, "no init function in script");
+        SCLogError("no init function in script");
         goto error;
     }
 
-    lua_newtable(luastate); /* stack at -1 */
-    if (lua_gettop(luastate) == 0 || lua_type(luastate, 2) != LUA_TTABLE) {
-        SCLogError(SC_ERR_LUA_ERROR, "no table setup");
-        goto error;
-    }
-
-    lua_pushliteral(luastate, "script_api_ver");
-    lua_pushnumber (luastate, 1);
-    lua_settable(luastate, -3);
-
-    if (lua_pcall(luastate, 1, 1, 0) != 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "couldn't run script 'init' function: %s", lua_tostring(luastate, -1));
+    if (lua_pcall(luastate, 0, 1, 0) != 0) {
+        SCLogError("couldn't run script 'init' function: %s", lua_tostring(luastate, -1));
         goto error;
     }
 
     /* process returns from script */
     if (lua_gettop(luastate) == 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "init function in script should return table, nothing returned");
+        SCLogError("init function in script should return table, nothing returned");
         goto error;
     }
     if (lua_type(luastate, 1) != LUA_TTABLE) {
-        SCLogError(SC_ERR_LUA_ERROR, "init function in script should return table, returned is not table");
+        SCLogError("init function in script should return table, returned is not table");
         goto error;
     }
 
@@ -512,8 +504,18 @@ static int LuaScriptInit(const char *filename, LogLuaScriptOptions *options) {
 
         SCLogDebug("k='%s', v='%s'", k, v);
 
-        if (strcmp(k,"protocol") == 0 && strcmp(v, "http") == 0)
-            options->alproto = ALPROTO_HTTP;
+        if (strcmp(k, "streaming") == 0) {
+            options->streaming = 1;
+            if (strcmp(v, "http") == 0) {
+                options->alproto = ALPROTO_HTTP1;
+            } else if (strcmp(v, "tcp") == 0) {
+                options->tcp_data = 1;
+            } else {
+                SCLogError("unsupported streaming argument: %s", v);
+                goto error;
+            }
+        } else if (strcmp(k, "protocol") == 0 && strcmp(v, "http") == 0)
+            options->alproto = ALPROTO_HTTP1;
         else if (strcmp(k,"protocol") == 0 && strcmp(v, "dns") == 0)
             options->alproto = ALPROTO_DNS;
         else if (strcmp(k,"protocol") == 0 && strcmp(v, "tls") == 0)
@@ -536,30 +538,32 @@ static int LuaScriptInit(const char *filename, LogLuaScriptOptions *options) {
             options->tcp_data = 1;
         else if (strcmp(k, "type") == 0 && strcmp(v, "stats") == 0)
             options->stats = 1;
-        else
-            SCLogInfo("unknown key and/or value: k='%s', v='%s'", k, v);
+        else {
+            SCLogError("unknown key and/or value: k='%s', v='%s'", k, v);
+            goto error;
+        }
     }
 
     if (((options->alproto != ALPROTO_UNKNOWN)) + options->packet + options->file > 1) {
-        SCLogError(SC_ERR_LUA_ERROR, "invalid combination of 'needs' in the script");
+        SCLogError("invalid combination of 'needs' in the script");
         goto error;
     }
 
     lua_getglobal(luastate, "setup");
     if (lua_type(luastate, -1) != LUA_TFUNCTION) {
-        SCLogError(SC_ERR_LUA_ERROR, "no setup function in script");
+        SCLogError("no setup function in script");
         goto error;
     }
 
     lua_getglobal(luastate, "log");
     if (lua_type(luastate, -1) != LUA_TFUNCTION) {
-        SCLogError(SC_ERR_LUA_ERROR, "no log function in script");
+        SCLogError("no log function in script");
         goto error;
     }
 
     lua_getglobal(luastate, "deinit");
     if (lua_type(luastate, -1) != LUA_TFUNCTION) {
-        SCLogError(SC_ERR_LUA_ERROR, "no deinit function in script");
+        SCLogError("no deinit function in script");
         goto error;
     }
 
@@ -577,58 +581,34 @@ error:
  *
  *  \retval state Returns the set up luastate on success, NULL on error
  */
-static lua_State *LuaScriptSetup(const char *filename)
+static lua_State *LuaScriptSetup(const char *filename, LogLuaMasterCtx *ctx)
 {
     lua_State *luastate = LuaGetState();
     if (luastate == NULL) {
-        SCLogError(SC_ERR_LUA_ERROR, "luaL_newstate failed");
+        SCLogError("luaL_newstate failed");
         goto error;
     }
 
     luaL_openlibs(luastate);
+    SCLuaRequirefBuiltIns(luastate);
+    LuaSetPaths(luastate, ctx);
 
-    int status;
-    /* hackish, needed to allow unittests to pass buffers as scripts instead of files */
-#if 0//def UNITTESTS
-    if (ut_script != NULL) {
-        status = luaL_loadbuffer(t->luastate, ut_script, strlen(ut_script), "unittest");
-        if (status) {
-            SCLogError(SC_ERR_LUA_ERROR, "couldn't load file: %s", lua_tostring(t->luastate, -1));
-            goto error;
-        }
-    } else {
-#endif
-        status = luaL_loadfile(luastate, filename);
-        if (status) {
-            SCLogError(SC_ERR_LUA_ERROR, "couldn't load file: %s", lua_tostring(luastate, -1));
-            goto error;
-        }
-#if 0//def UNITTESTS
+    int status = luaL_loadfile(luastate, filename);
+    if (status) {
+        SCLogError("couldn't load file: %s", lua_tostring(luastate, -1));
+        goto error;
     }
-#endif
 
     /* prime the script */
     if (lua_pcall(luastate, 0, 0, 0) != 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "couldn't prime file: %s", lua_tostring(luastate, -1));
+        SCLogError("couldn't prime file: %s", lua_tostring(luastate, -1));
         goto error;
     }
 
     lua_getglobal(luastate, "setup");
 
-    /* register functions common to all */
-    LuaRegisterFunctions(luastate);
-    /* unconditionally register http function. They will only work
-     * if the tx is registered in the state at runtime though. */
-    LuaRegisterHttpFunctions(luastate);
-    LuaRegisterDnsFunctions(luastate);
-    LuaRegisterJa3Functions(luastate);
-    LuaRegisterTlsFunctions(luastate);
-    LuaRegisterSshFunctions(luastate);
-    LuaRegisterHasshFunctions(luastate);
-    LuaRegisterSmtpFunctions(luastate);
-
     if (lua_pcall(luastate, 0, 0, 0) != 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "couldn't run script 'setup' function: %s", lua_tostring(luastate, -1));
+        SCLogError("couldn't run script 'setup' function: %s", lua_tostring(luastate, -1));
         goto error;
     }
 
@@ -650,16 +630,15 @@ static void LogLuaSubFree(OutputCtx *oc) {
  *
  *  Runs script 'setup' function.
  */
-static OutputInitResult OutputLuaLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputLuaLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     if (conf == NULL)
         return result;
 
-    LogLuaCtx *lua_ctx = SCMalloc(sizeof(LogLuaCtx));
+    LogLuaCtx *lua_ctx = SCCalloc(1, sizeof(LogLuaCtx));
     if (unlikely(lua_ctx == NULL))
         return result;
-    memset(lua_ctx, 0x00, sizeof(*lua_ctx));
 
     OutputCtx *output_ctx = SCCalloc(1, sizeof(OutputCtx));
     if (unlikely(output_ctx == NULL)) {
@@ -669,22 +648,21 @@ static OutputInitResult OutputLuaLogInitSub(ConfNode *conf, OutputCtx *parent_ct
 
     SCMutexInit(&lua_ctx->m, NULL);
 
-    const char *dir = "";
-    if (parent_ctx && parent_ctx->data) {
-        LogLuaMasterCtx *mc = parent_ctx->data;
-        dir = mc->path;
-    }
+    BUG_ON(parent_ctx == NULL);
+    LogLuaMasterCtx *mc = parent_ctx->data;
+    BUG_ON(mc == NULL);
 
+    const char *dir = mc->script_dir;
     char path[PATH_MAX] = "";
     int ret = snprintf(path, sizeof(path),"%s%s%s", dir, strlen(dir) ? "/" : "", conf->val);
     if (ret < 0 || ret == sizeof(path)) {
-        SCLogError(SC_ERR_SPRINTF,"failed to construct lua script path");
+        SCLogError("failed to construct lua script path");
         goto error;
     }
     SCLogDebug("script full path %s", path);
 
     SCMutexLock(&lua_ctx->m);
-    lua_ctx->luastate = LuaScriptSetup(path);
+    lua_ctx->luastate = LuaScriptSetup(path, mc);
     SCMutexUnlock(&lua_ctx->m);
     if (lua_ctx->luastate == NULL)
         goto error;
@@ -723,14 +701,14 @@ static void LogLuaMasterFree(OutputCtx *oc)
  *  inspect, then fills the OutputCtx::submodules list with the
  *  proper Logger function for the data type the script needs.
  */
-static OutputInitResult OutputLuaLogInit(ConfNode *conf)
+static OutputInitResult OutputLuaLogInit(SCConfNode *conf)
 {
     OutputInitResult result = { NULL, false };
-    const char *dir = ConfNodeLookupChildValue(conf, "scripts-dir");
+    const char *dir = SCConfNodeLookupChildValue(conf, "scripts-dir");
     if (dir == NULL)
         dir = "";
 
-    ConfNode *scripts = ConfNodeLookupChild(conf, "scripts");
+    SCConfNode *scripts = SCConfNodeLookupChild(conf, "scripts");
     if (scripts == NULL) {
         /* No "outputs" section in the configuration. */
         SCLogInfo("scripts not defined");
@@ -749,11 +727,22 @@ static OutputInitResult OutputLuaLogInit(ConfNode *conf)
         return result;
     }
     LogLuaMasterCtx *master_config = output_ctx->data;
-    strlcpy(master_config->path, dir, sizeof(master_config->path));
+    strlcpy(master_config->script_dir, dir, sizeof(master_config->script_dir));
+
+    const char *lua_path = SCConfNodeLookupChildValue(conf, "path");
+    if (lua_path && strlen(lua_path) > 0) {
+        strlcpy(master_config->path, lua_path, sizeof(master_config->path));
+    }
+
+    const char *lua_cpath = SCConfNodeLookupChildValue(conf, "cpath");
+    if (lua_cpath && strlen(lua_cpath) > 0) {
+        strlcpy(master_config->cpath, lua_cpath, sizeof(master_config->cpath));
+    }
+
     TAILQ_INIT(&output_ctx->submodules);
 
     /* check the enables scripts and set them up as submodules */
-    ConfNode *script;
+    SCConfNode *script;
     TAILQ_FOREACH(script, &scripts->head, next) {
         SCLogInfo("enabling script %s", script->val);
         LogLuaScriptOptions opts;
@@ -763,9 +752,9 @@ static OutputInitResult OutputLuaLogInit(ConfNode *conf)
         snprintf(path, sizeof(path),"%s%s%s", dir, strlen(dir) ? "/" : "", script->val);
         SCLogDebug("script full path %s", path);
 
-        int r = LuaScriptInit(path, &opts);
+        int r = LuaScriptInit(path, &opts, master_config);
         if (r != 0) {
-            SCLogError(SC_ERR_LUA_ERROR, "couldn't initialize scipt");
+            SCLogError("couldn't initialize script");
             goto error;
         }
 
@@ -773,7 +762,7 @@ static OutputInitResult OutputLuaLogInit(ConfNode *conf)
          * on it's needs. */
         OutputModule *om = SCCalloc(1, sizeof(*om));
         if (om == NULL) {
-            SCLogError(SC_ERR_MEM_ALLOC, "calloc() failed");
+            SCLogError("calloc() failed");
             goto error;
         }
 
@@ -783,42 +772,42 @@ static OutputInitResult OutputLuaLogInit(ConfNode *conf)
         om->ThreadInit = LuaLogThreadInit;
         om->ThreadDeinit = LuaLogThreadDeinit;
 
-        if (opts.alproto == ALPROTO_HTTP && opts.streaming) {
+        if (opts.alproto == ALPROTO_HTTP1 && opts.streaming) {
             om->StreamingLogFunc = LuaStreamingLogger;
             om->stream_type = STREAMING_HTTP_BODIES;
-            om->alproto = ALPROTO_HTTP;
+            om->alproto = ALPROTO_HTTP1;
             AppLayerHtpEnableRequestBodyCallback();
             AppLayerHtpEnableResponseBodyCallback();
-        } else if (opts.alproto == ALPROTO_HTTP) {
+        } else if (opts.alproto == ALPROTO_HTTP1) {
             om->TxLogFunc = LuaTxLogger;
-            om->alproto = ALPROTO_HTTP;
+            om->alproto = ALPROTO_HTTP1;
             om->ts_log_progress = -1;
             om->tc_log_progress = -1;
-            AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP);
+            SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_HTTP1);
         } else if (opts.alproto == ALPROTO_TLS) {
             om->TxLogFunc = LuaTxLogger;
             om->alproto = ALPROTO_TLS;
-            om->tc_log_progress = TLS_HANDSHAKE_DONE;
-            om->ts_log_progress = TLS_HANDSHAKE_DONE;
-            AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_TLS);
-       } else if (opts.alproto == ALPROTO_DNS) {
+            om->tc_log_progress = TLS_STATE_SERVER_HANDSHAKE_DONE;
+            om->ts_log_progress = TLS_STATE_CLIENT_HANDSHAKE_DONE;
+            SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_TLS);
+        } else if (opts.alproto == ALPROTO_DNS) {
             om->TxLogFunc = LuaTxLogger;
             om->alproto = ALPROTO_DNS;
             om->ts_log_progress = -1;
             om->tc_log_progress = -1;
-            AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_DNS);
-            AppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_DNS);
+            SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_DNS);
+            SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_DNS);
         } else if (opts.alproto == ALPROTO_SSH) {
             om->TxLogFunc = LuaTxLogger;
             om->alproto = ALPROTO_SSH;
             om->TxLogCondition = SSHTxLogCondition;
-            AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SSH);
+            SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SSH);
         } else if (opts.alproto == ALPROTO_SMTP) {
             om->TxLogFunc = LuaTxLogger;
             om->alproto = ALPROTO_SMTP;
             om->ts_log_progress = -1;
             om->tc_log_progress = -1;
-            AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
+            SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
         } else if (opts.packet && opts.alerts) {
             om->PacketLogFunc = LuaPacketLoggerAlerts;
             om->PacketConditionFunc = LuaPacketConditionAlerts;
@@ -836,7 +825,7 @@ static OutputInitResult OutputLuaLogInit(ConfNode *conf)
         } else if (opts.stats) {
             om->StatsLogFunc = LuaStatsLogger;
         } else {
-            SCLogError(SC_ERR_LUA_ERROR, "failed to setup thread module");
+            SCLogError("failed to setup thread module");
             SCFree(om);
             goto error;
         }
@@ -853,13 +842,12 @@ error:
         output_ctx->DeInit(output_ctx);
 
     int failure_fatal = 0;
-    if (ConfGetBool("engine.init-failure-fatal", &failure_fatal) != 1) {
+    if (SCConfGetBool("engine.init-failure-fatal", &failure_fatal) != 1) {
         SCLogDebug("ConfGetBool could not load the value.");
     }
     if (failure_fatal) {
-                   FatalError(SC_ERR_FATAL,
-                              "Error during setup of lua output. Details should be "
-                              "described in previous error messages. Shutting down...");
+        FatalError("Error during setup of lua output. Details should be "
+                   "described in previous error messages. Shutting down...");
     }
 
     return result;
@@ -874,13 +862,13 @@ static void OutputLuaLogDoDeinit(LogLuaCtx *lua_ctx)
 
     lua_getglobal(luastate, "deinit");
     if (lua_type(luastate, -1) != LUA_TFUNCTION) {
-        SCLogError(SC_ERR_LUA_ERROR, "no deinit function in script");
+        SCLogError("no deinit function in script");
         return;
     }
     //LuaPrintStack(luastate);
 
     if (lua_pcall(luastate, 0, 0, 0) != 0) {
-        SCLogError(SC_ERR_LUA_ERROR, "couldn't run script 'deinit' function: %s", lua_tostring(luastate, -1));
+        SCLogError("couldn't run script 'deinit' function: %s", lua_tostring(luastate, -1));
         return;
     }
     LuaReturnState(luastate);
@@ -893,10 +881,9 @@ static void OutputLuaLogDoDeinit(LogLuaCtx *lua_ctx)
  */
 static TmEcode LuaLogThreadInit(ThreadVars *t, const void *initdata, void **data)
 {
-    LogLuaThreadCtx *td = SCMalloc(sizeof(*td));
+    LogLuaThreadCtx *td = SCCalloc(1, sizeof(*td));
     if (unlikely(td == NULL))
         return TM_ECODE_FAILED;
-    memset(td, 0, sizeof(*td));
 
     if (initdata == NULL) {
         SCLogDebug("Error getting context for LuaLog. \"initdata\" argument NULL");
@@ -941,11 +928,3 @@ void LuaLogRegister(void) {
     /* register as separate module */
     OutputRegisterModule(MODULE_NAME, "lua", OutputLuaLogInit);
 }
-
-#else
-
-void LuaLogRegister (void) {
-    /* no-op */
-}
-
-#endif

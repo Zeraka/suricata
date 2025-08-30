@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2020 Open Information Security Foundation
+/* Copyright (C) 2017-2022 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -30,7 +30,9 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-content.h"
+#include "detect-engine-uint.h"
 
 #include "detect-bsize.h"
 
@@ -39,9 +41,57 @@
 /*prototypes*/
 static int DetectBsizeSetup (DetectEngineCtx *, Signature *, const char *);
 static void DetectBsizeFree (DetectEngineCtx *, void *);
+static int SigParseGetMaxBsize(const DetectU64Data *bsz, uint64_t *bsize);
 #ifdef UNITTESTS
 static void DetectBsizeRegisterTests (void);
 #endif
+
+bool DetectBsizeValidateContentCallback(const Signature *s, const SignatureInitDataBuffer *b)
+{
+    uint64_t bsize;
+    int retval = -1;
+    const DetectU64Data *bsz;
+    for (const SigMatch *sm = b->head; sm != NULL; sm = sm->next) {
+        if (sm->type == DETECT_BSIZE) {
+            bsz = (const DetectU64Data *)sm->ctx;
+            retval = SigParseGetMaxBsize(bsz, &bsize);
+            break;
+        }
+    }
+
+    if (retval == -1) {
+        return true;
+    }
+
+    uint64_t needed;
+    if (retval == 0) {
+        int len, offset;
+        SigParseRequiredContentSize(s, bsize, b->head, &len, &offset);
+        SCLogDebug("bsize: %" PRIu64 "; len: %d; offset: %d [%s]", bsize, len, offset, s->sig_str);
+        needed = len;
+        if ((uint64_t)len > bsize) {
+            goto value_error;
+        }
+        if ((uint64_t)(len + offset) > bsize) {
+            needed += offset;
+            goto value_error;
+        }
+    }
+
+    return true;
+value_error:
+    if (bsz->mode == DETECT_UINT_RA) {
+        SCLogError("signature can't match as required content length %" PRIu64
+                   " exceeds bsize range: %" PRIu64 "-%" PRIu64,
+                needed, bsz->arg1, bsz->arg2);
+    } else {
+        SCLogError("signature can't match as required content length %" PRIu64
+                   " exceeds bsize value: "
+                   "%" PRIu64,
+                needed, bsz->arg1);
+    }
+    return false;
+}
 
 /**
  * \brief Registration function for bsize: keyword
@@ -55,21 +105,11 @@ void DetectBsizeRegister(void)
     sigmatch_table[DETECT_BSIZE].Match = NULL;
     sigmatch_table[DETECT_BSIZE].Setup = DetectBsizeSetup;
     sigmatch_table[DETECT_BSIZE].Free = DetectBsizeFree;
+    sigmatch_table[DETECT_BSIZE].flags = SIGMATCH_SUPPORT_FIREWALL;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_BSIZE].RegisterTests = DetectBsizeRegisterTests;
 #endif
 }
-
-#define DETECT_BSIZE_LT 0
-#define DETECT_BSIZE_GT 1
-#define DETECT_BSIZE_RA 2
-#define DETECT_BSIZE_EQ 3
-
-typedef struct DetectBsizeData {
-    uint8_t mode;
-    uint64_t lo;
-    uint64_t hi;
-} DetectBsizeData;
 
 /** \brief bsize match function
  *
@@ -78,31 +118,29 @@ typedef struct DetectBsizeData {
  *  \param eof is the buffer closed?
  *
  *  \retval r 1 match, 0 no match, -1 can't match
- *
- *  \todo check logic around < vs <=
  */
 int DetectBsizeMatch(const SigMatchCtx *ctx, const uint64_t buffer_size, bool eof)
 {
-    const DetectBsizeData *bsz = (const DetectBsizeData *)ctx;
+    const DetectU64Data *bsz = (const DetectU64Data *)ctx;
+    if (DetectU64Match(buffer_size, bsz)) {
+        return 1;
+    }
     switch (bsz->mode) {
-        case DETECT_BSIZE_LT:
-            if (buffer_size < bsz->lo) {
-                return 1;
-            }
+        case DETECT_UINT_LTE:
+            return -1;
+        case DETECT_UINT_LT:
             return -1;
 
-        case DETECT_BSIZE_GT:
-            if (buffer_size > bsz->lo) {
-                return 1;
-            } else if (eof) {
+        case DETECT_UINT_GTE:
+            // fallthrough
+        case DETECT_UINT_GT:
+            if (eof) {
                 return -1;
             }
             return 0;
 
-        case DETECT_BSIZE_EQ:
-            if (buffer_size == bsz->lo) {
-                return 1;
-            } else if (buffer_size > bsz->lo) {
+        case DETECT_UINT_EQ:
+            if (buffer_size > bsz->arg1) {
                 return -1;
             } else if (eof) {
                 return -1;
@@ -110,160 +148,33 @@ int DetectBsizeMatch(const SigMatchCtx *ctx, const uint64_t buffer_size, bool eo
                 return 0;
             }
 
-        case DETECT_BSIZE_RA:
-            if (buffer_size > bsz->lo && buffer_size < bsz->hi) {
-                return 1;
-            } else if (buffer_size <= bsz->lo && eof) {
+        case DETECT_UINT_RA:
+            if (buffer_size <= bsz->arg1 && eof) {
                 return -1;
-            } else if (buffer_size <= bsz->lo) {
+            } else if (buffer_size <= bsz->arg1) {
                 return 0;
-            } else if (buffer_size >= bsz->hi) {
+            } else if (buffer_size >= bsz->arg2) {
                 return -1;
             }
     }
     return 0;
 }
 
-#define ERR(...) do { \
-    char _buf[2048];              \
-    snprintf(_buf, sizeof(_buf), __VA_ARGS__);  \
-    SCLogError(SC_ERR_INVALID_RULE_ARGUMENT, "bsize: bad input, %s", _buf); \
-} while(0)
-
-/**
- * \brief This function is used to parse bsize options passed via bsize: keyword
- *
- * \param bsizestr Pointer to the user provided bsize options
- *
- * \retval bsized pointer to DetectBsizeData on success
- * \retval NULL on failure
- */
-
-static DetectBsizeData *DetectBsizeParse (const char *str)
+static int SigParseGetMaxBsize(const DetectU64Data *bsz, uint64_t *bsize)
 {
-    uint32_t lo = 0;
-    uint32_t hi = 0;
-
-    if (str == NULL)
-        return NULL;
-
-    size_t len = strlen(str);
-    if (len == 0)
-        return NULL;
-
-    /* allow for leading spaces */
-    while (isspace(*str))
-        (str++);
-    len = strlen(str);
-    if (len == 0)
-        return NULL;
-
-    int mode = DETECT_BSIZE_EQ;
-    switch (*str) {
-        case '>':
-            mode = DETECT_BSIZE_GT;
-            str++;
-            break;
-        case '<':
-            mode = DETECT_BSIZE_LT;
-            str++;
-            break;
+    switch (bsz->mode) {
+        case DETECT_UINT_LT:
+        case DETECT_UINT_EQ:
+            *bsize = bsz->arg1;
+            SCReturnInt(0);
+        case DETECT_UINT_RA:
+            *bsize = bsz->arg2;
+            SCReturnInt(0);
+        case DETECT_UINT_GT:
+        default:
+            SCReturnInt(-2);
     }
-
-    /* allow for spaces between mode and value */
-    while (isspace(*str))
-        (str++);
-
-    char str1[11], *p = str1;
-    memset(str1, 0, sizeof(str1));
-    while (*str && isdigit(*str)) {
-        if (p - str1 >= ((int)sizeof(str1) - 1))
-            return NULL;
-        *p++ = *str++;
-    }
-    /* skip trailing space */
-    while (*str && isspace(*str)) {
-        str++;
-    }
-    if (*str == '\0') {
-        // done
-        SCLogDebug("str1 '%s'", str1);
-
-        uint64_t val = 0;
-        if (ParseSizeStringU64(str1, &val) < 0) {
-            return NULL;
-        }
-        lo = val;
-
-    } else if (*str == '<') {
-        str++;
-        if (*str != '>') {
-            ERR("only '<>' allowed");
-            return NULL;
-        }
-        str++;
-
-        // range
-        if (mode != DETECT_BSIZE_EQ) {
-            ERR("mode already set");
-            return NULL;
-        }
-        mode = DETECT_BSIZE_RA;
-
-        uint64_t val = 0;
-        if (ParseSizeStringU64(str1, &val) < 0) {
-            return NULL;
-        }
-        lo = val;
-
-        /* allow for spaces between mode and value */
-        while (*str && isspace(*str))
-            (str++);
-
-        char str2[11];
-        p = str2;
-        memset(str2, 0, sizeof(str2));
-        while (*str && isdigit(*str)) {
-            if (p - str2 >= ((int)sizeof(str2) - 1))
-                return NULL;
-            *p++ = *str++;
-        }
-        /* skip trailing space */
-        while (*str && isspace(*str)) {
-            str++;
-        }
-        if (*str == '\0') {
-            // done
-            SCLogDebug("str2 '%s'", str2);
-
-            if (ParseSizeStringU64(str2, &val) < 0) {
-                ERR("'%s' is not a valid u32", str2);
-                return NULL;
-            }
-            hi = val;
-            if (lo >= hi) {
-                ERR("%u > %u", lo, hi);
-                return NULL;
-            }
-
-        } else {
-            ERR("trailing data");
-            return NULL;
-        }
-
-    } else {
-        ERR("'%s'", str);
-        return NULL;
-    }
-
-    DetectBsizeData *bsz = SCCalloc(1, sizeof(*bsz));
-    if (bsz == NULL) {
-        return NULL;
-    }
-    bsz->mode = (uint8_t)mode;
-    bsz->lo = lo;
-    bsz->hi = hi;
-    return bsz;
+    SCReturnInt(-1);
 }
 
 /**
@@ -271,7 +182,7 @@ static DetectBsizeData *DetectBsizeParse (const char *str)
  *
  * \param de_ctx pointer to the Detection Engine Context
  * \param s pointer to the Current Signature
- * \param bsizestr pointer to the user provided bsize options
+ * \param sizestr pointer to the user provided bsize options
  *
  * \retval 0 on Success
  * \retval -1 on Failure
@@ -279,7 +190,6 @@ static DetectBsizeData *DetectBsizeParse (const char *str)
 static int DetectBsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *sizestr)
 {
     SCEnter();
-    SigMatch *sm = NULL;
 
     if (DetectBufferGetActiveList(de_ctx, s) == -1)
         SCReturnInt(-1);
@@ -288,16 +198,13 @@ static int DetectBsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     if (list == DETECT_SM_LIST_NOTSET)
         SCReturnInt(-1);
 
-    DetectBsizeData *bsz = DetectBsizeParse(sizestr);
+    DetectU64Data *bsz = DetectU64Parse(sizestr);
     if (bsz == NULL)
-        goto error;
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-    sm->type = DETECT_BSIZE;
-    sm->ctx = (void *)bsz;
+        SCReturnInt(-1);
 
-    SigMatchAppendSMToList(s, sm, list);
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BSIZE, (SigMatchCtx *)bsz, list) == NULL) {
+        goto error;
+    }
 
     SCReturnInt(0);
 
@@ -307,17 +214,17 @@ error:
 }
 
 /**
- * \brief this function will free memory associated with DetectBsizeData
+ * \brief this function will free memory associated with DetectU64Data
  *
- * \param ptr pointer to DetectBsizeData
+ * \param ptr pointer to DetectU64Data
  */
 void DetectBsizeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
     if (ptr == NULL)
         return;
 
-    DetectBsizeData *bsz = (DetectBsizeData *)ptr;
-    SCFree(bsz);
+    DetectU64Data *bsz = (DetectU64Data *)ptr;
+    SCDetectU64Free(bsz);
 }
 
 #ifdef UNITTESTS

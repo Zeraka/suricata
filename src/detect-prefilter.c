@@ -29,6 +29,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-content.h"
+#include "detect-engine-mpm.h"
 #include "detect-prefilter.h"
 #include "util-debug.h"
 
@@ -57,26 +58,37 @@ static int DetectPrefilterSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
     SCEnter();
 
     if (nullstr != NULL) {
-        SCLogError(SC_ERR_INVALID_VALUE, "prefilter has value");
+        SCLogError("prefilter has value");
         SCReturnInt(-1);
     }
 
     if (s->flags & SIG_FLAG_PREFILTER) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "prefilter already set");
+        SCLogError("prefilter already set");
         SCReturnInt(-1);
     }
 
     SigMatch *sm = DetectGetLastSM(s);
     if (sm == NULL) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "prefilter needs preceding match");
+        SCLogError("prefilter needs preceding match");
         SCReturnInt(-1);
     }
-
-    s->init_data->prefilter_sm = sm;
 
     /* if the sig match is content, prefilter should act like
      * 'fast_pattern' w/o options. */
     if (sm->type == DETECT_CONTENT) {
+        if (s->flags & SIG_FLAG_TXBOTHDIR && s->init_data->curbuf != NULL) {
+            if (s->init_data->init_flags & SIG_FLAG_INIT_TXDIR_STREAMING_TOSERVER) {
+                if (DetectBufferToClient(de_ctx, s->init_data->curbuf->id, s->alproto)) {
+                    SCLogError("prefilter cannot be used on to_client keyword for "
+                               "transactional rule %u",
+                            s->id);
+                    SCReturnInt(-1);
+                } else {
+                    s->init_data->init_flags |= SIG_FLAG_INIT_TXDIR_FAST_TOCLIENT;
+                }
+            }
+        }
+
         DetectContentData *cd = (DetectContentData *)sm->ctx;
         if ((cd->flags & DETECT_CONTENT_NEGATED) &&
                 ((cd->flags & DETECT_CONTENT_DISTANCE) ||
@@ -84,17 +96,24 @@ static int DetectPrefilterSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
                  (cd->flags & DETECT_CONTENT_OFFSET) ||
                  (cd->flags & DETECT_CONTENT_DEPTH)))
         {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "prefilter; cannot be "
-                    "used with negated content, along with relative modifiers");
+            SCLogError("prefilter; cannot be "
+                       "used with negated content, along with relative modifiers");
             SCReturnInt(-1);
         }
         cd->flags |= DETECT_CONTENT_FAST_PATTERN;
     } else {
-        s->flags |= SIG_FLAG_PREFILTER;
+        if (sigmatch_table[sm->type].SupportsPrefilter == NULL) {
+            SCLogError("prefilter is not supported for %s", sigmatch_table[sm->type].name);
+            SCReturnInt(-1);
+        }
 
         /* make sure setup function runs for this type. */
         de_ctx->sm_types_prefilter[sm->type] = true;
     }
+
+    s->init_data->prefilter_sm = sm;
+    SCLogDebug(
+            "sid %u: prefilter is on \"%s\" (%u)", s->id, sigmatch_table[sm->type].name, sm->type);
 
     SCReturnInt(0);
 }

@@ -15,8 +15,8 @@
  * 02110-1301, USA.
  */
 
-#ifndef __FLOW_WORKER_H__
-#define __FLOW_WORKER_H__
+#ifndef SURICATA_FLOW_WORKER_H
+#define SURICATA_FLOW_WORKER_H
 
 enum ProfileFlowWorkerId {
     PROFILE_FLOWWORKER_FLOW = 0,
@@ -32,7 +32,10 @@ const char *ProfileFlowWorkerIdToString(enum ProfileFlowWorkerId fwi);
 
 void FlowWorkerReplaceDetectCtx(void *flow_worker, void *detect_ctx);
 void *FlowWorkerGetDetectCtxPtr(void *flow_worker);
+void *FlowWorkerGetThreadData(void *flow_worker);
+bool FlowWorkerGetFlushAck(void *flow_worker);
+void FlowWorkerSetFlushAck(void *flow_worker);
 
 void TmModuleFlowWorkerRegister (void);
 
-#endif /* __FLOW_WORKER_H__ */
+#endif /* SURICATA_FLOW_WORKER_H */

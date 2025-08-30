@@ -15,22 +15,27 @@
  * 02110-1301, USA.
  */
 
-use std;
-use crate::jsonbuilder::{JsonBuilder, JsonError};
 use super::template::TemplateTransaction;
+use crate::jsonbuilder::{JsonBuilder, JsonError};
+use std;
 
 fn log_template(tx: &TemplateTransaction, js: &mut JsonBuilder) -> Result<(), JsonError> {
+    js.open_object("template")?;
     if let Some(ref request) = tx.request {
         js.set_string("request", request)?;
     }
     if let Some(ref response) = tx.response {
         js.set_string("response", response)?;
     }
+    js.close()?;
     Ok(())
 }
 
 #[no_mangle]
-pub extern "C" fn rs_template_logger_log(tx: *mut std::os::raw::c_void, js: &mut JsonBuilder) -> bool {
+pub unsafe extern "C" fn SCTemplateLoggerLog(
+    tx: *const std::os::raw::c_void, js: *mut std::os::raw::c_void,
+) -> bool {
     let tx = cast_pointer!(tx, TemplateTransaction);
+    let js = cast_pointer!(js, JsonBuilder);
     log_template(tx, js).is_ok()
 }

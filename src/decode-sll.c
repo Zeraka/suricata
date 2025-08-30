@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -34,21 +34,26 @@
 #include "decode.h"
 #include "decode-sll.h"
 #include "decode-events.h"
+
+#include "util-validate.h"
 #include "util-debug.h"
 
 int DecodeSll(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint32_t len)
 {
+    DEBUG_VALIDATE_BUG_ON(pkt == NULL);
+
     StatsIncr(tv, dtv->counter_sll);
 
     if (unlikely(len < SLL_HEADER_LEN)) {
         ENGINE_SET_INVALID_EVENT(p, SLL_PKT_TOO_SMALL);
         return TM_ECODE_FAILED;
     }
+    if (!PacketIncreaseCheckLayers(p)) {
+        return TM_ECODE_FAILED;
+    }
 
     SllHdr *sllh = (SllHdr *)pkt;
-    if (unlikely(sllh == NULL))
-        return TM_ECODE_FAILED;
 
     SCLogDebug("p %p pkt %p sll_protocol %04x", p, pkt, SCNtohs(sllh->sll_protocol));
 

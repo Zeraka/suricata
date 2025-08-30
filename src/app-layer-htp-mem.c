@@ -30,19 +30,17 @@
  */
 
 #include "suricata-common.h"
-#include "suricata.h"
+#include "app-layer-htp-mem.h"
 
 #include "conf.h"
-#include "util-mem.h"
 #include "util-misc.h"
-
-#include "app-layer-htp-mem.h"
+#include "util-debug.h"
 
 SC_ATOMIC_DECLARE(uint64_t, htp_config_memcap);
 SC_ATOMIC_DECLARE(uint64_t, htp_memuse);
 SC_ATOMIC_DECLARE(uint64_t, htp_memcap);
 
-void HTPParseMemcap()
+void HTPParseMemcap(void)
 {
     const char *conf_val;
 
@@ -50,12 +48,11 @@ void HTPParseMemcap()
 
     /** set config values for memcap, prealloc and hash_size */
     uint64_t memcap;
-    if ((ConfGet("app-layer.protocols.http.memcap", &conf_val)) == 1)
-    {
+    if ((SCConfGet("app-layer.protocols.http.memcap", &conf_val)) == 1) {
         if (ParseSizeStringU64(conf_val, &memcap) < 0) {
-            SCLogError(SC_ERR_SIZE_PARSE, "Error parsing http.memcap "
+            SCLogError("Error parsing http.memcap "
                        "from conf file - %s.  Killing engine",
-                       conf_val);
+                    conf_val);
             exit(EXIT_FAILURE);
         } else {
             SC_ATOMIC_SET(htp_config_memcap, memcap);
@@ -72,14 +69,12 @@ void HTPParseMemcap()
 
 static void HTPIncrMemuse(uint64_t size)
 {
-    (void) SC_ATOMIC_ADD(htp_memuse, size);
-    return;
+    (void)SC_ATOMIC_ADD(htp_memuse, size);
 }
 
 static void HTPDecrMemuse(uint64_t size)
 {
-    (void) SC_ATOMIC_SUB(htp_memuse, size);
-    return;
+    (void)SC_ATOMIC_SUB(htp_memuse, size);
 }
 
 uint64_t HTPMemuseGlobalCounter(void)
@@ -138,13 +133,17 @@ void *HTPMalloc(size_t size)
 {
     void *ptr = NULL;
 
-    if (HTPCheckMemcap((uint32_t)size) == 0)
+    if (HTPCheckMemcap((uint32_t)size) == 0) {
+        sc_errno = SC_ELIMIT;
         return NULL;
+    }
 
     ptr = SCMalloc(size);
 
-    if (unlikely(ptr == NULL))
+    if (unlikely(ptr == NULL)) {
+        sc_errno = SC_ENOMEM;
         return NULL;
+    }
 
     HTPIncrMemuse((uint64_t)size);
 
@@ -155,13 +154,17 @@ void *HTPCalloc(size_t n, size_t size)
 {
     void *ptr = NULL;
 
-    if (HTPCheckMemcap((uint32_t)(n * size)) == 0)
+    if (HTPCheckMemcap((uint32_t)(n * size)) == 0) {
+        sc_errno = SC_ELIMIT;
         return NULL;
+    }
 
     ptr = SCCalloc(n, size);
 
-    if (unlikely(ptr == NULL))
+    if (unlikely(ptr == NULL)) {
+        sc_errno = SC_ENOMEM;
         return NULL;
+    }
 
     HTPIncrMemuse((uint64_t)(n * size));
 
@@ -171,13 +174,17 @@ void *HTPCalloc(size_t n, size_t size)
 void *HTPRealloc(void *ptr, size_t orig_size, size_t size)
 {
     if (size > orig_size) {
-        if (HTPCheckMemcap((uint32_t)(size - orig_size)) == 0)
+        if (HTPCheckMemcap((uint32_t)(size - orig_size)) == 0) {
+            sc_errno = SC_ELIMIT;
             return NULL;
+        }
     }
 
     void *rptr = SCRealloc(ptr, size);
-    if (rptr == NULL)
+    if (rptr == NULL) {
+        sc_errno = SC_ENOMEM;
         return NULL;
+    }
 
     if (size > orig_size) {
         HTPIncrMemuse((uint64_t)(size - orig_size));

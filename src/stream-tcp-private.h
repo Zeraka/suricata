@@ -21,12 +21,9 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __STREAM_TCP_PRIVATE_H__
-#define __STREAM_TCP_PRIVATE_H__
+#ifndef SURICATA_STREAM_TCP_PRIVATE_H
+#define SURICATA_STREAM_TCP_PRIVATE_H
 
-#include "tree.h"
-#include "decode.h"
-#include "util-pool.h"
 #include "util-pool-thread.h"
 #include "util-streaming-buffer.h"
 
@@ -34,7 +31,7 @@
 #define STREAMTCP_QUEUE_FLAG_WS     0x02
 #define STREAMTCP_QUEUE_FLAG_SACK   0x04
 
-/** currently only SYN/ACK */
+/** Tracking SYNs and SYN/ACKs */
 typedef struct TcpStateQueue_ {
     uint8_t flags;
     uint8_t wscale;
@@ -58,12 +55,27 @@ int TcpSackCompare(struct StreamTcpSackRecord *a, struct StreamTcpSackRecord *b)
 RB_HEAD(TCPSACK, StreamTcpSackRecord);
 RB_PROTOTYPE(TCPSACK, StreamTcpSackRecord, rb, TcpSackCompare);
 
+#define TCPSEG_PKT_HDR_DEFAULT_SIZE 64
+
+/*
+ * Struct to add the additional information required to use TcpSegments to dump
+ * a packet capture to file with the stream-pcap-log output option. This is only
+ * used if the session-dump option is enabled.
+ */
+typedef struct TcpSegmentPcapHdrStorage_ {
+    SCTime_t ts;
+    uint32_t pktlen;
+    uint32_t alloclen;
+    uint8_t *pkt_hdr;
+} TcpSegmentPcapHdrStorage;
+
 typedef struct TcpSegment {
-    PoolThreadReserved res;
+    PoolThreadId pool_id;
     uint16_t payload_len;       /**< actual size of the payload */
     uint32_t seq;
     RB_ENTRY(TcpSegment) __attribute__((__packed__)) rb;
     StreamingBufferSegment sbseg;
+    TcpSegmentPcapHdrStorage *pcap_hdr_storage;
 } __attribute__((__packed__)) TcpSegment;
 
 /** \brief compare function for the Segment tree
@@ -88,8 +100,8 @@ RB_PROTOTYPE(TCPSEG, TcpSegment, rb, TcpSegmentCompare);
  * Only use if STREAM_HAS_SEEN_DATA is true. */
 #define STREAM_SEQ_RIGHT_EDGE(stream)   (stream)->segs_right_edge
 #define STREAM_RIGHT_EDGE(stream)       (STREAM_BASE_OFFSET((stream)) + (STREAM_SEQ_RIGHT_EDGE((stream)) - (stream)->base_seq))
-/* return true if we have seen data segments. */
-#define STREAM_HAS_SEEN_DATA(stream)    (!RB_EMPTY(&(stream)->sb.sbb_tree) || (stream)->sb.stream_offset || (stream)->sb.buf_offset)
+/* return true if we have seen data. */
+#define STREAM_HAS_SEEN_DATA(stream) StreamingBufferHasData(&(stream)->sb)
 
 typedef struct TcpStream_ {
     uint16_t flags:12;              /**< Flag specific to the stream e.g. Timestamp */
@@ -109,7 +121,8 @@ typedef struct TcpStream_ {
                                          This will be used to validate the last_ts, when connection has been idle for
                                          longer time.(RFC 1323)*/
     /* reassembly */
-    uint32_t base_seq;              /**< seq where we are left with reassebly. Matches STREAM_BASE_OFFSET below. */
+    uint32_t base_seq; /**< seq where we are left with reassembly. Matches STREAM_BASE_OFFSET below.
+                        */
 
     uint32_t app_progress_rel;      /**< app-layer progress relative to STREAM_BASE_OFFSET */
     uint32_t raw_progress_rel;      /**< raw reassembly progress relative to STREAM_BASE_OFFSET */
@@ -128,26 +141,25 @@ typedef struct TcpStream_ {
     struct TCPSACK sack_tree;       /**< red back tree of TCP SACK records. */
 } TcpStream;
 
-#define STREAM_BASE_OFFSET(stream)  ((stream)->sb.stream_offset)
+#define STREAM_BASE_OFFSET(stream)  ((stream)->sb.region.stream_offset)
 #define STREAM_APP_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->app_progress_rel)
 #define STREAM_RAW_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->raw_progress_rel)
 #define STREAM_LOG_PROGRESS(stream) (STREAM_BASE_OFFSET((stream)) + (stream)->log_progress_rel)
 
 /* from /usr/include/netinet/tcp.h */
-enum TcpState
-{
-    TCP_NONE,
-    TCP_LISTEN,
-    TCP_SYN_SENT,
-    TCP_SYN_RECV,
-    TCP_ESTABLISHED,
-    TCP_FIN_WAIT1,
-    TCP_FIN_WAIT2,
-    TCP_TIME_WAIT,
-    TCP_LAST_ACK,
-    TCP_CLOSE_WAIT,
-    TCP_CLOSING,
-    TCP_CLOSED,
+enum TcpState {
+    TCP_NONE = 0,
+    // TCP_LISTEN = 1,
+    TCP_SYN_SENT = 2,
+    TCP_SYN_RECV = 3,
+    TCP_ESTABLISHED = 4,
+    TCP_FIN_WAIT1 = 5,
+    TCP_FIN_WAIT2 = 6,
+    TCP_TIME_WAIT = 7,
+    TCP_LAST_ACK = 8,
+    TCP_CLOSE_WAIT = 9,
+    TCP_CLOSING = 10,
+    TCP_CLOSED = 11,
 };
 
 /*
@@ -155,48 +167,54 @@ enum TcpState
  */
 
 /** Flag for mid stream session */
-#define STREAMTCP_FLAG_MIDSTREAM                    0x0001
+#define STREAMTCP_FLAG_MIDSTREAM BIT_U32(0)
 /** Flag for mid stream established session */
-#define STREAMTCP_FLAG_MIDSTREAM_ESTABLISHED        0x0002
+#define STREAMTCP_FLAG_MIDSTREAM_ESTABLISHED BIT_U32(1)
 /** Flag for mid session when syn/ack is received */
-#define STREAMTCP_FLAG_MIDSTREAM_SYNACK             0x0004
+#define STREAMTCP_FLAG_MIDSTREAM_SYNACK BIT_U32(2)
 /** Flag for TCP Timestamp option */
-#define STREAMTCP_FLAG_TIMESTAMP                    0x0008
+#define STREAMTCP_FLAG_TIMESTAMP BIT_U32(3)
 /** Server supports wscale (even though it can be 0) */
-#define STREAMTCP_FLAG_SERVER_WSCALE                0x0010
+#define STREAMTCP_FLAG_SERVER_WSCALE BIT_U32(4)
 /** Closed by RST */
-#define STREAMTCP_FLAG_CLOSED_BY_RST                0x0020
+#define STREAMTCP_FLAG_CLOSED_BY_RST BIT_U32(5)
 /** Flag to indicate that the session is handling asynchronous stream.*/
-#define STREAMTCP_FLAG_ASYNC                        0x0040
+#define STREAMTCP_FLAG_ASYNC BIT_U32(6)
 /** Flag to indicate we're dealing with 4WHS: SYN, SYN, SYN/ACK, ACK
  * (http://www.breakingpointsystems.com/community/blog/tcp-portals-the-three-way-handshake-is-a-lie) */
-#define STREAMTCP_FLAG_4WHS                         0x0080
+#define STREAMTCP_FLAG_4WHS BIT_U32(7)
 /** Flag to indicate that this session is possible trying to evade the detection
  *  (http://www.packetstan.com/2010/06/recently-ive-been-on-campaign-to-make.html) */
-#define STREAMTCP_FLAG_DETECTION_EVASION_ATTEMPT    0x0100
+#define STREAMTCP_FLAG_DETECTION_EVASION_ATTEMPT BIT_U32(8)
 /** Flag to indicate the client (SYN pkt) permits SACK */
-#define STREAMTCP_FLAG_CLIENT_SACKOK                0x0200
+#define STREAMTCP_FLAG_CLIENT_SACKOK BIT_U32(9)
 /** Flag to indicate both sides of the session permit SACK (SYN + SYN/ACK) */
-#define STREAMTCP_FLAG_SACKOK                       0x0400
-// vacancy
+#define STREAMTCP_FLAG_SACKOK BIT_U32(10)
+/** Session is in "lossy" state, be liberal */
+#define STREAMTCP_FLAG_LOSSY_BE_LIBERAL BIT_U32(11)
 /** 3WHS confirmed by server -- if suri sees 3whs ACK but server doesn't (pkt
  *  is lost on the way to server), SYN/ACK is retransmitted. If server sends
  *  normal packet we assume 3whs to be completed. Only used for SYN/ACK resend
  *  event. */
-#define STREAMTCP_FLAG_3WHS_CONFIRMED               0x1000
+#define STREAMTCP_FLAG_3WHS_CONFIRMED BIT_U32(12)
 /** App Layer tracking/reassembly is disabled */
-#define STREAMTCP_FLAG_APP_LAYER_DISABLED           0x2000
+#define STREAMTCP_FLAG_APP_LAYER_DISABLED BIT_U32(13)
 /** Stream can be bypass */
-#define STREAMTCP_FLAG_BYPASS                       0x4000
+#define STREAMTCP_FLAG_BYPASS BIT_U32(14)
 /** SSN uses TCP Fast Open */
-#define STREAMTCP_FLAG_TCP_FAST_OPEN                0x8000
+#define STREAMTCP_FLAG_TCP_FAST_OPEN BIT_U32(15)
+/** SYN/ACK ignored the data while ACKing the SYN */
+#define STREAMTCP_FLAG_TFO_DATA_IGNORED BIT_U32(16)
+/* zero window probe */
+#define STREAMTCP_FLAG_ZWP_TS BIT_U32(17)
+#define STREAMTCP_FLAG_ZWP_TC BIT_U32(18)
 
 /*
  * Per STREAM flags
  */
 
-/** stream is in a gap state */
-#define STREAMTCP_STREAM_FLAG_GAP                           BIT_U16(0)
+/** Flag to indicate that we have seen gap on the stream */
+#define STREAMTCP_STREAM_FLAG_HAS_GAP BIT_U16(0)
 /** Flag to avoid stream reassembly/app layer inspection for the stream */
 #define STREAMTCP_STREAM_FLAG_NOREASSEMBLY                  BIT_U16(1)
 /** we received a keep alive */
@@ -240,6 +258,8 @@ enum TcpState
 #define SEQ_LEQ(a,b) ((int32_t)((a) - (b)) <= 0)
 #define SEQ_GT(a,b)  ((int32_t)((a) - (b)) >  0)
 #define SEQ_GEQ(a,b) ((int32_t)((a) - (b)) >= 0)
+#define SEQ_MIN(a, b) (SEQ_LT((a), (b)) ? (a) : (b))
+#define SEQ_MAX(a, b) (SEQ_GT((a), (b)) ? (a) : (b))
 
 #define STREAMTCP_SET_RA_BASE_SEQ(stream, seq) { \
     do { \
@@ -247,28 +267,32 @@ enum TcpState
     } while(0); \
 }
 
-#define StreamTcpSetEvent(p, e) {                                           \
-    if ((p)->flags & PKT_STREAM_NO_EVENTS) {                                \
-        SCLogDebug("not setting event %d on pkt %p (%"PRIu64"), "     \
-                   "stream in known bad condition", (e), p, (p)->pcap_cnt); \
-    } else {                                                                \
-        SCLogDebug("setting event %d on pkt %p (%"PRIu64")",          \
-                    (e), p, (p)->pcap_cnt);                                 \
-        ENGINE_SET_EVENT((p), (e));                                         \
-    }                                                                       \
-}
+#define StreamTcpSetEvent(p, e)                                                                    \
+    {                                                                                              \
+        if ((p)->flags & PKT_STREAM_NO_EVENTS) {                                                   \
+            SCLogDebug("not setting event %d on pkt %p (%" PRIu64 "), "                            \
+                       "stream in known bad condition",                                            \
+                    (e), p, (p)->pcap_cnt);                                                        \
+        } else {                                                                                   \
+            SCLogDebug("setting event %d on pkt %p (%" PRIu64 ")", (e), p, (p)->pcap_cnt);         \
+            ENGINE_SET_EVENT((p), (e));                                                            \
+            p->l4.vars.tcp.stream_pkt_flags |= STREAM_PKT_FLAG_EVENTSET;                           \
+        }                                                                                          \
+    }
 
 typedef struct TcpSession_ {
-    PoolThreadReserved res;
+    PoolThreadId pool_id;
     uint8_t state:4;                        /**< tcp state from state enum */
     uint8_t pstate:4;                       /**< previous state */
     uint8_t queue_len;                      /**< length of queue list below */
     int8_t data_first_seen_dir;
     /** track all the tcp flags we've seen */
     uint8_t tcp_packet_flags;
+    uint16_t urg_offset_ts;            /**< SEQ offset from accepted OOB urg bytes */
+    uint16_t urg_offset_tc;            /**< SEQ offset from accepted OOB urg bytes */
     /* coccinelle: TcpSession:flags:STREAMTCP_FLAG */
-    uint16_t flags;
-    uint32_t reassembly_depth;      /**< reassembly depth for the stream */
+    uint32_t flags;
+    uint32_t reassembly_depth; /**< reassembly depth for the stream */
     TcpStream server;
     TcpStream client;
     TcpStateQueue *queue;                   /**< list of SYN/ACK candidates */
@@ -285,4 +309,20 @@ typedef struct TcpSession_ {
         ((ssn)->flags |= STREAMTCP_FLAG_APP_LAYER_DISABLED); \
     } while (0);
 
-#endif /* __STREAM_TCP_PRIVATE_H__ */
+#define STREAM_PKT_FLAG_RETRANSMISSION          BIT_U16(0)
+#define STREAM_PKT_FLAG_SPURIOUS_RETRANSMISSION BIT_U16(1)
+#define STREAM_PKT_FLAG_STATE_UPDATE            BIT_U16(2)
+#define STREAM_PKT_FLAG_KEEPALIVE               BIT_U16(3)
+#define STREAM_PKT_FLAG_KEEPALIVEACK            BIT_U16(4)
+#define STREAM_PKT_FLAG_WINDOWUPDATE            BIT_U16(5)
+#define STREAM_PKT_FLAG_EVENTSET                BIT_U16(6)
+#define STREAM_PKT_FLAG_DUP_ACK                 BIT_U16(7)
+#define STREAM_PKT_FLAG_DSACK                   BIT_U16(8)
+#define STREAM_PKT_FLAG_ACK_UNSEEN_DATA         BIT_U16(9)
+#define STREAM_PKT_FLAG_TCP_SESSION_REUSE       BIT_U16(10)
+#define STREAM_PKT_FLAG_TCP_ZERO_WIN_PROBE      BIT_U16(11)
+#define STREAM_PKT_FLAG_TCP_ZERO_WIN_PROBE_ACK  BIT_U16(12)
+
+#define STREAM_PKT_FLAG_SET(p, f) (p)->l4.vars.tcp.stream_pkt_flags |= (f)
+
+#endif /* SURICATA_STREAM_TCP_PRIVATE_H */

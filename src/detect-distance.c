@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -70,58 +70,57 @@ static int DetectDistanceSetup (DetectEngineCtx *de_ctx, Signature *s,
         const char *distancestr)
 {
     const char *str = distancestr;
-    SigMatch *pm = NULL;
-    int ret = -1;
 
     /* retrieve the sm to apply the distance against */
-    pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
+    SigMatch *pm = DetectGetLastSMFromLists(s, DETECT_CONTENT, -1);
     if (pm == NULL) {
-        SCLogError(SC_ERR_OFFSET_MISSING_CONTENT, "distance needs "
+        SCLogError("distance needs "
                    "preceding content, uricontent option, http_client_body, "
                    "http_server_body, http_header option, http_raw_header option, "
                    "http_method option, http_cookie, http_raw_uri, "
                    "http_stat_msg, http_stat_code, http_user_agent or "
                    "file_data/dce_stub_data sticky buffer option");
-        goto end;
+        return -1;
     }
 
     /* verify other conditions */
     DetectContentData *cd = (DetectContentData *)pm->ctx;
     if (cd->flags & DETECT_CONTENT_DISTANCE) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use multiple distances for the same content.");
-        goto end;
+        SCLogError("can't use multiple distances for the same content.");
+        return -1;
     }
     if ((cd->flags & DETECT_CONTENT_DEPTH) || (cd->flags & DETECT_CONTENT_OFFSET)) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't use a relative "
+        SCLogError("can't use a relative "
                    "keyword like within/distance with a absolute "
                    "relative keyword like depth/offset for the same "
-                   "content." );
-        goto end;
+                   "content.");
+        return -1;
     }
     if (cd->flags & DETECT_CONTENT_NEGATED && cd->flags & DETECT_CONTENT_FAST_PATTERN) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
+        SCLogError("can't have a relative "
                    "negated keyword set along with a fast_pattern");
-        goto end;
+        return -1;
     }
     if (cd->flags & DETECT_CONTENT_FAST_PATTERN_ONLY) {
-        SCLogError(SC_ERR_INVALID_SIGNATURE, "can't have a relative "
+        SCLogError("can't have a relative "
                    "keyword set along with a fast_pattern:only;");
-        goto end;
+        return -1;
     }
     if (str[0] != '-' && isalpha((unsigned char)str[0])) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(str, s, &index)) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "unknown byte_ keyword var "
-                       "seen in distance - %s\n", str);
-            goto end;
+        if (!DetectByteRetrieveSMVar(str, s, -1, &index)) {
+            SCLogError("unknown byte_ keyword var "
+                       "seen in distance - %s",
+                    str);
+            return -1;
         }
         cd->distance = index;
         cd->flags |= DETECT_CONTENT_DISTANCE_VAR;
     } else {
-        if (StringParseInt32(&cd->distance, 0, 0, str) < 0) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE,
-                      "invalid value for distance: %s", str);
-            goto end;
+        if ((StringParseI32RangeCheck(&cd->distance, 0, 0, str, -DETECT_CONTENT_VALUE_MAX,
+                     DETECT_CONTENT_VALUE_MAX) < 0)) {
+            SCLogError("invalid value for distance: %s", str);
+            return -1;
         }
     }
     cd->flags |= DETECT_CONTENT_DISTANCE;
@@ -129,17 +128,17 @@ static int DetectDistanceSetup (DetectEngineCtx *de_ctx, Signature *s,
     SigMatch *prev_pm = DetectGetLastSMByListPtr(s, pm->prev,
             DETECT_CONTENT, DETECT_PCRE, -1);
     if (prev_pm == NULL) {
-        ret = 0;
-        goto end;
+        return 0;
     }
+
     if (prev_pm->type == DETECT_CONTENT) {
         DetectContentData *prev_cd = (DetectContentData *)prev_pm->ctx;
         if (prev_cd->flags & DETECT_CONTENT_FAST_PATTERN_ONLY) {
-            SCLogError(SC_ERR_INVALID_SIGNATURE, "previous keyword "
+            SCLogError("previous keyword "
                        "has a fast_pattern:only; set. Can't "
                        "have relative keywords around a fast_pattern "
                        "only content");
-            goto end;
+            return -1;
         }
         if ((cd->flags & DETECT_CONTENT_NEGATED) == 0) {
             prev_cd->flags |= DETECT_CONTENT_DISTANCE_NEXT;
@@ -151,64 +150,39 @@ static int DetectDistanceSetup (DetectEngineCtx *de_ctx, Signature *s,
         pd->flags |= DETECT_PCRE_RELATIVE_NEXT;
     }
 
-    ret = 0;
- end:
-    return ret;
+    return 0;
 }
 
 #ifdef UNITTESTS
 
 static int DetectDistanceTest01(void)
 {
-    int result = 0;
-
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        printf("no de_ctx: ");
-        goto end;
-    }
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
-    de_ctx->sig_list = SigInit(de_ctx, "alert tcp any any -> any any (content:\"|AA BB|\"; content:\"|CC DD EE FF 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE|\"; distance: 4; within: 19; sid:1; rev:1;)");
-    if (de_ctx->sig_list == NULL) {
-        printf("sig parse failed: ");
-        goto end;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx,
+            "alert tcp any any -> any any (content:\"|AA BB|\"; content:\"|CC DD EE FF 00 11 22 33 "
+            "44 55 66 77 88 99 AA BB CC DD EE|\"; distance: 4; within: 19; sid:1; rev:1;)");
+    FAIL_IF_NULL(s);
 
-    SigMatch *sm = de_ctx->sig_list->sm_lists[DETECT_SM_LIST_PMATCH];
-    if (sm == NULL) {
-        printf("sm NULL: ");
-        goto end;
-    }
+    SigMatch *sm = de_ctx->sig_list->init_data->smlists[DETECT_SM_LIST_PMATCH];
+    FAIL_IF_NULL(sm);
 
     sm = sm->next;
-    if (sm == NULL) {
-        printf("sm2 NULL: ");
-        goto end;
-    }
+    FAIL_IF_NULL(sm);
 
     DetectContentData *co = (DetectContentData *)sm->ctx;
-    if (co == NULL) {
-        printf("co == NULL: ");
-        goto end;
-    }
+    FAIL_IF_NULL(co);
 
-    if (co->distance != 4) {
-        printf("distance %"PRIi32", expected 4: ", co->distance);
-        goto end;
-    }
+    FAIL_IF_NOT(co->distance = 4);
 
     /* within needs to be 23: distance + content_len as Snort auto fixes this */
-    if (co->within != 19) {
-        printf("within %"PRIi32", expected 23: ", co->within);
-        goto end;
-    }
+    FAIL_IF_NOT(co->within = 19);
 
-    result = 1;
-end:
     DetectEngineCtxFree(de_ctx);
-    return result;
+
+    PASS;
 }
 
 /**
@@ -218,25 +192,21 @@ end:
  */
 static int DetectDistanceTestPacket01 (void)
 {
-    int result = 0;
     uint8_t buf[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
     uint16_t buflen = sizeof(buf);
-    Packet *p;
-    p = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_TCP);
+    Packet *p = UTHBuildPacket((uint8_t *)buf, buflen, IPPROTO_TCP);
 
-    if (p == NULL)
-        goto end;
-
+    FAIL_IF_NULL(p);
     char sig[] = "alert tcp any any -> any any (msg:\"suricata test\"; "
                     "byte_jump:1,2; content:\"|00|\"; "
                     "within:1; distance:2; sid:98711212; rev:1;)";
 
     p->flowflags = FLOW_PKT_ESTABLISHED | FLOW_PKT_TOCLIENT;
-    result = UTHPacketMatchSig(p, sig);
+    FAIL_IF_NOT(UTHPacketMatchSig(p, sig));
 
     UTHFreePacket(p);
-end:
-    return result;
+
+    PASS;
 }
 
 static void DetectDistanceRegisterTests(void)

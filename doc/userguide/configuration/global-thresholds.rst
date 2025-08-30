@@ -6,6 +6,9 @@ Thresholds can be configured in the rules themselves, see
 their intelligence for creating a rule combined with a judgement on how often
 a rule will alert.
 
+Thresholds are tracked in a hash table that is sized according to configuration, see:
+:ref:`suricata-yaml-thresholds`.
+
 Threshold Config
 ----------------
 
@@ -20,7 +23,7 @@ Syntax:
 ::
 
   threshold gen_id <gid>, sig_id <sid>, type <threshold|limit|both>, \
-    track <by_src|by_dst|by_rule|by_both>, count <N>, seconds <T>
+    track <by_src|by_dst|by_rule|by_both|by_flow>, count <N>, seconds <T>
 
 rate_filter
 ~~~~~~~~~~~
@@ -55,6 +58,7 @@ done per IP-address. The Host table is used for storage. When using by_rule
 it's done globally for the rule.
 Option by_both used to track per IP pair of source and destination. Packets
 going to opposite directions between same addresses tracked as the same pair.
+The by_flow option tracks the rule matches in the flow.
 
 count
 ^^^^^
@@ -87,7 +91,7 @@ Time in seconds during which the ``rate_filter`` will remain active.
 Example
 ^^^^^^^
 
-Lets say we want to limit incoming connections to our SSH server. The rule
+Let's say we want to limit incoming connections to our SSH server. The rule
 ``888`` below simply alerts on SYN packets to the SSH port of our SSH server.
 If an IP-address triggers this more than 10 or more with a minute, the
 drop ``rate_filter`` is set with a timeout of 5 minutes.

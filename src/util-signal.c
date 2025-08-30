@@ -71,18 +71,4 @@ void UtilSignalHandlerSetup(int sig, void (*handler)(int))
     action.sa_flags = 0;
     sigaction(sig, &action, 0);
 #endif /* OS_WIN32 */
-
-    return;
 }
-
-#if 0
-int UtilSignalIsHandler(int sig, void (*handler)(int))
-{
-    struct sigaction action;
-    memset(&action, 0x00, sizeof(struct sigaction));
-
-    sigaction(sig, NULL, &action);
-
-    return (action.sa_handler == handler);
-}
-#endif

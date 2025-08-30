@@ -49,11 +49,6 @@ static void DetectFtpdataFree (DetectEngineCtx *, void *);
 #ifdef UNITTESTS
 static void DetectFtpdataRegisterTests (void);
 #endif
-static int DetectEngineInspectFtpdataGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *txv, uint64_t tx_id);
 static int g_ftpdata_buffer_id = 0;
 
 /**
@@ -78,27 +73,15 @@ void DetectFtpdataRegister(void) {
 #ifdef UNITTESTS
     sigmatch_table[DETECT_FTPDATA].RegisterTests = DetectFtpdataRegisterTests;
 #endif
-    DetectAppLayerInspectEngineRegister("ftpdata_command",
-            ALPROTO_FTPDATA, SIG_FLAG_TOSERVER, 0,
-            DetectEngineInspectFtpdataGeneric);
+    DetectAppLayerInspectEngineRegister("ftpdata_command", ALPROTO_FTPDATA, SIG_FLAG_TOSERVER, 0,
+            DetectEngineInspectGenericList, NULL);
 
-    DetectAppLayerInspectEngineRegister("ftpdata_command",
-            ALPROTO_FTPDATA, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectFtpdataGeneric);
+    DetectAppLayerInspectEngineRegister("ftpdata_command", ALPROTO_FTPDATA, SIG_FLAG_TOCLIENT, 0,
+            DetectEngineInspectGenericList, NULL);
     g_ftpdata_buffer_id = DetectBufferTypeGetByName("ftpdata_command");
 
     /* set up the PCRE for keyword parsing */
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
-}
-
-static int DetectEngineInspectFtpdataGeneric(ThreadVars *tv,
-        DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const Signature *s, const SigMatchData *smd,
-        Flow *f, uint8_t flags, void *alstate,
-        void *txv, uint64_t tx_id)
-{
-    return DetectEngineInspectGenericList(tv, de_ctx, det_ctx, s, smd,
-                                          f, flags, alstate, txv, tx_id);
 }
 
 /**
@@ -147,17 +130,19 @@ static DetectFtpdataData *DetectFtpdataParse(const char *ftpcommandstr)
 {
     DetectFtpdataData *ftpcommandd = NULL;
     char arg1[5] = "";
-    int ov[MAX_SUBSTRINGS];
+    size_t pcre2len;
+    pcre2_match_data *match = NULL;
 
-    int ret = DetectParsePcreExec(&parse_regex, ftpcommandstr, 0, 0, ov, MAX_SUBSTRINGS);
+    int ret = DetectParsePcreExec(&parse_regex, &match, ftpcommandstr, 0, 0);
     if (ret != 2) {
-        SCLogError(SC_ERR_PCRE_MATCH, "parse error, ret %" PRId32 "", ret);
+        SCLogError("parse error, ret %" PRId32 "", ret);
         goto error;
     }
 
-    int res = pcre_copy_substring((char *) ftpcommandstr, ov, MAX_SUBSTRINGS, 1, arg1, sizeof(arg1));
+    pcre2len = sizeof(arg1);
+    int res = pcre2_substring_copy_bynumber(match, 1, (PCRE2_UCHAR8 *)arg1, &pcre2len);
     if (res < 0) {
-        SCLogError(SC_ERR_PCRE_GET_SUBSTRING, "pcre_copy_substring failed");
+        SCLogError("pcre2_substring_copy_bynumber failed");
         goto error;
     }
     SCLogDebug("Arg1 \"%s\"", arg1);
@@ -170,13 +155,17 @@ static DetectFtpdataData *DetectFtpdataParse(const char *ftpcommandstr)
     } else if (!strcmp(arg1, "retr")) {
         ftpcommandd->command = FTP_COMMAND_RETR;
     } else {
-        SCLogError(SC_ERR_NOT_SUPPORTED, "Invalid command value");
+        SCLogError("Invalid command value");
         goto error;
     }
 
+    pcre2_match_data_free(match);
     return ftpcommandd;
 
 error:
+    if (match) {
+        pcre2_match_data_free(match);
+    }
     if (ftpcommandd)
         SCFree(ftpcommandd);
     return NULL;
@@ -195,22 +184,18 @@ error:
  */
 static int DetectFtpdataSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_FTPDATA) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_FTPDATA) != 0)
         return -1;
 
     DetectFtpdataData *ftpcommandd = DetectFtpdataParse(str);
     if (ftpcommandd == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FTPDATA, (SigMatchCtx *)ftpcommandd,
+                g_ftpdata_buffer_id) == NULL) {
         DetectFtpdataFree(de_ctx, ftpcommandd);
         return -1;
     }
-    sm->type = DETECT_FTPDATA;
-    sm->ctx = (void *)ftpcommandd;
-
-    SigMatchAppendSMToList(s, sm, g_ftpdata_buffer_id);
     return 0;
 }
 

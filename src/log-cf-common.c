@@ -28,17 +28,19 @@
 #include "log-cf-common.h"
 #include "util-print.h"
 #include "util-unittest.h"
+#include "util-time.h"
+#include "util-debug.h"
 
 /**
  *  \brief Creates a custom format node
  *  \retval LogCustomFormatNode * ptr if created
  *  \retval NULL if failed to allocate
  */
-LogCustomFormatNode * LogCustomFormatNodeAlloc()
+LogCustomFormatNode *LogCustomFormatNodeAlloc(void)
 {
     LogCustomFormatNode * node = SCCalloc(1, sizeof(LogCustomFormatNode));
     if (unlikely(node == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Failed to alloc custom format node");
+        SCLogError("Failed to alloc custom format node");
         return NULL;
     }
     return node;
@@ -49,11 +51,11 @@ LogCustomFormatNode * LogCustomFormatNodeAlloc()
  *  \retval LogCustomFormat * ptr if created
  *  \retval NULL if failed to allocate
  */
-LogCustomFormat * LogCustomFormatAlloc()
+LogCustomFormat *LogCustomFormatAlloc(void)
 {
     LogCustomFormat * cf = SCCalloc(1, sizeof(LogCustomFormat));
     if (unlikely(cf == NULL)) {
-        SCLogError(SC_ERR_MEM_ALLOC, "Failed to alloc custom format");
+        SCLogError("Failed to alloc custom format");
         return NULL;
     }
     return cf;
@@ -61,7 +63,7 @@ LogCustomFormat * LogCustomFormatAlloc()
 
 /**
  *  \brief Frees memory held by a custom format node
- *  \param LogCustomFormatNode * node - node to relaease
+ *  \param LogCustomFormatNode * node - node to release
  */
 void LogCustomFormatNodeFree(LogCustomFormatNode *node)
 {
@@ -73,7 +75,7 @@ void LogCustomFormatNodeFree(LogCustomFormatNode *node)
 
 /**
  *  \brief Frees memory held by a custom format
- *  \param LogCustomFormat * cf - format to relaease
+ *  \param LogCustomFormat * cf - format to release
  */
 void LogCustomFormatFree(LogCustomFormat *cf)
 {
@@ -121,7 +123,7 @@ int LogCustomFormatParse(LogCustomFormat *cf, const char *format)
                 n = LOG_NODE_STRLEN-2;
                 np = NULL; /* End */
             }else{
-                n = np-p;
+                n = (uint32_t)(np - p);
             }
             strlcpy(node->data,p,n+1);
             p = np;
@@ -149,7 +151,7 @@ int LogCustomFormatParse(LogCustomFormat *cf, const char *format)
                 np = strchr(p, '}');
                 if (np != NULL && np-p > 1 && np-p < LOG_NODE_STRLEN-2) {
                     p++;
-                    n = np-p;
+                    n = (uint32_t)(np - p);
                     strlcpy(node->data, p, n+1);
                     p = np;
                 } else {
@@ -186,7 +188,7 @@ void LogCustomFormatAddNode(LogCustomFormat *cf, LogCustomFormatNode *node)
         return;
 
     if (cf->cf_n == LOG_MAXN_NODES) {
-        SCLogWarning(SC_WARN_LOG_CF_TOO_MANY_NODES, "Too many options for custom format");
+        SCLogWarning("Too many options for custom format");
         return;
     }
 
@@ -203,12 +205,13 @@ void LogCustomFormatAddNode(LogCustomFormat *cf, LogCustomFormatNode *node)
  *  \brief Writes a timestamp with given format into a MemBuffer
  *  \param MemBuffer * buffer - where to write
  *  \param const char * fmt - format to be used write timestamp
- *  \param const struct timeveal *ts  - the timetstamp
+ *  \param const struct timeveal *ts  - the timestamp
  *
  */
-void LogCustomFormatWriteTimestamp(MemBuffer *buffer, const char *fmt, const struct timeval *ts) {
+void LogCustomFormatWriteTimestamp(MemBuffer *buffer, const char *fmt, const SCTime_t ts)
+{
 
-    time_t time = ts->tv_sec;
+    time_t time = SCTIME_SECS(ts);
     struct tm local_tm;
     struct tm *timestamp = SCLocalTime(time, &local_tm);
     char buf[128] = {0};
@@ -240,15 +243,14 @@ static int LogCustomFormatTest01(void)
     tm.tm_wday = 1;
     tm.tm_yday = 13;
     tm.tm_isdst = 0;
-    time_t secs = mktime(&tm);
-    struct timeval ts = {secs, 0};
+    SCTime_t ts = SCTIME_FROM_SECS(mktime(&tm));
 
     MemBuffer *buffer = MemBufferCreateNew(62);
     if (!buffer) {
         return 0;
     }
 
-    LogCustomFormatWriteTimestamp(buffer, "", &ts);
+    LogCustomFormatWriteTimestamp(buffer, "", ts);
     /*
      * {buffer = "01/13/14-04:30:00", size = 62, offset = 17}
      */

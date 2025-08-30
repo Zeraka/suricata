@@ -21,8 +21,17 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_PARSE_H__
-#define __DETECT_PARSE_H__
+#ifndef SURICATA_DETECT_PARSE_H
+#define SURICATA_DETECT_PARSE_H
+
+#include "app-layer-protos.h"
+#include "detect-engine-register.h"
+// types from detect.h with only forward declarations for bindgen
+typedef struct DetectEngineCtx_ DetectEngineCtx;
+typedef struct Signature_ Signature;
+typedef struct SigMatchCtx_ SigMatchCtx;
+typedef struct SigMatch_ SigMatch;
+typedef struct SigMatchData_ SigMatchData;
 
 /** Flags to indicate if the Signature parsing must be done
 *   switching the source and dest (for ip addresses and ports)
@@ -39,25 +48,17 @@ enum {
     SIG_DIREC_DST
 };
 
-typedef struct DetectParseRegex_ {
-    pcre *regex;
-    pcre_extra *study;
-#ifdef PCRE_HAVE_JIT_EXEC
-    pcre_jit_stack *jit_stack;
-#endif
-    struct DetectParseRegex_ *next;
-} DetectParseRegex;
-
 /* prototypes */
+int SignatureInitDataBufferCheckExpand(Signature *s);
 Signature *SigAlloc(void);
 void SigFree(DetectEngineCtx *de_ctx, Signature *s);
 Signature *SigInit(DetectEngineCtx *, const char *sigstr);
-Signature *SigInitReal(DetectEngineCtx *, const char *);
 SigMatchData* SigMatchList2DataArray(SigMatch *head);
 void SigParseRegisterTests(void);
 Signature *DetectEngineAppendSig(DetectEngineCtx *, const char *);
+Signature *DetectFirewallRuleAppendNew(DetectEngineCtx *, const char *);
 
-void SigMatchAppendSMToList(Signature *, SigMatch *, int);
+SigMatch *SCSigMatchAppendSMToList(DetectEngineCtx *, Signature *, uint16_t, SigMatchCtx *, int);
 void SigMatchRemoveSMFromList(Signature *, SigMatch *, int);
 int SigMatchListSMBelongsTo(const Signature *, const SigMatch *);
 
@@ -75,7 +76,7 @@ bool SigMatchStrictEnabled(const enum DetectKeywordId id);
 const char *DetectListToHumanString(int list);
 const char *DetectListToString(int list);
 
-void SigTableApplyStrictCommandlineOption(const char *str);
+void SigTableApplyStrictCommandLineOption(const char *str);
 
 SigMatch *DetectGetLastSM(const Signature *);
 SigMatch *DetectGetLastSMFromMpmLists(const DetectEngineCtx *de_ctx, const Signature *s);
@@ -83,11 +84,19 @@ SigMatch *DetectGetLastSMFromLists(const Signature *s, ...);
 SigMatch *DetectGetLastSMByListPtr(const Signature *s, SigMatch *sm_list, ...);
 SigMatch *DetectGetLastSMByListId(const Signature *s, int list_id, ...);
 
-int DetectSignatureAddTransform(Signature *s, int transform, void *options);
-int WARN_UNUSED DetectSignatureSetAppProto(Signature *s, AppProto alproto);
+int WARN_UNUSED SCDetectSignatureSetAppProto(Signature *s, AppProto alproto);
+int WARN_UNUSED DetectSignatureSetMultiAppProto(Signature *s, const AppProto *alprotos);
 
 /* parse regex setup and free util funcs */
 
+#ifndef SURICATA_BINDGEN_H
+typedef struct DetectParseRegex {
+    pcre2_code *regex;
+    pcre2_match_context *context;
+    struct DetectParseRegex *next;
+} DetectParseRegex;
+
+DetectParseRegex *DetectSetupPCRE2(const char *parse_str, int opts);
 bool DetectSetupParseRegexesOpts(const char *parse_str, DetectParseRegex *parse_regex, int opts);
 void DetectSetupParseRegexes(const char *parse_str, DetectParseRegex *parse_regex);
 void DetectParseRegexAddToFreeList(DetectParseRegex *parse_regex);
@@ -95,15 +104,14 @@ void DetectParseFreeRegexes(void);
 void DetectParseFreeRegex(DetectParseRegex *r);
 
 /* parse regex exec */
-int DetectParsePcreExec(DetectParseRegex *parse_regex, const char *str,
-                   int start_offset, int options,
-                   int *ovector, int ovector_size);
-int DetectParsePcreExecLen(DetectParseRegex *parse_regex, const char *str,
-                   int str_len, int start_offset, int options,
-                   int *ovector, int ovector_size);
+int DetectParsePcreExec(DetectParseRegex *parse_regex, pcre2_match_data **match, const char *str,
+        int start_offset, int options);
+int SC_Pcre2SubstringCopy(
+        pcre2_match_data *match_data, uint32_t number, PCRE2_UCHAR *buffer, PCRE2_SIZE *bufflen);
+int SC_Pcre2SubstringGet(pcre2_match_data *match_data, uint32_t number, PCRE2_UCHAR **bufferptr,
+        PCRE2_SIZE *bufflen);
+#endif
 
-/* typical size of ovector */
-#define MAX_SUBSTRINGS 30
+void DetectRegisterAppLayerHookLists(void);
 
-#endif /* __DETECT_PARSE_H__ */
-
+#endif /* SURICATA_DETECT_PARSE_H */

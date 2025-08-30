@@ -25,8 +25,8 @@
 #include "source-pcap-file-helper.h"
 #include "queue.h"
 
-#ifndef __SOURCE_PCAP_FILE_DIRECTORY_HELPER_H__
-#define __SOURCE_PCAP_FILE_DIRECTORY_HELPER_H__
+#ifndef SURICATA_SOURCE_PCAP_FILE_DIRECTORY_HELPER_H
+#define SURICATA_SOURCE_PCAP_FILE_DIRECTORY_HELPER_H
 
 typedef struct PendingFile_
 {
@@ -44,7 +44,6 @@ typedef struct PcapFileDirectoryVars_
     PcapFileFileVars *current_file;
     bool should_loop;
     bool should_recurse;
-    uint8_t cur_dir_depth;
     time_t delay;
     time_t poll_interval;
 
@@ -83,4 +82,4 @@ TmEcode PcapDetermineDirectoryOrFile(char *filename, DIR **directory);
  */
 TmEcode PcapDirectoryDispatch(PcapFileDirectoryVars *ptv);
 
-#endif /* __SOURCE_PCAP_FILE_DIRECTORY_HELPER_H__ */
+#endif /* SURICATA_SOURCE_PCAP_FILE_DIRECTORY_HELPER_H */

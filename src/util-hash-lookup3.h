@@ -34,8 +34,8 @@ on 1 byte), but shoehorning those bytes into integers efficiently is messy.
 -------------------------------------------------------------------------------
 */
 
-#ifndef __UTIL_HASH_LOOKUP3_H__
-#define __UTIL_HASH_LOOKUP3_H__
+#ifndef SURICATA_UTIL_HASH_LOOKUP3_H
+#define SURICATA_UTIL_HASH_LOOKUP3_H
 
 #define hashsize(n) ((uint32_t)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
@@ -62,7 +62,11 @@ void hashlittle2(const void *key,       /* the key to hash */
                  uint32_t   *pc,        /* IN: primary initval, OUT: primary hash */
                  uint32_t   *pb);       /* IN: secondary initval, OUT: secondary hash */
 
+/* A variant of hashlittle2() that ensures avoids accesses beyond the last byte
+ * of the string, which will cause warnings from tools like Valgrind or Address
+ * Sanitizer. */
+void hashlittle2_safe(const void *key, size_t length, uint32_t *pc, uint32_t *pb);
+
 uint32_t hashbig( const void *key, size_t length, uint32_t initval);
 
-#endif /* __UTIL_HASH_LOOKUP3_H__ */
-
+#endif /* SURICATA_UTIL_HASH_LOOKUP3_H */

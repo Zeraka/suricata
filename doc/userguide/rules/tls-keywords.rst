@@ -11,15 +11,29 @@ Match TLS/SSL certificate Subject field.
 Examples::
 
   tls.cert_subject; content:"CN=*.googleusercontent.com"; isdataat:!1,relative;
-  tls.cert_subject; content:"google.com"; nocase; pcre:"/google.com$/";
+  tls.cert_subject; content:"google.com"; nocase; pcre:"/google\.com$/";
 
 ``tls.cert_subject`` is a 'sticky buffer'.
 
 ``tls.cert_subject`` can be used as ``fast_pattern``.
 
-``tls.cert_subject`` replaces the previous keyword name: ``tls_cert_subject``. You may continue
-to use the previous name, but it's recommended that rules be converted to use
-the new name.
+``tls.cert_subject`` supports multiple buffer matching, see :doc:`multi-buffer-matching`.
+
+tls.subject
+~~~~~~~~~~~
+
+Legacy keyword to match TLS/SSL certificate Subject field.
+
+example:
+
+::
+
+  tls.subject:"CN=*.googleusercontent.com"
+
+Case sensitive, can't use 'nocase', or other modifiers.
+
+**Note:** ``tls.cert_subject`` replaces the following legacy keywords: ``tls_cert_subject`` and ``tls.subject``. 
+It's recommended that rules be converted to use the new one.
 
 tls.cert_issuer
 ---------------
@@ -35,9 +49,21 @@ Examples::
 
 ``tls.cert_issuer`` can be used as ``fast_pattern``.
 
-``tls.cert_issuer`` replaces the previous keyword name: ``tls_cert_issuer``. You may continue
-to use the previous name, but it's recommended that rules be converted to use
-the new name.
+tls.issuerdn
+~~~~~~~~~~~~
+
+Legacy keyword to match TLS/SSL certificate IssuerDN field
+
+example:
+
+::
+
+  tls.issuerdn:!"CN=Google-Internet-Authority"
+
+Case sensitive, can't use 'nocase', or other modifiers.
+
+**Note:** ``tls.cert_issuer`` replaces the following legacy keywords: ``tls_cert_issuer`` and ``tls.issuerdn``. 
+It's recommended that rules be converted to use the new one.
 
 tls.cert_serial
 ---------------
@@ -95,6 +121,21 @@ Examples::
 to use the previous name, but it's recommended that rules be converted to use
 the new name.
 
+tls.subjectaltname
+------------------
+
+Match TLS/SSL Subject Alternative Name field.
+
+Examples::
+
+  tls.subjectaltname; content:"|73 75 72 69 63 61 74 61 2e 69 6f|";
+
+``tls.subjectaltname`` is a 'sticky buffer'.
+
+``tls.subjectaltname`` can be used as ``fast_pattern``.
+
+``tls.subjectaltname`` supports multiple buffer matching, see :doc:`multi-buffer-matching`.
+
 tls_cert_notbefore
 ------------------
 
@@ -150,6 +191,8 @@ Example::
 
 ``tls.certs`` can be used as ``fast_pattern``.
 
+``tls.certs`` supports multiple buffer matching, see :doc:`multi-buffer-matching`.
+
 tls.version
 -----------
 
@@ -186,38 +229,6 @@ Example::
   alert tls any any -> any any (msg:"match SSLv2 and SSLv3"; \
     ssl_version:sslv2,sslv3; sid:200031;)
 
-tls.subject
------------
-
-Match TLS/SSL certificate Subject field.
-
-example:
-
-
-::
-
-  tls.subject:"CN=*.googleusercontent.com"
-
-Case sensitive, can't use 'nocase'.
-
-Legacy keyword. ``tls.cert_subject`` is the replacement.
-
-tls.issuerdn
-------------
-
-match TLS/SSL certificate IssuerDN field
-
-example:
-
-
-::
-
-  tls.issuerdn:!"CN=Google-Internet-Authority"
-
-Case sensitive, can't use 'nocase'.
-
-Legacy keyword. ``tls.cert_issuer`` is the replacement.
-
 tls.fingerprint
 ---------------
 
@@ -237,7 +248,8 @@ The tls.fingerprint buffer is lower case so you must use lower case letters for 
 tls.store
 ---------
 
-store TLS/SSL certificate on disk
+store TLS/SSL certificate on disk.
+The location can be specified in the `output.tls-store.certs-log-dir` parameter of the yaml configuration file, cf :ref:`suricata-yaml-outputs-tls`..
 
 ssl_state
 ---------
@@ -246,5 +258,77 @@ The ``ssl_state`` keyword matches the state of the SSL connection. The possible 
 are ``client_hello``, ``server_hello``, ``client_keyx``, ``server_keyx`` and ``unknown``.
 You can specify several states with ``|`` (OR) to check for any of the specified states.
 
-Negation support is not available yet, see https://redmine.openinfosecfoundation.org/issues/1231
+tls.random
+----------
+
+Matches on the 32 bytes of the TLS random field from the client hello or server hello records.
+
+Example::
+
+  alert tls any any -> any any (msg:"TLS random test"; \
+    tls.random; content:"|9b ce 7a 5e 57 5d 77 02 07 c2 9d be 24 01 cc f0 5d cd e1 d2 a5 86 9c 4a 3e ee 38 db 55 1a d9 bc|"; sid: 200074;)
+
+``tls.random`` is a sticky buffer.
+
+tls.random_time
+---------------
+
+Matches on the first 4 bytes of the TLS random field from the client hello or server hello records.
+
+Example::
+
+  alert tls any any -> any any (msg:"TLS random_time test"; \
+    tls.random_time; content:"|9b ce 7a 5e|"; sid: 200075;)
+
+``tls.random_time`` is a sticky buffer.
+
+tls.random_bytes
+----------------
+
+Matches on the last 28 bytes of the TLS random field from the client hello or server hello records.
+
+Example::
+
+  alert tls any any -> any any (msg:"TLS random_bytes test"; \
+    tls.random_bytes; content:"|57 5d 77 02 07 c2 9d be 24 01 cc f0 5d cd e1 d2 a5 86 9c 4a 3e ee 38 db 55 1a d9 bc|"; sid: 200076;)
+
+``tls.random_bytes`` is a sticky buffer.
+
+tls.cert_chain_len
+------------------
+
+Matches on the TLS certificate chain length.
+
+tls.cert_chain_len uses an :ref:`unsigned 32-bit integer <rules-integer-keywords>`.
+
+tls.cert_chain_len supports `<, >, <>, !` and using an exact value.
+
+Example::
+
+  alert tls any any -> any any (msg:"cert chain exact value"; \
+ tls.cert_chain_len:1; classtype:misc-activity; sid:1; rev:1;)
+
+  alert tls any any -> any any (msg:"cert chain less than value"; \
+ tls.cert_chain_len:<2; classtype:misc-activity; sid:2; rev:1;)
+
+  alert tls any any -> any any (msg:"cert chain greater than value"; \
+ tls.cert_chain_len:>0; classtype:misc-activity; sid:2; rev:1;)
+
+  alert tls any any -> any any (msg:"cert chain greater than less than value";\
+ tls.cert_chain_len:0<>2; classtype:misc-activity; sid:3; rev:1;)
+
+  alert tls any any -> any any (msg:"cert chain not value"; \
+ tls.cert_chain_len:!2; classtype:misc-activity; sid:4; rev:1;)
+
+tls.alpn
+--------
+
+Matches on the ALPN buffers.
+
+Example::
+
+  alert tls any any -> any any (msg:"TLS ALPN test"; \
+    tls.alpn; content:"http/1.1"; sid:1;)
+
+``tls.alpn`` is a sticky buffer.
 

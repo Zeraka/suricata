@@ -1,4 +1,4 @@
-/* Copyright (C) 2018 Open Information Security Foundation
+/* Copyright (C) 2018-2021 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -23,23 +23,23 @@
  * LiveDevice wrapper around storage api
  */
 
-#ifndef __DEVICE_STORAGE_H__
-#define __DEVICE_STORAGE_H__
+#ifndef SURICATA_DEVICE_STORAGE_H
+#define SURICATA_DEVICE_STORAGE_H
 
-#include "util-storage.h"
 #include "util-device.h"
+
+typedef struct LiveDevStorageId_ {
+    int id;
+} LiveDevStorageId;
 
 unsigned int LiveDevStorageSize(void);
 
-void *LiveDevGetStorageById(LiveDevice *d, int id);
-int LiveDevSetStorageById(LiveDevice *d, int id, void *ptr);
-void *LiveDevAllocStorageById(LiveDevice *d, int id);
+void *LiveDevGetStorageById(LiveDevice *d, LiveDevStorageId id);
+int LiveDevSetStorageById(LiveDevice *d, LiveDevStorageId id, void *ptr);
 
-void LiveDevFreeStorageById(LiveDevice *d, int id);
 void LiveDevFreeStorage(LiveDevice *d);
 
-void RegisterLiveDevStorageTests(void);
+LiveDevStorageId LiveDevStorageRegister(const char *name, const unsigned int size,
+        void *(*Alloc)(unsigned int), void (*Free)(void *));
 
-int LiveDevStorageRegister(const char *name, const unsigned int size, void *(*Alloc)(unsigned int), void (*Free)(void *));
-
-#endif /* __DEVICE_STORAGE_H__ */
+#endif /* SURICATA_DEVICE_STORAGE_H */

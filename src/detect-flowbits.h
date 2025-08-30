@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,26 +22,27 @@
  *  \author Breno Silva <breno.silva@gmail.com>
  */
 
-#ifndef __DETECT_FLOWBITS_H__
-#define __DETECT_FLOWBITS_H__
+#ifndef SURICATA_DETECT_FLOWBITS_H
+#define SURICATA_DETECT_FLOWBITS_H
 
 #define DETECT_FLOWBITS_CMD_SET      0
 #define DETECT_FLOWBITS_CMD_TOGGLE   1
 #define DETECT_FLOWBITS_CMD_UNSET    2
 #define DETECT_FLOWBITS_CMD_ISNOTSET 3
 #define DETECT_FLOWBITS_CMD_ISSET    4
-#define DETECT_FLOWBITS_CMD_NOALERT  5
-#define DETECT_FLOWBITS_CMD_MAX      6
+#define DETECT_FLOWBITS_CMD_MAX      5
 
 typedef struct DetectFlowbitsData_ {
     uint32_t idx;
     uint8_t cmd;
     uint8_t or_list_size;
+    /** Flag to trigger post rule match prefilter following a 'set' match. */
+    bool post_rule_match_prefilter; /**< set/toggle command should trigger post-rule-match
+                                       "prefilter" */
     uint32_t *or_list;
 } DetectFlowbitsData;
 
 /* prototypes */
 void DetectFlowbitsRegister (void);
 
-#endif /* __DETECT_FLOWBITS_H__ */
-
+#endif /* SURICATA_DETECT_FLOWBITS_H */

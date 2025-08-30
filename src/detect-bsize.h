@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,12 +21,11 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_BSIZE_H__
-#define	__DETECT_BSIZE_H__
+#ifndef SURICATA_DETECT_BSIZE_H
+#define SURICATA_DETECT_BSIZE_H
 
-//bool DetectBsizeValidateContent(const Signature *s, int list, const char **);
-//void DetectBsizeApplyToContent(Signature *s, int list);
 void DetectBsizeRegister(void);
 int DetectBsizeMatch(const SigMatchCtx *ctx, const uint64_t buffer_size, bool eof);
+bool DetectBsizeValidateContentCallback(const Signature *s, const SignatureInitDataBuffer *);
 
-#endif	/* __DETECT_URILEN_H__ */
+#endif /* SURICATA_DETECT_BSIZE_H */

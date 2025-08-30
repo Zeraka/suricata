@@ -140,6 +140,9 @@ int ByteExtractUint64(uint64_t *res, int e, uint16_t len, const uint8_t *bytes)
     return ret;
 }
 
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
 int ByteExtractUint32(uint32_t *res, int e, uint16_t len, const uint8_t *bytes)
 {
     uint64_t i64;
@@ -182,7 +185,7 @@ int ByteExtractUint16(uint16_t *res, int e, uint16_t len, const uint8_t *bytes)
     return ret;
 }
 
-int ByteExtractString(uint64_t *res, int base, uint16_t len, const char *str, bool strict)
+int ByteExtractString(uint64_t *res, int base, size_t len, const char *str, bool strict)
 {
     const char *ptr = str;
     char *endptr = NULL;
@@ -224,19 +227,19 @@ int ByteExtractString(uint64_t *res, int base, uint16_t len, const char *str, bo
         return -1;
     }
     else if (strict && *endptr != '\0') {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "Extra characters following numeric value");
+        SCLogError("Extra characters following numeric value");
         return -1;
     }
 
-    return (endptr - ptr);
+    return (int)(endptr - ptr);
 }
 
-int ByteExtractStringUint64(uint64_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringUint64(uint64_t *res, int base, size_t len, const char *str)
 {
     return ByteExtractString(res, base, len, str, false);
 }
 
-int ByteExtractStringUint32(uint32_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringUint32(uint32_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -259,7 +262,7 @@ int ByteExtractStringUint32(uint32_t *res, int base, uint16_t len, const char *s
     return ret;
 }
 
-int ByteExtractStringUint16(uint16_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringUint16(uint16_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -282,7 +285,7 @@ int ByteExtractStringUint16(uint16_t *res, int base, uint16_t len, const char *s
     return ret;
 }
 
-int ByteExtractStringUint8(uint8_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringUint8(uint8_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -305,12 +308,12 @@ int ByteExtractStringUint8(uint8_t *res, int base, uint16_t len, const char *str
     return ret;
 }
 
-int StringParseUint64(uint64_t *res, int base, uint16_t len, const char *str)
+int StringParseUint64(uint64_t *res, int base, size_t len, const char *str)
 {
     return ByteExtractString(res, base, len, str, true);
 }
 
-int StringParseUint32(uint32_t *res, int base, uint16_t len, const char *str)
+int StringParseUint32(uint32_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -325,15 +328,19 @@ int StringParseUint32(uint32_t *res, int base, uint16_t len, const char *str)
     *res = (uint32_t)i64;
 
     if ((uint64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                "(%" PRIu64 " > %" PRIuMAX ")", i64, (uintmax_t)UINT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                i64, (uintmax_t)UINT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseUint16(uint16_t *res, int base, uint16_t len, const char *str)
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
+int StringParseUint16(uint16_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -348,15 +355,19 @@ int StringParseUint16(uint16_t *res, int base, uint16_t len, const char *str)
     *res = (uint16_t)i64;
 
     if ((uint64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                "(%" PRIu64 " > %" PRIuMAX ")", i64, (uintmax_t)USHRT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                i64, (uintmax_t)USHRT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseUint8(uint8_t *res, int base, uint16_t len, const char *str)
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
+int StringParseUint8(uint8_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
 
@@ -371,16 +382,17 @@ int StringParseUint8(uint8_t *res, int base, uint16_t len, const char *str)
     *res = (uint8_t)i64;
 
     if ((uint64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                "(%" PRIu64 " > %" PRIuMAX ")", i64, (uintmax_t)UCHAR_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                i64, (uintmax_t)UCHAR_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseU64RangeCheck(uint64_t *res, int base, uint16_t len, const char *str,
-                             uint64_t min, uint64_t max)
+int StringParseU64RangeCheck(
+        uint64_t *res, int base, size_t len, const char *str, uint64_t min, uint64_t max)
 {
     uint64_t u64;
 
@@ -398,8 +410,8 @@ int StringParseU64RangeCheck(uint64_t *res, int base, uint16_t len, const char *
     return ret;
 }
 
-int StringParseU32RangeCheck(uint32_t *res, int base, uint16_t len, const char *str,
-                             uint32_t min, uint32_t max)
+int StringParseU32RangeCheck(
+        uint32_t *res, int base, size_t len, const char *str, uint32_t min, uint32_t max)
 {
     uint64_t u64;
 
@@ -418,16 +430,17 @@ int StringParseU32RangeCheck(uint32_t *res, int base, uint16_t len, const char *
     }
 
     if ((uint64_t)(*res) != u64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIu64 " > %" PRIuMAX ")", u64, (uintmax_t)UINT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                u64, (uintmax_t)UINT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseU16RangeCheck(uint16_t *res, int base, uint16_t len, const char *str,
-                             uint16_t min, uint16_t max)
+int StringParseU16RangeCheck(
+        uint16_t *res, int base, size_t len, const char *str, uint16_t min, uint16_t max)
 {
     uint64_t u64;
 
@@ -446,16 +459,20 @@ int StringParseU16RangeCheck(uint16_t *res, int base, uint16_t len, const char *
     }
 
     if ((uint64_t)(*res) != u64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIu64 " > %" PRIuMAX ")", u64, (uintmax_t)USHRT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                u64, (uintmax_t)USHRT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseU8RangeCheck(uint8_t *res, int base, uint16_t len, const char *str,
-                            uint8_t min, uint8_t max)
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
+int StringParseU8RangeCheck(
+        uint8_t *res, int base, size_t len, const char *str, uint8_t min, uint8_t max)
 {
     uint64_t u64;
 
@@ -474,15 +491,16 @@ int StringParseU8RangeCheck(uint8_t *res, int base, uint16_t len, const char *st
     }
 
     if ((uint64_t)(*res) != u64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIu64 " > %" PRIuMAX ")", u64, (uintmax_t)UCHAR_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIu64 " > %" PRIuMAX ")",
+                u64, (uintmax_t)UCHAR_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int ByteExtractStringSigned(int64_t *res, int base, uint16_t len, const char *str, bool strict)
+int ByteExtractStringSigned(int64_t *res, int base, size_t len, const char *str, bool strict)
 {
     const char *ptr = str;
     char *endptr;
@@ -497,7 +515,7 @@ int ByteExtractStringSigned(int64_t *res, int base, uint16_t len, const char *st
     char strbuf[24];
 
     if (len > 23) {
-        SCLogError(SC_ERR_ARG_LEN_LONG, "len too large (23 max)");
+        SCLogError("len too large (23 max)");
         return -1;
     }
 
@@ -512,28 +530,28 @@ int ByteExtractStringSigned(int64_t *res, int base, uint16_t len, const char *st
     *res = strtoll(ptr, &endptr, base);
 
     if (errno == ERANGE) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range");
+        SCLogError("Numeric value out of range");
         return -1;
     } else if (endptr == str) {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "Invalid numeric value");
+        SCLogError("Invalid numeric value");
         return -1;
     }
     else if (strict && len && *endptr != '\0') {
-        SCLogError(SC_ERR_INVALID_NUMERIC_VALUE, "Extra characters following numeric value");
+        SCLogError("Extra characters following numeric value");
         return -1;
     }
 
     //fprintf(stderr, "ByteExtractStringSigned: Extracted base %d: 0x%" PRIx64 "\n", base, *res);
 
-    return (endptr - ptr);
+    return (int)(endptr - ptr);
 }
 
-int ByteExtractStringInt64(int64_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringInt64(int64_t *res, int base, size_t len, const char *str)
 {
     return ByteExtractStringSigned(res, base, len, str, false);
 }
 
-int ByteExtractStringInt32(int32_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringInt32(int32_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -549,15 +567,16 @@ int ByteExtractStringInt32(int32_t *res, int base, uint16_t len, const char *str
     *res = (int32_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)INT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)INT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int ByteExtractStringInt16(int16_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringInt16(int16_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -573,15 +592,16 @@ int ByteExtractStringInt16(int16_t *res, int base, uint16_t len, const char *str
     *res = (int16_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)SHRT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)SHRT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int ByteExtractStringInt8(int8_t *res, int base, uint16_t len, const char *str)
+int ByteExtractStringInt8(int8_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -597,20 +617,21 @@ int ByteExtractStringInt8(int8_t *res, int base, uint16_t len, const char *str)
     *res = (int8_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)CHAR_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)CHAR_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseInt64(int64_t *res, int base, uint16_t len, const char *str)
+int StringParseInt64(int64_t *res, int base, size_t len, const char *str)
 {
     return ByteExtractStringSigned(res, base, len, str, true);
 }
 
-int StringParseInt32(int32_t *res, int base, uint16_t len, const char *str)
+int StringParseInt32(int32_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -626,15 +647,16 @@ int StringParseInt32(int32_t *res, int base, uint16_t len, const char *str)
     *res = (int32_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)INT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)INT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseInt16(int16_t *res, int base, uint16_t len, const char *str)
+int StringParseInt16(int16_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -650,15 +672,16 @@ int StringParseInt16(int16_t *res, int base, uint16_t len, const char *str)
     *res = (int16_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)SHRT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)SHRT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseInt8(int8_t *res, int base, uint16_t len, const char *str)
+int StringParseInt8(int8_t *res, int base, size_t len, const char *str)
 {
     int64_t i64;
     int ret;
@@ -674,16 +697,17 @@ int StringParseInt8(int8_t *res, int base, uint16_t len, const char *str)
     *res = (int8_t)i64;
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)CHAR_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)CHAR_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseI64RangeCheck(int64_t *res, int base, uint16_t len, const char *str,
-                             int64_t min, int64_t max)
+int StringParseI64RangeCheck(
+        int64_t *res, int base, size_t len, const char *str, int64_t min, int64_t max)
 {
     int64_t i64;
     int ret;
@@ -701,8 +725,8 @@ int StringParseI64RangeCheck(int64_t *res, int base, uint16_t len, const char *s
     return ret;
 }
 
-int StringParseI32RangeCheck(int32_t *res, int base, uint16_t len, const char *str,
-                             int32_t min, int32_t max)
+int StringParseI32RangeCheck(
+        int32_t *res, int base, size_t len, const char *str, int32_t min, int32_t max)
 {
     int64_t i64;
     int ret;
@@ -722,16 +746,17 @@ int StringParseI32RangeCheck(int32_t *res, int base, uint16_t len, const char *s
     }
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)INT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)INT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseI16RangeCheck(int16_t *res, int base, uint16_t len, const char *str,
-                             int16_t min, int16_t max)
+int StringParseI16RangeCheck(
+        int16_t *res, int base, size_t len, const char *str, int16_t min, int16_t max)
 {
     int64_t i64;
     int ret;
@@ -751,16 +776,17 @@ int StringParseI16RangeCheck(int16_t *res, int base, uint16_t len, const char *s
     }
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)SHRT_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)SHRT_MAX);
         return -1;
     }
 
     return ret;
 }
 
-int StringParseI8RangeCheck(int8_t *res, int base, uint16_t len, const char *str,
-                            int8_t min, int8_t max)
+int StringParseI8RangeCheck(
+        int8_t *res, int base, size_t len, const char *str, int8_t min, int8_t max)
 {
     int64_t i64;
     int ret;
@@ -780,12 +806,43 @@ int StringParseI8RangeCheck(int8_t *res, int base, uint16_t len, const char *str
     }
 
     if ((int64_t)(*res) != i64) {
-        SCLogError(SC_ERR_NUMERIC_VALUE_ERANGE, "Numeric value out of range "
-                   "(%" PRIi64 " > %" PRIiMAX ")\n", i64, (intmax_t)CHAR_MAX);
+        SCLogError("Numeric value out of range "
+                   "(%" PRIi64 " > %" PRIiMAX ")\n",
+                i64, (intmax_t)CHAR_MAX);
         return -1;
     }
 
     return ret;
+}
+
+int HexToRaw(const uint8_t *in, size_t ins, uint8_t *out, size_t outs)
+{
+    if (ins < 2)
+        return -1;
+    if (ins % 2 != 0)
+        return -1;
+    if (outs != ins / 2)
+        return -1;
+
+    uint8_t hash[outs];
+    memset(hash, 0, outs);
+    size_t i, x;
+    for (x = 0, i = 0; i < ins; i += 2, x++) {
+        char buf[3] = { 0, 0, 0 };
+        buf[0] = in[i];
+        buf[1] = in[i + 1];
+
+        long value = strtol(buf, NULL, 16);
+        if (value >= 0 && value <= 255)
+            hash[x] = (uint8_t)value;
+        else {
+            SCLogError("hash byte out of range %ld", value);
+            return -1;
+        }
+    }
+
+    memcpy(out, hash, outs);
+    return 0;
 }
 
 /* UNITTESTS */
@@ -877,10 +934,10 @@ static int ByteTest06 (void)
 
 static int ByteTest07 (void)
 {
-    const char *str = "1234567890";
+    const char str[] = "1234567890";
     uint64_t val = 1234567890;
     uint64_t i64 = 0xbfbfbfbfbfbfbfbfULL;
-    int ret = ByteExtractStringUint64(&i64, 10, strlen(str), str);
+    int ret = ByteExtractStringUint64(&i64, 10, sizeof(str) - 1, str);
 
     if ((ret == 10) && (i64 == val)) {
         return 1;
@@ -891,10 +948,10 @@ static int ByteTest07 (void)
 
 static int ByteTest08 (void)
 {
-    const char *str = "1234567890";
+    const char str[] = "1234567890";
     uint32_t val = 1234567890;
     uint32_t i32 = 0xbfbfbfbf;
-    int ret = ByteExtractStringUint32(&i32, 10, strlen(str), str);
+    int ret = ByteExtractStringUint32(&i32, 10, sizeof(str) - 1, str);
 
     if ((ret == 10) && (i32 == val)) {
         return 1;
@@ -905,10 +962,10 @@ static int ByteTest08 (void)
 
 static int ByteTest09 (void)
 {
-    const char *str = "12345";
+    const char str[] = "12345";
     uint16_t val = 12345;
     uint16_t i16 = 0xbfbf;
-    int ret = ByteExtractStringUint16(&i16, 10, strlen(str), str);
+    int ret = ByteExtractStringUint16(&i16, 10, sizeof(str) - 1, str);
 
     if ((ret == 5) && (i16 == val)) {
         return 1;
@@ -919,10 +976,10 @@ static int ByteTest09 (void)
 
 static int ByteTest10 (void)
 {
-    const char *str = "123";
+    const char str[] = "123";
     uint8_t val = 123;
     uint8_t i8 = 0xbf;
-    int ret = ByteExtractStringUint8(&i8, 10, strlen(str), str);
+    int ret = ByteExtractStringUint8(&i8, 10, sizeof(str) - 1, str);
 
     if ((ret == 3) && (i8 == val)) {
         return 1;
@@ -933,10 +990,10 @@ static int ByteTest10 (void)
 
 static int ByteTest11 (void)
 {
-    const char *str = "-1234567890";
+    const char str[] = "-1234567890";
     int64_t val = -1234567890;
     int64_t i64 = 0xbfbfbfbfbfbfbfbfULL;
-    int ret = ByteExtractStringInt64(&i64, 10, strlen(str), str);
+    int ret = ByteExtractStringInt64(&i64, 10, sizeof(str) - 1, str);
 
     if ((ret == 11) && (i64 == val)) {
         return 1;
@@ -947,10 +1004,10 @@ static int ByteTest11 (void)
 
 static int ByteTest12 (void)
 {
-    const char *str = "-1234567890";
+    const char str[] = "-1234567890";
     int32_t val = -1234567890;
     int32_t i32 = 0xbfbfbfbf;
-    int ret = ByteExtractStringInt32(&i32, 10, strlen(str), str);
+    int ret = ByteExtractStringInt32(&i32, 10, sizeof(str) - 1, str);
 
     if ((ret == 11) && (i32 == val)) {
         return 1;
@@ -961,10 +1018,10 @@ static int ByteTest12 (void)
 
 static int ByteTest13 (void)
 {
-    const char *str = "-12345";
+    const char str[] = "-12345";
     int16_t val = -12345;
     int16_t i16 = 0xbfbf;
-    int ret = ByteExtractStringInt16(&i16, 10, strlen(str), str);
+    int ret = ByteExtractStringInt16(&i16, 10, sizeof(str) - 1, str);
 
     if ((ret == 6) && (i16 == val)) {
         return 1;
@@ -975,10 +1032,10 @@ static int ByteTest13 (void)
 
 static int ByteTest14 (void)
 {
-    const char *str = "-123";
+    const char str[] = "-123";
     int8_t val = -123;
     int8_t i8 = 0xbf;
-    int ret = ByteExtractStringInt8(&i8, 10, strlen(str), str);
+    int ret = ByteExtractStringInt8(&i8, 10, sizeof(str) - 1, str);
 
     if ((ret == 4) && (i8 == val)) {
         return 1;
@@ -990,11 +1047,11 @@ static int ByteTest14 (void)
 /** \test max u32 value */
 static int ByteTest15 (void)
 {
-    const char *str = "4294967295";
+    const char str[] = "4294967295";
     uint32_t val = 4294967295UL;
     uint32_t u32 = 0xffffffff;
 
-    int ret = ByteExtractStringUint32(&u32, 10, strlen(str), str);
+    int ret = ByteExtractStringUint32(&u32, 10, sizeof(str) - 1, str);
     if ((ret == 10) && (u32 == val)) {
         return 1;
     }
@@ -1005,10 +1062,10 @@ static int ByteTest15 (void)
 /** \test max u32 value + 1 */
 static int ByteTest16 (void)
 {
-    const char *str = "4294967296";
+    const char str[] = "4294967296";
     uint32_t u32 = 0;
 
-    int ret = ByteExtractStringUint32(&u32, 10, strlen(str), str);
+    int ret = ByteExtractStringUint32(&u32, 10, sizeof(str) - 1, str);
     if (ret != 0) {
         return 1;
     }

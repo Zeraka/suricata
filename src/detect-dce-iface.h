@@ -15,11 +15,9 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DETECT_DCE_IFACE_H__
-#define __DETECT_DCE_IFACE_H__
-
-#include "app-layer-dcerpc-common.h"
+#ifndef SURICATA_DETECT_DCE_IFACE_H
+#define SURICATA_DETECT_DCE_IFACE_H
 
 void DetectDceIfaceRegister(void);
 
-#endif /* __DETECT_DCE_IFACE_H__ */
+#endif /* SURICATA_DETECT_DCE_IFACE_H */
